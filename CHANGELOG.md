@@ -45,10 +45,13 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `/usr/local`) and `DESTDIR` (for staged packaging). `make rebuild`
   added as a `--target chimera` shortcut that skips `make deps`.
 - CI workflow (`.github/workflows/ci.yml`): builds + smokes on
-  `macos-14` (arm64, Metal) and `ubuntu-latest` (x86_64, CPU) on every
-  push and PR to `main`. Uploads per-platform binaries +
-  `.sha256` companion files as workflow artifacts. Caches
-  `thirdparty/` keyed on `scripts/manage.py` + top-level CMake files.
+  `macos-14` (arm64, Metal), `ubuntu-latest` (x86_64, CPU), and
+  `windows-latest` (x86_64, MSVC; marked `continue-on-error: true` while
+  the path is shaken out) on every push and PR to `main`. Uploads
+  per-platform binaries + `.sha256` companion files as workflow
+  artifacts. Caches `thirdparty/` keyed on `scripts/manage.py` +
+  top-level CMake files. Default shell is bash on every leg so the
+  Makefile / `scripts/test.sh` work uniformly via git-bash on Windows.
 - Release workflow (`.github/workflows/release.yml`): triggered on
   `v*` tags (or manual `workflow_dispatch`). Rebuilds the same matrix
   and attaches `chimera-macos-arm64`, `chimera-linux-x86_64`, plus

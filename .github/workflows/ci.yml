@@ -11,6 +11,10 @@ jobs:
   build:
     name: build (${{ matrix.os }}, ${{ matrix.backend }})
     runs-on: ${{ matrix.os }}
+    # Don't block macOS/Linux on Windows -- the Windows path is new and
+    # likely to surface issues (OpenSSL, MSVC quirks, manage.py shell
+    # assumptions). Flip experimental off once Windows is reliably green.
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -18,15 +22,24 @@ jobs:
           - os: macos-14        # Apple silicon
             backend: metal
             artifact: chimera-macos-arm64
+            experimental: false
           - os: ubuntu-latest   # x86_64
             backend: cpu
             artifact: chimera-linux-x86_64
+            experimental: false
+          - os: windows-latest  # x86_64 MSVC
+            backend: cpu
+            artifact: chimera-windows-x86_64.exe
+            experimental: true
     env:
-      # Linux build needs ggml's BLAS off (no system OpenBLAS guaranteed) and
-      # OpenMP off (libgomp may be missing in minimal images). Both targets
-      # build static, so MACOSX_DEPLOYMENT_TARGET keeps the macOS binary
-      # portable to the runner's minimum supported OS.
+      # macOS binary stays portable to this minimum OS.
       MACOSX_DEPLOYMENT_TARGET: "12.0"
+    # Default to bash on every leg so Makefile + scripts/test.sh work
+    # uniformly. windows-latest ships git-bash; this avoids per-OS shell
+    # forks for build / smoke / stage-artifact steps.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +56,21 @@ jobs:
           # Xcode CLT ships clang, cmake-via-brew, git. cmake is usually
           # pre-installed on GitHub runners; install only if absent.
           if ! command -v cmake >/dev/null 2>&1; then brew install cmake; fi
+
+      - name: install windows deps
+        if: runner.os == 'Windows'
+        run: |
+          # windows-latest preinstalls cmake, git, python, MSVC, perl,
+          # OpenSSL, and a git-bash shell. We rely on the runner-provided
+          # OpenSSL for llama.cpp's LLAMA_OPENSSL=ON. If the build fails
+          # finding it, add `choco install openssl -y` here.
+          cmake --version
+          python --version
+          where cl.exe || true
+
+      - name: setup msvc
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: cache thirdparty
         uses: actions/cache@v4
@@ -61,7 +89,19 @@ jobs:
       - name: stage artifact
         run: |
           mkdir -p dist
-          cp build/chimera "dist/${{ matrix.artifact }}"
+          # MSVC produces build/Release/chimera.exe; everywhere else it's
+          # build/chimera. Probe and copy whichever exists.
+          if [[ -f build/chimera ]]; then
+            cp build/chimera "dist/${{ matrix.artifact }}"
+          elif [[ -f build/Release/chimera.exe ]]; then
+            cp build/Release/chimera.exe "dist/${{ matrix.artifact }}"
+          elif [[ -f build/chimera.exe ]]; then
+            cp build/chimera.exe "dist/${{ matrix.artifact }}"
+          else
+            echo "could not locate built chimera binary" >&2
+            ls -la build/ build/Release/ 2>&1 || true
+            exit 1
+          fi
           (cd dist && \
             (sha256sum "${{ matrix.artifact }}" 2>/dev/null || shasum -a 256 "${{ matrix.artifact }}") \
             > "${{ matrix.artifact }}.sha256")
