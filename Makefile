@@ -1,4 +1,4 @@
-.PHONY: deps build clean reset
+.PHONY: deps build clean reset test smoke
 
 PYTHON ?= python3
 BUILD_DIR ?= build
@@ -9,6 +9,12 @@ build: deps
 
 deps:
 	@SD_USE_VENDORED_GGML=0 $(PYTHON) scripts/manage.py build --all --deps-only --sd-shared-ggml
+
+test:
+	@scripts/test.sh
+
+smoke:
+	@scripts/test.sh --smoke
 
 clean:
 	@rm -rf $(BUILD_DIR)

@@ -1,6 +1,9 @@
 #pragma once
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 
 // Version strings. Overridden at compile time via -DCHIMERA_*_VERSION="..."
@@ -69,3 +72,18 @@ void chimera_silence_whisper_log();
 void chimera_restore_whisper_log();
 void chimera_silence_sd_log();
 void chimera_restore_sd_log();
+
+// Shared utility helpers, inlined here so all three TUs (chimera.cpp,
+// chimera_whisper.cpp, chimera_sd.cpp) get one definition without needing
+// a separate .cpp -- and without re-introducing the ggml.h collision.
+
+[[noreturn]] inline void fail(const std::string & message) {
+    throw std::runtime_error(message);
+}
+
+inline std::string trim(std::string value) {
+    auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}

@@ -5,7 +5,32 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `make test` / `make smoke` targets backed by `scripts/test.sh`. Smoke
+  tier exercises `--version`, `--help` on the root and every subcommand,
+  and confirms that `gen` without `-m` exits non-zero. End-to-end tier
+  runs `gen` (Llama-3.2-1B), `whisper` (ggml-base.en + whisper.cpp's
+  bundled `jfk.wav`), and `sd` (sd_xl_turbo) when those model files are
+  present under `models/`; missing models are reported as SKIP, not FAIL.
+- `REVIEW.md`: architecture / feature / usability / best-practices
+  review of the 0.1.0 baseline.
+
+### Fixed
+
+- `whisper` crashed with `error: vector` when `--threads` was left at
+  its default of `-1`. The value was forwarded to `params.n_threads`,
+  which whisper.cpp then cast to `size_t` to size an internal
+  `std::vector`, triggering `std::length_error("vector")`. Now leave
+  `params.n_threads` at `whisper_full_default_params`'s value unless
+  the user passed a positive override.
+
 ### Changed
+
+- `fail()` and `trim()` were duplicated across `chimera.cpp`,
+  `chimera_whisper.cpp`, and `chimera_sd.cpp`. Pulled into `chimera.h`
+  as inline helpers so all three TUs share one definition. The helpers
+  don't pull in `ggml.h`, so the three-TU isolation is preserved.
 
 - `scripts/manage.py` trimmed of cyllama-specific code (wheel building,
   Cython artifact cleanup, `profile` / `bench` / `bump` / `bins` /

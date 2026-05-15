@@ -41,10 +41,6 @@ struct LlamaContextDeleter {
 using LlamaModelPtr = std::unique_ptr<llama_model, LlamaModelDeleter>;
 using LlamaContextPtr = std::unique_ptr<llama_context, LlamaContextDeleter>;
 
-[[noreturn]] void fail(const std::string & message) {
-    throw std::runtime_error(message);
-}
-
 // CLI11's default formatter pads section breaks with double blank lines.
 // This trims make_usage's trailing "\n\n" down to "\n", since the next
 // section (OPTIONS / SUBCOMMANDS) already prepends its own '\n'.
@@ -73,13 +69,6 @@ void restore_default_logging() {
     ggml_log_set(nullptr, nullptr);
     chimera_restore_whisper_log();
     chimera_restore_sd_log();
-}
-
-std::string trim(std::string value) {
-    auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
-    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
-    return value;
 }
 
 std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string & text, bool add_special, bool parse_special) {

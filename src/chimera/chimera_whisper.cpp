@@ -41,17 +41,6 @@ struct WhisperContextDeleter {
 
 using WhisperContextPtr = std::unique_ptr<whisper_context, WhisperContextDeleter>;
 
-[[noreturn]] void fail(const std::string & message) {
-    throw std::runtime_error(message);
-}
-
-std::string trim(std::string value) {
-    auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
-    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
-    return value;
-}
-
 template <typename T>
 T read_le(std::istream & in) {
     T value {};
@@ -253,7 +242,13 @@ int command_whisper(const WhisperOptions & opts) {
     }
 
     whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    params.n_threads = opts.threads;
+    // opts.threads defaults to -1 ("auto"); whisper.cpp would then size a
+    // std::vector(n_threads) and throw std::length_error("vector"). Leave
+    // the default from whisper_full_default_params alone unless the user
+    // passed a positive value.
+    if (opts.threads > 0) {
+        params.n_threads = opts.threads;
+    }
     params.translate = opts.translate;
     params.no_context = opts.no_context;
     params.no_timestamps = !opts.timestamps;

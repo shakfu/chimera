@@ -31,10 +31,6 @@ struct SdContextDeleter {
 
 using SdContextPtr = std::unique_ptr<sd_ctx_t, SdContextDeleter>;
 
-[[noreturn]] void fail(const std::string & message) {
-    throw std::runtime_error(message);
-}
-
 void sd_log_callback(enum sd_log_level_t level, const char * text, void * user_data) {
     (void) user_data;
     if (level >= SD_LOG_WARN) {
