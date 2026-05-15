@@ -205,6 +205,20 @@ else()
     list(APPEND SYSTEM_LIBS kernel32 user32 advapi32)
 endif()
 
+# OpenMP: ggml-cpu's CMake enables OpenMP by default when the compiler
+# supports it. On Linux + gcc that means libgomp symbols (GOMP_barrier,
+# GOMP_parallel, omp_get_thread_num, ...) end up in libggml-cpu.a, and
+# the final chimera link needs the runtime. macOS / Apple clang has no
+# OpenMP by default so find_package fails silently and ggml builds
+# without OpenMP -- nothing to link.
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+    message(STATUS "OpenMP:                 found (${OpenMP_CXX_VERSION})")
+    list(APPEND SYSTEM_LIBS OpenMP::OpenMP_CXX)
+else()
+    message(STATUS "OpenMP:                 not found (ok on macOS / Apple clang)")
+endif()
+
 if(GGML_METAL)
     find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
     find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
