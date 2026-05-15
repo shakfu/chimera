@@ -24,25 +24,29 @@ Forward-looking work for chimera. Loosely prioritized.
 
 ## Features
 
-- [ ] `embed` subcommand — emit embedding vectors for one or more inputs.
-- [ ] `tokenize` subcommand — debug helper for prompt tokenization.
-- [ ] Streaming output for `whisper` (currently buffered until completion).
-- [ ] Per-turn sampler state in `chat` (currently the sampler is rebuilt
-      every turn; persistent state would improve coherence).
-- [ ] `--system-prompt-file` for `chat`.
-- [ ] Image-to-image and inpainting modes for `sd`.
-- [ ] Multimodal (`mtmd`) image input for `gen` / `chat` — the static lib
-      is already linked.
+- [x] `embed` subcommand — emit embedding vectors for one or more inputs.
+- [x] `tokenize` subcommand — debug helper for prompt tokenization.
+- [x] Streaming output for `whisper` (segment-callback driven).
+- [x] Per-turn sampler state in `chat` (sampler + KV cache now persistent
+      across turns).
+- [x] `--system-prompt-file` for `chat`.
+- [x] Image-to-image and inpainting modes for `sd`.
+- [ ] Multimodal (`mtmd`) image input for `gen` / `chat`. Blocked on
+      `stbi_load` symbol clash between `libmtmd.a` and our `stb_impl.cpp`
+      once any `mtmd_helper_*` is referenced. Resolve by dropping
+      `STB_IMAGE_IMPLEMENTATION` from `stb_impl.cpp` and relying on
+      libmtmd's copy (couples chimera_sd's image read to mtmd, which is
+      acceptable if mtmd is always linked). Then add `--mmproj` + repeated
+      `--image` flags and route through `mtmd_helper_eval_chunks`.
 
 ## Quality
 
 - [ ] Replace ad-hoc WAV parser in `chimera_whisper.cpp` with a real one
       (currently rejects anything that isn't 16-bit PCM mono).
-- [ ] Exit codes: distinguish parse errors, model-load failures, and
-      generation failures.
+- [x] Exit codes: distinguish parse errors, model-load failures, and
+      generation failures (`ExitCode` enum + `ChimeraError`).
 - [ ] Document the model formats each subcommand accepts.
-- [ ] Add a `--version` flag that reports the bundled llama.cpp /
-      whisper.cpp / sd.cpp commits.
+- [x] `--version` reports bundled llama.cpp / whisper.cpp / sd.cpp pins.
 
 ## Documentation
 

@@ -57,6 +57,8 @@ run "chimera --version"          "$CHIMERA" --version
 run "chimera --help"             "$CHIMERA" --help
 run "gen --help"                 "$CHIMERA" gen --help
 run "chat --help"                "$CHIMERA" chat --help
+run "tokenize --help"            "$CHIMERA" tokenize --help
+run "embed --help"               "$CHIMERA" embed --help
 run "whisper --help"             "$CHIMERA" whisper --help
 run "sd --help"                  "$CHIMERA" sd --help
 
@@ -68,6 +70,32 @@ if "$CHIMERA" gen -p hi >/dev/null 2>&1; then
 else
     printf "  PASS  %s\n" "gen without -m exits non-zero"
     pass=$((pass + 1))
+fi
+
+# Structured exit codes: 2 = BadInput (missing prompt + prompt-file).
+GEN_MODEL_CHECK="$REPO_ROOT/models/Llama-3.2-1B-Instruct-Q8_0.gguf"
+if [[ -f "$GEN_MODEL_CHECK" ]]; then
+    "$CHIMERA" gen -m "$GEN_MODEL_CHECK" >/dev/null 2>&1
+    code=$?
+    if [[ $code -eq 2 ]]; then
+        printf "  PASS  %s\n" "gen without prompt exits 2 (BadInput)"
+        pass=$((pass + 1))
+    else
+        printf "  FAIL  %s (got %d, want 2)\n" "gen without prompt exits 2" "$code"
+        fail=$((fail + 1))
+        failed_names+=("gen-bad-input-exit")
+    fi
+fi
+# Structured exit codes: 3 = Load (model not found).
+"$CHIMERA" gen -m /no/such/model.gguf -p hi >/dev/null 2>&1
+code=$?
+if [[ $code -eq 3 ]]; then
+    printf "  PASS  %s\n" "gen with missing model exits 3 (Load)"
+    pass=$((pass + 1))
+else
+    printf "  FAIL  %s (got %d, want 3)\n" "gen missing-model exit" "$code"
+    fail=$((fail + 1))
+    failed_names+=("gen-load-exit")
 fi
 
 if [[ $SMOKE_ONLY -eq 1 ]]; then
@@ -83,8 +111,34 @@ echo "== end-to-end =="
 GEN_MODEL="$MODELS/Llama-3.2-1B-Instruct-Q8_0.gguf"
 if [[ -f "$GEN_MODEL" ]]; then
     run "gen Llama-3.2-1B"        "$CHIMERA" gen -m "$GEN_MODEL" -p "Hello" -n 8
+    # tokenize uses the same vocab; runs in seconds.
+    run "tokenize Llama-3.2-1B"   "$CHIMERA" tokenize -m "$GEN_MODEL" -p "hello world"
+    # prompt-file (stdin)
+    if echo "Hi" | "$CHIMERA" gen -m "$GEN_MODEL" -f - -n 4 >/dev/null 2>&1; then
+        printf "  PASS  %s\n" "gen --prompt-file - (stdin)"
+        pass=$((pass + 1))
+    else
+        printf "  FAIL  %s\n" "gen --prompt-file - (stdin)"
+        fail=$((fail + 1))
+        failed_names+=("gen-prompt-file-stdin")
+    fi
 else
     skip_test "gen" "missing $GEN_MODEL"
+fi
+
+# embed: needs a true embedding model. Prefer bge-small / gte-small.
+EMBED_MODEL=""
+for candidate in bge-small-en-v1.5-q8_0.gguf gte-small-q8_0.gguf; do
+    if [[ -f "$MODELS/$candidate" ]]; then
+        EMBED_MODEL="$MODELS/$candidate"
+        break
+    fi
+done
+if [[ -n "$EMBED_MODEL" ]]; then
+    run "embed $(basename "$EMBED_MODEL")" \
+        "$CHIMERA" embed -m "$EMBED_MODEL" -p "a quick brown fox"
+else
+    skip_test "embed" "no embedding model under $MODELS/"
 fi
 
 # whisper: needs both a ggml model and a WAV. jfk.wav ships with whisper.cpp.
@@ -120,9 +174,47 @@ if [[ -n "$SD_MODEL" ]]; then
         fail=$((fail + 1))
         failed_names+=("sd")
     fi
+    # img2img: round-trip the just-produced image. Verifies the encode path
+    # (vae_decode_only=false) and CLI plumbing for --init-image / --strength.
+    if [[ -s "$SD_OUT" ]]; then
+        SD_OUT2="$(mktemp -t chimera-sd2-XXXXXX).png"
+        if "$CHIMERA" sd -m "$SD_MODEL" -p "a blue cube" \
+            --init-image "$SD_OUT" --strength 0.6 \
+            -o "$SD_OUT2" -W 256 -H 256 -s 2 >/dev/null 2>&1 \
+            && [[ -s "$SD_OUT2" ]]; then
+            printf "  PASS  %s\n" "sd img2img round-trip"
+            pass=$((pass + 1))
+        else
+            printf "  FAIL  %s\n" "sd img2img round-trip"
+            fail=$((fail + 1))
+            failed_names+=("sd-img2img")
+        fi
+        rm -f "$SD_OUT2"
+    fi
     rm -f "$SD_OUT"
 else
     skip_test "sd" "no diffusion model under $MODELS/"
+fi
+
+# chat: verify the persistent KV cache propagates information across turns.
+# Use a unique nonsense word that's very unlikely to appear by chance, so
+# the test detects real cross-turn recall rather than a generic guess.
+# Strip whitespace + lowercase the reply to tolerate the small model's
+# tendency to render answers character-by-character on separate lines.
+if [[ -f "$GEN_MODEL" ]]; then
+    CHAT_REPLY="$(printf "my secret password is zephyrine.\nrepeat my secret password exactly.\n/exit\n" | \
+        "$CHIMERA" chat -m "$GEN_MODEL" -n 32 2>/dev/null || true)"
+    # collapse all whitespace, lowercase
+    normalized="$(printf '%s' "$CHAT_REPLY" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    if printf '%s' "$normalized" | grep -q 'zephyrine'; then
+        printf "  PASS  %s\n" "chat persistent KV cache (recalls 'zephyrine')"
+        pass=$((pass + 1))
+    else
+        printf "  FAIL  %s\n" "chat persistent KV cache"
+        printf "        reply: %s\n" "$CHAT_REPLY"
+        fail=$((fail + 1))
+        failed_names+=("chat-kv-cache")
+    fi
 fi
 
 echo

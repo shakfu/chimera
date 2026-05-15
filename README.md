@@ -37,8 +37,28 @@ This will:
 Output: `build/chimera`.
 
 Run `make deps` alone if you just want to (re)build the third-party libs, or
-re-run `cmake --build build --target chimera -j` after touching only chimera
-source.
+`make rebuild` after touching only chimera source.
+
+## Install
+
+```bash
+make install                       # /usr/local/bin/chimera (may need sudo)
+make install PREFIX=$HOME/.local   # ~/.local/bin/chimera
+make install DESTDIR=/tmp/stage PREFIX=/usr   # for packaging
+```
+
+`make uninstall` removes the binary from the same `$PREFIX/bin/`.
+
+## Test
+
+```bash
+make smoke    # CLI plumbing only -- no model files needed
+make test     # smoke + end-to-end runs gated on models/ presence
+```
+
+`scripts/test.sh` skips end-to-end checks when the matching model file is
+absent (see the script for the lookup paths), so a fresh clone reports
+SKIP rather than FAIL.
 
 ### Backends
 

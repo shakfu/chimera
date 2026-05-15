@@ -227,9 +227,40 @@ std::string format_timestamp_10ms(int64_t t) {
 
 } // namespace
 
+namespace {
+
+struct SegmentCallbackCtx {
+    std::ostream * out;
+    bool timestamps;
+    int next_segment;
+};
+
+void on_new_segment(struct whisper_context * /*ctx*/, struct whisper_state * state,
+                    int n_new, void * user_data) {
+    auto * cb = static_cast<SegmentCallbackCtx *>(user_data);
+    // Segments are owned by `state` until whisper_full returns. Use the
+    // _from_state accessors -- the ctx-based ones are not yet populated.
+    const int n_total = whisper_full_n_segments_from_state(state);
+    const int n_start = std::max(0, n_total - n_new);
+    for (int i = n_start; i < n_total; ++i) {
+        const std::string text = trim(whisper_full_get_segment_text_from_state(state, i));
+        if (cb->timestamps) {
+            *cb->out << "["
+                     << format_timestamp_10ms(whisper_full_get_segment_t0_from_state(state, i))
+                     << " --> "
+                     << format_timestamp_10ms(whisper_full_get_segment_t1_from_state(state, i))
+                     << "] ";
+        }
+        *cb->out << text << '\n' << std::flush;
+    }
+    cb->next_segment = n_total;
+}
+
+}  // namespace
+
 int command_whisper(const WhisperOptions & opts) {
     if (opts.model.empty() || opts.input.empty()) {
-        fail("whisper requires --model and --input");
+        fail(ExitCode::BadInput, "whisper requires --model and --input");
     }
 
     WavData wav = load_wav_file(opts.input);
@@ -238,7 +269,7 @@ int command_whisper(const WhisperOptions & opts) {
     whisper_context_params cparams = whisper_context_default_params();
     WhisperContextPtr ctx(whisper_init_from_file_with_params(opts.model.c_str(), cparams));
     if (!ctx) {
-        fail("failed to load whisper model: " + opts.model);
+        fail(ExitCode::Load, "failed to load whisper model: " + opts.model);
     }
 
     whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
@@ -256,38 +287,35 @@ int command_whisper(const WhisperOptions & opts) {
     params.print_realtime = false;
     params.print_timestamps = false;
 
-    if (!opts.language.empty() && opts.language != "auto") {
-        params.language = opts.language.c_str();
-        params.detect_language = false;
-    } else {
+    // Language defaults to "en" (matches whisper_full_default_params).
+    // Pass "auto" or set --language explicitly to override.
+    if (opts.language == "auto") {
         params.language = nullptr;
         params.detect_language = true;
+    } else if (!opts.language.empty()) {
+        params.language = opts.language.c_str();
+        params.detect_language = false;
     }
 
-    if (whisper_full(ctx.get(), params, audio.data(), static_cast<int>(audio.size())) != 0) {
-        fail("whisper transcription failed");
-    }
-
+    // Wire up streaming output via the new-segment callback. Each finalized
+    // segment is printed as soon as whisper.cpp produces it, instead of
+    // buffering everything until whisper_full returns.
     std::ofstream out_file;
     std::ostream * out = &std::cout;
     if (!opts.output.empty()) {
         out_file.open(opts.output);
         if (!out_file) {
-            fail("failed to open output file: " + opts.output);
+            fail(ExitCode::BadInput, "failed to open output file: " + opts.output);
         }
         out = &out_file;
     }
 
-    const int n_segments = whisper_full_n_segments(ctx.get());
-    for (int i = 0; i < n_segments; ++i) {
-        const std::string text = trim(whisper_full_get_segment_text(ctx.get(), i));
-        if (opts.timestamps) {
-            *out << "[" << format_timestamp_10ms(whisper_full_get_segment_t0(ctx.get(), i))
-                 << " --> "
-                 << format_timestamp_10ms(whisper_full_get_segment_t1(ctx.get(), i))
-                 << "] ";
-        }
-        *out << text << '\n';
+    SegmentCallbackCtx cb_ctx { out, opts.timestamps, 0 };
+    params.new_segment_callback = on_new_segment;
+    params.new_segment_callback_user_data = &cb_ctx;
+
+    if (whisper_full(ctx.get(), params, audio.data(), static_cast<int>(audio.size())) != 0) {
+        fail(ExitCode::Generate, "whisper transcription failed");
     }
 
     return 0;

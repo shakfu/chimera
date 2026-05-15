@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build (${{ matrix.os }}, ${{ matrix.backend }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple silicon
+            backend: metal
+            artifact: chimera-macos-arm64
+          - os: ubuntu-latest   # x86_64
+            backend: cpu
+            artifact: chimera-linux-x86_64
+    env:
+      # Linux build needs ggml's BLAS off (no system OpenBLAS guaranteed) and
+      # OpenMP off (libgomp may be missing in minimal images). Both targets
+      # build static, so MACOSX_DEPLOYMENT_TARGET keeps the macOS binary
+      # portable to the runner's minimum supported OS.
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake git python3 libssl-dev
+
+      - name: install macos deps
+        if: runner.os == 'macOS'
+        run: |
+          # Xcode CLT ships clang, cmake-via-brew, git. cmake is usually
+          # pre-installed on GitHub runners; install only if absent.
+          if ! command -v cmake >/dev/null 2>&1; then brew install cmake; fi
+
+      - name: cache thirdparty
+        uses: actions/cache@v4
+        with:
+          path: thirdparty
+          # Keyed on manage.py (which pins the three dep versions) + CMake
+          # files. Bust the cache on any dep-affecting change.
+          key: thirdparty-${{ runner.os }}-${{ matrix.backend }}-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+
+      - name: build
+        run: make build
+
+      - name: smoke
+        run: make smoke
+
+      - name: stage artifact
+        run: |
+          mkdir -p dist
+          cp build/chimera "dist/${{ matrix.artifact }}"
+          (cd dist && \
+            (sha256sum "${{ matrix.artifact }}" 2>/dev/null || shasum -a 256 "${{ matrix.artifact }}") \
+            > "${{ matrix.artifact }}.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}*
+          if-no-files-found: error
