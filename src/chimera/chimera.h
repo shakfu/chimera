@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 // Version strings. Overridden at compile time via -DCHIMERA_*_VERSION="..."
 // from CMake; fall back to "unknown" when built outside the project's CMake.
@@ -23,6 +24,8 @@
 
 struct LlamaCommonOptions {
     std::string model;
+    std::string mmproj;             // empty = text-only; otherwise mtmd vision projector
+    std::vector<std::string> images;  // images to feed alongside the prompt (gen only)
     uint32_t n_ctx = 4096;
     uint32_t n_batch = 512;
     int threads = -1;

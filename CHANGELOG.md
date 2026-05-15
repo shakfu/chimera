@@ -7,6 +7,27 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Optional [linenoise](https://github.com/shakfu/linenoise) integration
+  for `chat`. When `liblinenoise.a` is present under `thirdparty/`,
+  interactive sessions get readline-style line editing, history (↑/↓,
+  `Ctrl-R`), and basic editing keys (`Ctrl-A`/`Ctrl-E`/word jumps).
+  History persists at `$CHIMERA_HISTORY` (override) or
+  `$HOME/.chimera_chat_history`. Engaged only on a TTY — piped/redirected
+  stdin falls back to `getline`, so scripts and the test suite are
+  unaffected. Controlled by CMake option `CHIMERA_LINENOISE` (`AUTO` /
+  `ON` / `OFF`; default `AUTO`); when ON and the lib is missing,
+  configure fails with a pointer to `manage.py build -L`. Linenoise
+  source is pinned at `master` (commit `06552a1de6` at integration
+  time).
+- `gen` multimodal input via `--mmproj <path>` + `--image <path>`
+  (repeatable). Uses `mtmd_init_from_file` + `mtmd_helper_eval_chunks`
+  to evaluate text + image chunks into the llama context, then runs the
+  existing sample loop. Auto-prepends the default media marker once per
+  `--image` if the user did not place it themselves; auto-wraps the
+  prompt in the model's chat template (VL models are typically instruct-
+  tuned and stall without it). The vision encoder runs on the default
+  backend (Metal on macOS) -- ~16 s end-to-end for a 512x512 image on
+  gemma-4-E4B + its mmproj.
 - `chat`: persistent KV cache across turns. The llama_context and sampler
   are now built once at session start; each turn re-templates the
   conversation, finds the longest common prefix against what's already
@@ -66,17 +87,6 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `REVIEW.md`: architecture / feature / usability / best-practices
   review of the 0.1.0 baseline.
 
-### Deferred
-
-- Multimodal (`mtmd`) image input for `gen` / `chat`. Investigated but
-  not landed this cycle: `libmtmd.a` re-exports its own `stbi_load` via
-  `mtmd-helper.o`, which would collide with chimera's `stb_impl.cpp`
-  the moment any `mtmd_helper_*` symbol is referenced. The fix
-  (have chimera drop `STB_IMAGE_IMPLEMENTATION` and rely on
-  libmtmd's copy) couples SD's image loader to the mtmd lib for no
-  good reason, and the full integration also needs per-model image-marker
-  handling in chat templates. Tracking for a future release.
-
 ### Fixed
 
 - `whisper` defaulted `language = nullptr` + `detect_language = true`
@@ -93,6 +103,12 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `stb_impl.cpp` no longer defines `STB_IMAGE_IMPLEMENTATION`. Reason:
+  libmtmd's `mtmd-helper.o` ships its own non-static `stbi_load`, which
+  would duplicate-symbol on link the moment any `mtmd_helper_*` is
+  referenced. `chimera_sd.cpp`'s `stbi_load` / `stbi_image_free` calls
+  now resolve against libmtmd's copy (libmtmd is unconditionally linked
+  for the `gen` mtmd path). `stb_image_write` is still ours.
 - `fail()` and `trim()` were duplicated across `chimera.cpp`,
   `chimera_whisper.cpp`, and `chimera_sd.cpp`. Pulled into `chimera.h`
   as inline helpers so all three TUs share one definition. The helpers

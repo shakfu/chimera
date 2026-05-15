@@ -47,6 +47,13 @@ target_include_directories(chimera PRIVATE
     "${SDCPP_INCLUDE}"
 )
 
+# Optional linenoise: header + macro flag are added only when the parent
+# scope decided to link it. Linking happens in the platform blocks below.
+if(CHIMERA_LINK_LINENOISE)
+    target_include_directories(chimera PRIVATE "${LINENOISE_INCLUDE}")
+    target_compile_definitions(chimera PRIVATE CHIMERA_HAS_LINENOISE)
+endif()
+
 target_compile_options(chimera PRIVATE ${CXX_COMPILE_OPTIONS})
 set_target_properties(chimera PROPERTIES
     CXX_STANDARD 17
@@ -151,4 +158,8 @@ else()
         ${LIB_SD}
         ${SYSTEM_LIBS}
     )
+endif()
+
+if(CHIMERA_LINK_LINENOISE)
+    target_link_libraries(chimera PRIVATE ${LIB_LINENOISE})
 endif()

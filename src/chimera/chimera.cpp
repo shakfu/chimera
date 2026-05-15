@@ -14,6 +14,14 @@
 #include <string_view>
 #include <vector>
 
+#ifndef _WIN32
+#include <unistd.h>  // isatty
+#else
+#include <io.h>
+#define isatty _isatty
+#define STDIN_FILENO _fileno(stdin)
+#endif
+
 #include "CLI11.hpp"
 
 #include "chat.h"
@@ -22,7 +30,13 @@
 #include "ggml.h"
 #include "llama.h"
 #include "log.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 #include "sampling.h"
+
+#ifdef CHIMERA_HAS_LINENOISE
+#include "linenoise.h"
+#endif
 
 namespace {
 
@@ -96,6 +110,8 @@ void silence_all_logging() {
     llama_log_set(silent_ggml_log, nullptr);
     ggml_log_set(silent_ggml_log, nullptr);
     common_log_set_verbosity_thold(-1);
+    // mtmd-helper.log_set also forwards to mtmd_log_set internally.
+    mtmd_helper_log_set(silent_ggml_log, nullptr);
     chimera_silence_whisper_log();
     chimera_silence_sd_log();
 }
@@ -103,6 +119,7 @@ void silence_all_logging() {
 void restore_default_logging() {
     llama_log_set(nullptr, nullptr);
     ggml_log_set(nullptr, nullptr);
+    mtmd_helper_log_set(nullptr, nullptr);
     chimera_restore_whisper_log();
     chimera_restore_sd_log();
 }
@@ -248,6 +265,133 @@ common_sampler_ptr make_sampler(const llama_model * model, const LlamaCommonOpti
     return common_sampler_ptr(sampler);
 }
 
+// Deleters for the mtmd C handles so we can use unique_ptr.
+struct MtmdContextDeleter {
+    void operator()(mtmd_context * c) const { if (c) mtmd_free(c); }
+};
+struct MtmdBitmapDeleter {
+    void operator()(mtmd_bitmap * b) const { if (b) mtmd_bitmap_free(b); }
+};
+struct MtmdInputChunksDeleter {
+    void operator()(mtmd_input_chunks * c) const { if (c) mtmd_input_chunks_free(c); }
+};
+using MtmdContextPtr     = std::unique_ptr<mtmd_context, MtmdContextDeleter>;
+using MtmdBitmapPtr      = std::unique_ptr<mtmd_bitmap, MtmdBitmapDeleter>;
+using MtmdInputChunksPtr = std::unique_ptr<mtmd_input_chunks, MtmdInputChunksDeleter>;
+
+// Multimodal generation: prompt + one or more images via mmproj. Loads the
+// mtmd vision projector, builds a (text + image) chunk list against the
+// prompt (auto-prepending the media marker once per image if the user did
+// not place markers themselves), evaluates the chunks into the context,
+// and runs the existing sample loop.
+std::string run_generation_mtmd(
+    llama_model * model,
+    const LlamaCommonOptions & opts,
+    const std::string & user_prompt,
+    bool stream_output) {
+
+    if (opts.mmproj.empty() || opts.images.empty()) {
+        fail(ExitCode::Runtime, "run_generation_mtmd called without mmproj/images");
+    }
+
+    mtmd_context_params mparams = mtmd_context_params_default();
+    // Leave use_gpu at its default (true): the vision encoder is a separate
+    // backend choice from --gpu-layers, which only controls LLM offload.
+    mparams.n_threads = opts.threads;
+    mparams.print_timings = false;
+
+    MtmdContextPtr mctx(mtmd_init_from_file(opts.mmproj.c_str(), model, mparams));
+    if (!mctx) {
+        fail(ExitCode::Load, "failed to load mmproj: " + opts.mmproj);
+    }
+    if (!mtmd_support_vision(mctx.get())) {
+        fail(ExitCode::Load, "mmproj does not support vision input");
+    }
+
+    // Load each --image path into an mtmd_bitmap (stb_image internally).
+    std::vector<MtmdBitmapPtr> bitmaps_owned;
+    std::vector<const mtmd_bitmap *> bitmaps_c;
+    bitmaps_owned.reserve(opts.images.size());
+    bitmaps_c.reserve(opts.images.size());
+    for (const std::string & path : opts.images) {
+        MtmdBitmapPtr bmp(mtmd_helper_bitmap_init_from_file(mctx.get(), path.c_str()));
+        if (!bmp) {
+            fail(ExitCode::BadInput, "failed to load image: " + path);
+        }
+        bitmaps_c.push_back(bmp.get());
+        bitmaps_owned.push_back(std::move(bmp));
+    }
+
+    // If the prompt doesn't already contain the media marker, prepend one
+    // marker per image so they're inserted before the text. Users who need
+    // interleaved images can place the marker themselves (no rewrite).
+    const char * marker = mtmd_default_marker();
+    std::string augmented_prompt;
+    if (user_prompt.find(marker) == std::string::npos) {
+        for (size_t i = 0; i < opts.images.size(); ++i) {
+            augmented_prompt += marker;
+            augmented_prompt += '\n';
+        }
+    }
+    augmented_prompt += user_prompt;
+
+    // Wrap the prompt in the model's chat template. Vision models are
+    // almost always instruct-tuned; without the user/assistant scaffolding
+    // they tend to emit EOG immediately. Falling back to raw text on
+    // template-init failure keeps base-model use working.
+    std::string final_prompt = augmented_prompt;
+    common_chat_templates_ptr templates = common_chat_templates_init(model, "", "", "");
+    if (templates) {
+        common_chat_msg msg;
+        msg.role = "user";
+        msg.content = augmented_prompt;
+        common_chat_templates_inputs inputs;
+        inputs.messages = { msg };
+        inputs.add_generation_prompt = true;
+        inputs.use_jinja = true;
+        common_chat_params cp = common_chat_templates_apply(templates.get(), inputs);
+        if (!cp.prompt.empty()) {
+            final_prompt = cp.prompt;
+        }
+    }
+
+    mtmd_input_text input_text;
+    input_text.text = final_prompt.c_str();
+    input_text.add_special = true;
+    input_text.parse_special = true;
+
+    MtmdInputChunksPtr chunks(mtmd_input_chunks_init());
+    if (!chunks) {
+        fail(ExitCode::Runtime, "failed to init mtmd input chunks");
+    }
+    const int32_t tok_rc = mtmd_tokenize(mctx.get(), chunks.get(), &input_text,
+                                         bitmaps_c.data(), bitmaps_c.size());
+    if (tok_rc != 0) {
+        fail(ExitCode::BadInput,
+             "mtmd_tokenize failed (rc=" + std::to_string(tok_rc) + ")");
+    }
+
+    // Size the context to hold the multimodal prompt + room to generate.
+    const size_t mm_tokens = mtmd_helper_get_n_tokens(chunks.get());
+    auto ctx = new_llama_context(model, opts, mm_tokens);
+    auto sampler = make_sampler(model, opts);
+
+    llama_pos new_n_past = 0;
+    const int32_t eval_rc = mtmd_helper_eval_chunks(
+        mctx.get(), ctx.get(), chunks.get(),
+        /*n_past=*/0, /*seq_id=*/0,
+        static_cast<int32_t>(opts.n_batch),
+        /*logits_last=*/true, &new_n_past);
+    if (eval_rc != 0) {
+        fail(ExitCode::Generate,
+             "mtmd_helper_eval_chunks failed (rc=" + std::to_string(eval_rc) + ")");
+    }
+
+    return sample_loop(ctx.get(), sampler.get(),
+                       llama_model_get_vocab(model),
+                       opts.n_predict, stream_output);
+}
+
 // One-shot generation: build a fresh ctx + sampler, decode the prompt,
 // then sample n_predict tokens. Used by `gen`.
 std::string run_generation(
@@ -277,8 +421,16 @@ common_chat_msg make_chat_msg(const std::string & role, const std::string & cont
 }
 
 int command_prompt(const LlamaCommonOptions & opts, const std::string & prompt) {
+    if (!opts.images.empty() && opts.mmproj.empty()) {
+        fail(ExitCode::BadInput, "--image requires --mmproj");
+    }
     auto model = load_llama_model(opts);
-    std::string text = run_generation(model.get(), opts, prompt, true, true);
+    std::string text;
+    if (!opts.images.empty()) {
+        text = run_generation_mtmd(model.get(), opts, prompt, /*stream=*/true);
+    } else {
+        text = run_generation(model.get(), opts, prompt, /*add_special=*/true, /*stream=*/true);
+    }
     return text.empty() ? static_cast<int>(ExitCode::Generate) : 0;
 }
 
@@ -316,11 +468,47 @@ int command_chat(const LlamaCommonOptions & opts, const std::string & system_pro
     std::vector<llama_token> kv_tokens;
     constexpr llama_seq_id seq_id = 0;
 
+    // Optional readline-style input via linenoise. Engaged only on a TTY;
+    // piped / redirected stdin (e.g. `make test`) falls back to getline.
+    // History persists at $CHIMERA_HISTORY, else $HOME/.chimera_chat_history.
+#ifdef CHIMERA_HAS_LINENOISE
+    const bool use_linenoise = isatty(STDIN_FILENO);
+    std::unique_ptr<linenoise_context_t, void(*)(linenoise_context_t *)> ln_ctx(
+        use_linenoise ? linenoise_context_create() : nullptr,
+        [](linenoise_context_t * c) { if (c) linenoise_context_destroy(c); });
+    std::string history_path;
+    if (use_linenoise && ln_ctx) {
+        if (const char * env = std::getenv("CHIMERA_HISTORY")) {
+            history_path = env;
+        } else if (const char * home = std::getenv("HOME")) {
+            history_path = std::string(home) + "/.chimera_chat_history";
+        }
+        if (!history_path.empty()) {
+            linenoise_history_load(ln_ctx.get(), history_path.c_str());
+        }
+    }
+#endif
+
     std::string line;
     while (true) {
-        std::cout << "> " << std::flush;
-        if (!std::getline(std::cin, line)) {
-            break;
+        bool got_line = false;
+#ifdef CHIMERA_HAS_LINENOISE
+        if (use_linenoise && ln_ctx) {
+            char * raw = linenoise_read(ln_ctx.get(), "> ");
+            if (raw == nullptr) {
+                // EOF (Ctrl-D), interrupt (Ctrl-C), or unsupported terminal.
+                break;
+            }
+            line.assign(raw);
+            linenoise_free(raw);
+            got_line = true;
+        }
+#endif
+        if (!got_line) {
+            std::cout << "> " << std::flush;
+            if (!std::getline(std::cin, line)) {
+                break;
+            }
         }
         line = trim(line);
         if (line.empty()) {
@@ -329,6 +517,15 @@ int command_chat(const LlamaCommonOptions & opts, const std::string & system_pro
         if (line == "/exit" || line == "/quit") {
             break;
         }
+
+#ifdef CHIMERA_HAS_LINENOISE
+        if (use_linenoise && ln_ctx) {
+            linenoise_history_add(ln_ctx.get(), line.c_str());
+            if (!history_path.empty()) {
+                linenoise_history_save(ln_ctx.get(), history_path.c_str());
+            }
+        }
+#endif
 
         history.push_back(make_chat_msg("user", line));
 
@@ -561,6 +758,10 @@ int main(int argc, char ** argv) {
         prompt_cmd->add_option("--top-p", prompt_opts.top_p, "Top-p");
         prompt_cmd->add_option("--min-p", prompt_opts.min_p, "Min-p");
         prompt_cmd->add_option("--repeat-penalty", prompt_opts.repeat_penalty, "Repeat penalty");
+        prompt_cmd->add_option("--mmproj", prompt_opts.mmproj,
+            "Multimodal projector (mmproj GGUF) for vision/audio input");
+        prompt_cmd->add_option("--image", prompt_opts.images,
+            "Image to feed alongside the prompt (repeatable; requires --mmproj)");
 
         LlamaCommonOptions chat_opts;
         std::string system_prompt;

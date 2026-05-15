@@ -6,12 +6,14 @@ If you want the same capabilities from Python instead of a native binary, see [*
 
 ## Subcommands
 
-| Command   | Purpose                                                                 |
-|-----------|-------------------------------------------------------------------------|
-| `gen`     | One-shot llama text generation from a prompt                            |
-| `chat`    | Minimal interactive chat using llama.cpp chat templates                 |
-| `whisper` | Transcribe a WAV file with whisper.cpp                                  |
-| `sd`      | Text-to-image PNG generation with stable-diffusion.cpp                  |
+| Command    | Purpose                                                                |
+|------------|------------------------------------------------------------------------|
+| `gen`      | One-shot llama text generation (text + optional images via `--mmproj`) |
+| `chat`     | Interactive chat with persistent KV cache across turns                 |
+| `tokenize` | Print token ids (or `id<TAB>piece`) for a prompt                       |
+| `embed`    | Emit a single pooled embedding vector for a prompt                     |
+| `whisper`  | Transcribe a WAV file (streaming, segment-by-segment)                  |
+| `sd`       | Text-to-image / img2img / inpaint with stable-diffusion.cpp            |
 
 A top-level `-v,--verbose` flag re-enables native backend logging (silenced by
 default).
@@ -79,11 +81,100 @@ right libraries.
 ```bash
 ./build/chimera gen -m models/Qwen3-4B-Q8_0.gguf -p "Why did..."
 ./build/chimera chat -m models/Qwen3-4B-Q8_0.gguf
+./build/chimera tokenize -m models/Qwen3-4B-Q8_0.gguf -p "hello world" --pieces
+./build/chimera embed -m models/bge-small-en-v1.5-q8_0.gguf -p "a quick brown fox"
 ./build/chimera whisper -m models/ggml-base.en.bin -i audio.wav
 ./build/chimera sd -m models/sd-v1-5.gguf -p "a cat" -o out.png
 ```
 
+`gen` and `tokenize`/`embed` accept `-f <file>` instead of `-p` (use `-f -`
+for stdin); `chat` accepts `--system-prompt-file <file>`.
+
 Use `--help` on any subcommand to see its options.
+
+### Vision input (`gen --mmproj --image`)
+
+`gen` accepts one or more `--image` paths when paired with a vision
+projector (`--mmproj`). The image is encoded by the projector, threaded
+into the prompt at the default media marker, and the resulting chunks
+are evaluated into the llama context via `mtmd_helper_eval_chunks`.
+
+```bash
+./build/chimera gen \
+  -m models/gemma-4-E4B-it-Q4_K_M.gguf \
+  --mmproj models/mmproj-gemma-4-E4B-it-BF16.gguf \
+  --image photo.png \
+  -p "Describe this image in one sentence." -n 64
+```
+
+Notes:
+
+- The prompt is auto-wrapped in the model's chat template (VL models
+  are almost always instruct-tuned and otherwise stall on turn 0).
+- If your prompt does not already contain the media marker
+  (`<__media__>` by default), one is prepended per `--image` so images
+  appear before the text. To interleave, place the marker yourself.
+- `--image` may be repeated; each gets its own marker.
+- The vision encoder runs on the default backend (Metal on macOS),
+  independent of `--gpu-layers` (which only controls LLM offload).
+- Vision input is supported on `gen` only; multi-turn vision in `chat`
+  is not yet wired up (see `TODO.md`).
+
+### Image-to-image / inpainting (`sd --init-image`)
+
+`sd` accepts an `--init-image` for img2img and an optional `--mask-image`
+for inpainting. Both must match `-W,-H` (the SD pipeline does not
+resize internally).
+
+```bash
+# img2img: re-render an input image guided by a new prompt
+./build/chimera sd -m models/sd-v1-5.gguf \
+  --init-image input.png --strength 0.6 \
+  -p "the same scene but at night" -W 512 -H 512 -s 20 -o out.png
+
+# inpaint: only repaint regions where the mask is non-zero
+./build/chimera sd -m models/sd-v1-5.gguf \
+  --init-image input.png --mask-image mask.png \
+  -p "a hat on the person's head" -W 512 -H 512 -s 20 -o out.png
+```
+
+`--strength` ranges 0..1 (0 preserves the init image, 1 = full noise =
+text-to-image). The SD context is automatically built with
+`vae_decode_only=false` whenever `--init-image` is supplied.
+
+### Line editing in `chat` (linenoise)
+
+If [linenoise](https://github.com/shakfu/linenoise) is present under
+`thirdparty/`, interactive `chat` sessions get readline-style line
+editing, history (↑/↓, `Ctrl-R`), and basic editing keys. History
+persists at `$CHIMERA_HISTORY` (override) or
+`$HOME/.chimera_chat_history`. The integration is opt-out:
+
+```bash
+# probe automatically (default; links if liblinenoise.a is present)
+cmake -S . -B build -DCHIMERA_LINENOISE=AUTO
+
+# require linenoise (configure fails if missing)
+cmake -S . -B build -DCHIMERA_LINENOISE=ON
+
+# skip linenoise entirely (chat falls back to plain getline)
+cmake -S . -B build -DCHIMERA_LINENOISE=OFF
+```
+
+Build the lib with `python scripts/manage.py build -L`. Piped /
+redirected stdin always falls back to `getline`, so scripts and the
+test suite are unaffected by this option.
+
+### Exit codes
+
+| Code  | Meaning                                                           |
+|-------|-------------------------------------------------------------------|
+| 0     | success                                                           |
+| 1     | generic runtime error                                             |
+| 2     | bad input (missing / invalid file or argument)                    |
+| 3     | model-load failure (model not found, mmproj incompatible, etc.)   |
+| 4     | generation / inference failure                                    |
+| >= 100| CLI11 parse error (forwarded from CLI11's own exit codes)         |
 
 ## Source layout
 

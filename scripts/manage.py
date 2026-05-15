@@ -97,6 +97,9 @@ CHIMERA_VERSION = "0.1.0"
 LLAMACPP_VERSION = "b9119"
 WHISPERCPP_VERSION = "v1.8.4"
 SDCPP_VERSION = "master-596-90e87bc"
+# linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
+# commit in CHANGELOG for traceability.
+LINENOISE_VERSION = "master"
 
 if PLATFORM == "Darwin":
     MACOSX_DEPLOYMENT_TARGET = setenv("MACOSX_DEPLOYMENT_TARGET", "12.6")
@@ -880,6 +883,47 @@ class StableDiffusionCppBuilder(GgmlBuilder):
         self.copy_lib(self.build_dir, ".", "stable-diffusion", self.lib)
 
 
+class LinenoiseBuilder(Builder):
+    """Build shakfu's linenoise fork into thirdparty/linenoise/{include,lib}.
+
+    Not ggml-backed: a plain C99 line-editor library. We disable the
+    examples and tree-sitter syntax highlighting so the build has no
+    extra deps.
+    """
+
+    name: str = "linenoise"
+    version: str = LINENOISE_VERSION
+    repo_url: str = "https://github.com/shakfu/linenoise.git"
+    libs: list[str] = ["linenoise"]
+
+    def build(self) -> None:
+        if not self.src_dir.exists():
+            self.setup()
+        self.log.info(f"building {self.name}")
+        self.prefix.mkdir(exist_ok=True)
+        self.include.mkdir(exist_ok=True)
+        self.glob_copy(self.src_dir / "include", self.include, patterns=["*.h"])
+
+        # BUILD_TESTS=OFF: upstream's test block references linenoise-example
+        # in `set_tests_properties(... DEPENDS linenoise-example)`, so
+        # configure fails when examples are disabled but tests remain on.
+        # We disable both so neither the example nor the test suite is
+        # configured. We then only build the `linenoise` target explicitly.
+        self.cmake_config(
+            src_dir=self.src_dir,
+            build_dir=self.build_dir,
+            BUILD_SHARED_LIBS=False,
+            BUILD_EXAMPLES=False,
+            BUILD_TESTS=False,
+            WITH_TREESITTER=False,
+            CMAKE_POSITION_INDEPENDENT_CODE=True,
+        )
+        self.cmake_build_targets(build_dir=self.build_dir, targets=["linenoise"], release=True)
+
+        self.lib.mkdir(parents=True, exist_ok=True)
+        self.copy_lib(self.build_dir, ".", "linenoise", self.lib)
+
+
 # ----------------------------------------------------------------------------
 # argparse decorator scaffolding
 
@@ -990,7 +1034,8 @@ class Application(ShellCmd, metaclass=MetaCommander):
     @opt("-l", "--llama-cpp", "build llama.cpp only")
     @opt("-w", "--whisper-cpp", "build whisper.cpp only")
     @opt("-d", "--stable-diffusion", "build stable-diffusion.cpp only")
-    @opt("-a", "--all", "build all three dependencies")
+    @opt("-L", "--linenoise", "build linenoise only")
+    @opt("-a", "--all", "build all dependencies")
     @opt("-D", "--deps-only", "(retained for Makefile compatibility; no-op)")
     @option(
         "--no-sd-examples",
@@ -1017,6 +1062,11 @@ class Application(ShellCmd, metaclass=MetaCommander):
         "--sd-version",
         default=SDCPP_VERSION,
         help=f"stable-diffusion.cpp version (default: {SDCPP_VERSION})",
+    )
+    @option(
+        "--linenoise-version",
+        default=LINENOISE_VERSION,
+        help=f"linenoise version/branch (default: {LINENOISE_VERSION})",
     )
     def do_build(self, args: argparse.Namespace) -> None:
         """fetch + build third-party dependencies into thirdparty/<project>/"""
@@ -1048,11 +1098,13 @@ class Application(ShellCmd, metaclass=MetaCommander):
             LlamaCppBuilder: args.llama_version,
             WhisperCppBuilder: args.whisper_version,
             StableDiffusionCppBuilder: args.sd_version,
+            LinenoiseBuilder: args.linenoise_version,
         }
 
         _builders: list[type[Builder]] = []
         if args.all:
-            _builders = [LlamaCppBuilder, WhisperCppBuilder, StableDiffusionCppBuilder]
+            _builders = [LlamaCppBuilder, WhisperCppBuilder, StableDiffusionCppBuilder,
+                         LinenoiseBuilder]
         else:
             if args.llama_cpp:
                 _builders.append(LlamaCppBuilder)
@@ -1060,6 +1112,8 @@ class Application(ShellCmd, metaclass=MetaCommander):
                 _builders.append(WhisperCppBuilder)
             if args.stable_diffusion:
                 _builders.append(StableDiffusionCppBuilder)
+            if args.linenoise:
+                _builders.append(LinenoiseBuilder)
 
         if not _builders:
             self.log.error(
@@ -1085,6 +1139,7 @@ class Application(ShellCmd, metaclass=MetaCommander):
             "llama.cpp": LLAMACPP_VERSION,
             "whisper.cpp": WHISPERCPP_VERSION,
             "stable-diffusion.cpp": SDCPP_VERSION,
+            "linenoise": LINENOISE_VERSION,
         }
         print(f"chimera:               {CHIMERA_VERSION}")
         for name, ver in pinned.items():
@@ -1126,7 +1181,7 @@ class Application(ShellCmd, metaclass=MetaCommander):
         self.remove(self.project.cwd / "build", silent=not verbose)
         if args.reset:
             thirdparty = self.project.cwd / "thirdparty"
-            for dep in ["llama.cpp", "whisper.cpp", "stable-diffusion.cpp"]:
+            for dep in ["llama.cpp", "whisper.cpp", "stable-diffusion.cpp", "linenoise"]:
                 dep_dir = thirdparty / dep
                 for subdir in ["bin", "lib", "include"]:
                     self.remove(dep_dir / subdir, silent=not verbose)

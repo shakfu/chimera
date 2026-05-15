@@ -196,6 +196,38 @@ else
     skip_test "sd" "no diffusion model under $MODELS/"
 fi
 
+# gen + mtmd: vision via mmproj. Needs a multimodal text model, its mmproj,
+# and an input image. We synthesize the image on-the-fly via `sd`, then ask
+# the VL model a question grounded in it. The assertion is loose -- the
+# model must produce SOME output, indicating the mtmd pipeline (mmproj
+# load -> bitmap load -> mtmd_tokenize -> mtmd_helper_eval_chunks ->
+# sample_loop) ran end-to-end. Stricter content checks are unreliable on
+# small/quantized VL models.
+MTMD_TEXT_MODEL="$MODELS/gemma-4-E4B-it-Q4_K_M.gguf"
+MTMD_MMPROJ="$MODELS/mmproj-gemma-4-E4B-it-BF16.gguf"
+if [[ -f "$MTMD_TEXT_MODEL" && -f "$MTMD_MMPROJ" && -n "$SD_MODEL" ]]; then
+    MTMD_IMG="$(mktemp -t chimera-vl-XXXXXX).png"
+    if "$CHIMERA" sd -m "$SD_MODEL" -p "a single red apple, centered, white background" \
+        -W 512 -H 512 -s 4 -o "$MTMD_IMG" >/dev/null 2>&1 && [[ -s "$MTMD_IMG" ]]; then
+        VL_OUT="$("$CHIMERA" gen \
+            -m "$MTMD_TEXT_MODEL" --mmproj "$MTMD_MMPROJ" --image "$MTMD_IMG" \
+            -p "Describe this image briefly." -n 32 2>/dev/null || true)"
+        if [[ -n "$(printf '%s' "$VL_OUT" | tr -d '[:space:]')" ]]; then
+            printf "  PASS  %s\n" "gen --mmproj --image (vision pipeline)"
+            pass=$((pass + 1))
+        else
+            printf "  FAIL  %s (empty output)\n" "gen --mmproj --image"
+            fail=$((fail + 1))
+            failed_names+=("mtmd")
+        fi
+    else
+        skip_test "mtmd" "failed to synthesize input image"
+    fi
+    rm -f "$MTMD_IMG"
+else
+    skip_test "mtmd" "missing gemma model, mmproj, or sd model"
+fi
+
 # chat: verify the persistent KV cache propagates information across turns.
 # Use a unique nonsense word that's very unlikely to appear by chance, so
 # the test detects real cross-turn recall rather than a generic guess.

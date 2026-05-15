@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 # Extract chimera + bundled third-party versions from scripts/manage.py
 # (the single source of truth). Falls back to "unknown" if the regex misses.
 file(READ "${CMAKE_SOURCE_DIR}/scripts/manage.py" _manage_py)
-foreach(_pair "CHIMERA_VERSION" "LLAMACPP_VERSION" "WHISPERCPP_VERSION" "SDCPP_VERSION")
+foreach(_pair "CHIMERA_VERSION" "LLAMACPP_VERSION" "WHISPERCPP_VERSION" "SDCPP_VERSION" "LINENOISE_VERSION")
     string(REGEX MATCH "${_pair} = \"([^\"]+)\"" _ "${_manage_py}")
     if(CMAKE_MATCH_1)
         set(${_pair} "${CMAKE_MATCH_1}")
@@ -19,6 +19,7 @@ message(STATUS "chimera version:        ${CHIMERA_VERSION}")
 message(STATUS "llama.cpp version:      ${LLAMACPP_VERSION}")
 message(STATUS "whisper.cpp version:    ${WHISPERCPP_VERSION}")
 message(STATUS "sd.cpp version:         ${SDCPP_VERSION}")
+message(STATUS "linenoise version:      ${LINENOISE_VERSION}")
 
 # -----------------------------------------------------------------------------
 # Options
@@ -58,6 +59,43 @@ endforeach()
 if(DEFINED ENV{SD_USE_VENDORED_GGML} AND "$ENV{SD_USE_VENDORED_GGML}" STREQUAL "1")
     set(SD_USE_VENDORED_GGML ON CACHE BOOL "" FORCE)
 endif()
+
+# -----------------------------------------------------------------------------
+# Optional linenoise integration
+# -----------------------------------------------------------------------------
+# CHIMERA_LINENOISE:
+#   ON   = require liblinenoise.a (fail configure if missing)
+#   OFF  = do not link, even if the lib is present
+#   AUTO = link if thirdparty/linenoise/lib/liblinenoise.a exists, else skip
+# When linked, CHIMERA_HAS_LINENOISE is defined for the chimera target so
+# command_chat can opt in to the readline-style input path.
+set(CHIMERA_LINENOISE "AUTO" CACHE STRING "Link liblinenoise (ON / OFF / AUTO)")
+set_property(CACHE CHIMERA_LINENOISE PROPERTY STRINGS "AUTO" "ON" "OFF")
+
+set(LINENOISE_DIR     "${CMAKE_SOURCE_DIR}/thirdparty/linenoise")
+set(LINENOISE_INCLUDE "${LINENOISE_DIR}/include")
+set(LINENOISE_LIB     "${LINENOISE_DIR}/lib")
+
+set(_linenoise_probe "${LINENOISE_LIB}/liblinenoise.a")
+if(WIN32)
+    set(_linenoise_probe "${LINENOISE_LIB}/linenoise.lib")
+endif()
+
+set(CHIMERA_LINK_LINENOISE OFF)
+if("${CHIMERA_LINENOISE}" STREQUAL "ON")
+    if(NOT EXISTS "${_linenoise_probe}")
+        message(FATAL_ERROR
+            "CHIMERA_LINENOISE=ON but ${_linenoise_probe} not found.\n"
+            "Run: python scripts/manage.py build -L  (or --all)")
+    endif()
+    set(CHIMERA_LINK_LINENOISE ON)
+elseif("${CHIMERA_LINENOISE}" STREQUAL "AUTO")
+    if(EXISTS "${_linenoise_probe}")
+        set(CHIMERA_LINK_LINENOISE ON)
+    endif()
+endif()
+unset(_linenoise_probe)
+message(STATUS "linenoise:              ${CHIMERA_LINENOISE} -> link=${CHIMERA_LINK_LINENOISE}")
 
 # stable-diffusion.cpp requires GGML_MAX_NAME=128 for long tensor names.
 # When SD shares llama.cpp's ggml, both must use the same value.
@@ -152,6 +190,9 @@ endif()
 static_lib(LIB_WHISPER_COMMON "${WHISPERCPP_LIB}" "common")
 static_lib(LIB_WHISPER        "${WHISPERCPP_LIB}" "whisper")
 static_lib(LIB_SD             "${SDCPP_LIB}"      "stable-diffusion")
+if(CHIMERA_LINK_LINENOISE)
+    static_lib(LIB_LINENOISE  "${LINENOISE_LIB}"  "linenoise")
+endif()
 
 # -----------------------------------------------------------------------------
 # System libraries

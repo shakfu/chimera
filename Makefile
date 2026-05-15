@@ -37,4 +37,4 @@ clean:
 	@rm -rf $(BUILD_DIR)
 
 reset: clean
-	@rm -rf thirdparty/llama.cpp thirdparty/whisper.cpp thirdparty/stable-diffusion.cpp
+	@rm -rf thirdparty/llama.cpp thirdparty/whisper.cpp thirdparty/stable-diffusion.cpp thirdparty/linenoise

@@ -31,13 +31,15 @@ Forward-looking work for chimera. Loosely prioritized.
       across turns).
 - [x] `--system-prompt-file` for `chat`.
 - [x] Image-to-image and inpainting modes for `sd`.
-- [ ] Multimodal (`mtmd`) image input for `gen` / `chat`. Blocked on
-      `stbi_load` symbol clash between `libmtmd.a` and our `stb_impl.cpp`
-      once any `mtmd_helper_*` is referenced. Resolve by dropping
-      `STB_IMAGE_IMPLEMENTATION` from `stb_impl.cpp` and relying on
-      libmtmd's copy (couples chimera_sd's image read to mtmd, which is
-      acceptable if mtmd is always linked). Then add `--mmproj` + repeated
-      `--image` flags and route through `mtmd_helper_eval_chunks`.
+- [x] Multimodal (`mtmd`) image input for `gen` via `--mmproj` +
+      repeated `--image`. Routed through `mtmd_helper_eval_chunks`;
+      `stb_impl.cpp` was slimmed to write-side only so libmtmd owns the
+      read-side `stbi_*` symbols.
+- [ ] Extend mtmd image input to `chat` (the persistent KV cache logic
+      needs to account for image chunks; harder than `gen`'s one-shot
+      path).
+- [x] Readline-style input for `chat` via optional linenoise integration
+      (CMake `CHIMERA_LINENOISE=AUTO|ON|OFF`).
 
 ## Quality
 
