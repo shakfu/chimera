@@ -45,6 +45,19 @@ using LlamaContextPtr = std::unique_ptr<llama_context, LlamaContextDeleter>;
     throw std::runtime_error(message);
 }
 
+// CLI11's default formatter pads section breaks with double blank lines.
+// This trims make_usage's trailing "\n\n" down to "\n", since the next
+// section (OPTIONS / SUBCOMMANDS) already prepends its own '\n'.
+struct CompactFormatter : public CLI::Formatter {
+    std::string make_usage(const CLI::App * app, std::string name) const override {
+        std::string s = CLI::Formatter::make_usage(app, name);
+        if (s.size() >= 2 && s.compare(s.size() - 2, 2, "\n\n") == 0) {
+            s.pop_back();
+        }
+        return s;
+    }
+};
+
 void silent_ggml_log(enum ggml_log_level, const char *, void *) {}
 
 void silence_all_logging() {
@@ -273,7 +286,16 @@ std::string version_string() {
 int main(int argc, char ** argv) {
     silence_all_logging();
 
-    CLI::App app("chimera - statically linked llama.cpp / whisper.cpp / stable-diffusion.cpp multitool");
+    CLI::App app("chimera - {llama,whisper,stable-diffusion}.cpp multitool");
+    auto fmt = std::make_shared<CompactFormatter>();
+    // Pack short + long flags together in --help instead of padding short
+    // flags to ~1/3 of the option column (CLI11 default 30 * 1/3 = 10 chars).
+    fmt->long_option_alignment_ratio(0.0f);
+    app.formatter(fmt);
+    // CLI11's default make_usage() prepends an extra '\n', producing a
+    // double blank line between description and usage. Setting an explicit
+    // usage string skips that branch.
+    app.usage("Usage: " + std::string(argv[0]) + " [OPTIONS] SUBCOMMAND");
     bool verbose = false;
     app.add_flag("-v,--verbose", verbose, "Enable native-backend logging");
     app.set_version_flag("-V,--version", &version_string,

@@ -58,6 +58,7 @@ compile_commands.json
 *.swp
 
 # chimera-specific
+models
 thirdparty/llama.cpp/
 thirdparty/whisper.cpp/
 thirdparty/stable-diffusion.cpp/

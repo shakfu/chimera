@@ -1,47 +1,20 @@
 #!/usr/bin/env python3
 
-"""manage.py: cross-platform cyllama build manager.
+"""manage.py: chimera build manager.
 
-It only uses python stdlib modules to do the following:
-
-- Dependency download, build, install
-- Module compilation
-- Wheel building
-- Alternative frontend to Makefile
-- Downloads/build a local version python for testing
-- Multi-backend GPU support (Metal, CUDA, Vulkan, SYCL, HIP/ROCm, OpenCL)
-- General Shell ops
-
-models:
-    CustomFormatter(logging.Formatter)
-    MetaCommander(type)
-    WheelFilename(dataclass)
-    ShellCmd
-        Project
-        AbstractBuilder
-            Builder
-                GgmlBuilder            # shared ggml-backend helpers
-                    LlamaCppBuilder
-                    WhisperCppBuilder
-                    StableDiffusionCppBuilder
-        Application(meta=MetaCommander)
-
-
-It has an argparse-based cli api:
+Drives the third-party dependency build for chimera (llama.cpp, whisper.cpp,
+stable-diffusion.cpp). Uses only the Python stdlib. The four-version block at
+module scope is parsed by the top-level CMakeLists.txt -- keep it intact.
 
 usage: manage.py [-h] [-v]  ...
 
-cyllama build manager
+chimera build manager
 
-    build        build application (with backend options)
-    setup        setup prerequisites
-    test         test modules
-    clean        clean detritus
-    info         show version info for dependencies
-    download     download models (llama, whisper)
-    bins         build llama.cpp CLI binaries
-    bench        run performance benchmark (prefill/decode speed)
-    profile      profile cyllama operations using cProfile
+    build        fetch + build llama.cpp / whisper.cpp / stable-diffusion.cpp
+                 into thirdparty/<project>/{include,lib}
+    download     download a Llama or Whisper model for testing
+    info         show pinned + checked-out dependency versions
+    clean        remove build/ and thirdparty/<project>/{bin,lib,include}
 
 Backend support (via build command flags or environment variables):
     --metal, -m       Enable Metal backend (macOS)
@@ -51,34 +24,30 @@ Backend support (via build command flags or environment variables):
     --hip, -H         Enable HIP/ROCm backend (AMD GPUs)
     --opencl, -o      Enable OpenCL backend
     --cpu-only, -C    Disable all GPU backends
-    --cpu-all-variants Build CPU backend variants for all x86 ISAs (requires --dynamic)
 
 Environment variables:
-    GGML_METAL=1      Enable Metal backend (default ON on macOS, all components)
+    GGML_METAL=1      Enable Metal backend (default ON on macOS)
     GGML_CUDA=1       Enable CUDA backend
     GGML_VULKAN=1     Enable Vulkan backend
     GGML_SYCL=1       Enable SYCL backend
     GGML_HIP=1        Enable HIP/ROCm backend
     GGML_OPENCL=1     Enable OpenCL backend
-    GGML_CPU_ALL_VARIANTS=1  Build CPU variants for all x86 ISAs (AVX, AVX2, AVX512, etc.)
+    SD_USE_VENDORED_GGML=0   Share llama.cpp's ggml with stable-diffusion.cpp
+                             (required for chimera's static link).
 """
 
 import argparse
-import cProfile
 import logging
 import os
 import platform
-import re
 import shutil
-import tempfile
 import stat
 import subprocess
 import sys
 import tarfile
 import zipfile
-from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Iterable, Optional, TypeVar, Union, Callable, NoReturn
+from typing import Any, Callable, Iterable, NoReturn, Optional, TypeVar, Union
 from urllib.request import urlretrieve
 
 __version__ = "0.1.1"
@@ -87,43 +56,31 @@ __version__ = "0.1.1"
 # type aliases
 
 Pathlike = Union[str, Path]
-MatchFn = Callable[[Path], bool]
-ActionFn = Callable[[Path], None]
 
 # ----------------------------------------------------------------------------
 # env helpers
 
 
 def getenv(key: str, default: bool = False) -> bool:
-    """Convert '0','1' env values to bool {True, False}
-
-    Args:
-        key: Environment variable name
-        default: Default value if not set
-
-    Returns:
-        Boolean value from environment variable
-
-    Raises:
-        ValueError: If environment variable value is not a valid integer
-    """
+    """Convert '0','1' env values to bool {True, False}."""
     value = os.getenv(key)
     if value is None:
         return default
     try:
         return bool(int(value))
     except ValueError:
-        logging.getLogger(__name__).warning(f"Invalid boolean value for {key}: {value}, using default {default}")
+        logging.getLogger(__name__).warning(
+            f"Invalid boolean value for {key}: {value}, using default {default}"
+        )
         return default
 
 
 def setenv(key: str, default: str) -> str:
-    """get environ variable if it is exists else set default"""
+    """get environ variable if it exists, else set default"""
     if key in os.environ:
         return os.getenv(key, default)
-    else:
-        os.environ[key] = default
-        return default
+    os.environ[key] = default
+    return default
 
 
 # ----------------------------------------------------------------------------
@@ -134,40 +91,17 @@ PLATFORM = platform.system()
 ARCH = platform.machine()
 PY_VER_MINOR = sys.version_info.minor
 
+# Version block. CMakeLists.txt parses these four constants out of this file
+# to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
 CHIMERA_VERSION = "0.1.0"
+LLAMACPP_VERSION = "b9119"
+WHISPERCPP_VERSION = "v1.8.4"
+SDCPP_VERSION = "master-596-90e87bc"
 
-STABLE_BUILD = getenv("STABLE_BUILD", True)
-if STABLE_BUILD:
-    # known to build and work without errors, 100% tests pass
-    LLAMACPP_VERSION = "b9119"
-    WHISPERCPP_VERSION = "v1.8.4"
-    SDCPP_VERSION = "master-596-90e87bc"
-else:
-    # experimental bleeding-edge builds ` = ""` means get latest
-    LLAMACPP_VERSION = "b9119"
-    WHISPERCPP_VERSION = "v1.8.4"
-    SDCPP_VERSION = "master-596-90e87bc"
 if PLATFORM == "Darwin":
     MACOSX_DEPLOYMENT_TARGET = setenv("MACOSX_DEPLOYMENT_TARGET", "12.6")
 DEBUG = getenv("DEBUG", default=True)
 COLOR = getenv("COLOR", default=True)
-
-# Shared-lib file extensions for the host platform. Used when dropping
-# pre-built release archives into `dynamic/`.
-SHARED_LIB_EXTS: tuple[str, ...] = (
-    (".dylib",) if PLATFORM == "Darwin" else (".dll", ".lib") if PLATFORM == "Windows" else (".so",)
-)
-
-# rglob patterns for locating built shared libs in a cmake build tree.
-# Darwin picks up MODULE libs (.so from GGML_BACKEND_DL=ON plugins) too;
-# Linux needs versioned sonames (".so.*") alongside the unversioned file.
-SHARED_LIB_GLOBS: tuple[str, ...] = (
-    ("**/*.dylib", "**/*.so")
-    if PLATFORM == "Darwin"
-    else ("**/*.dll", "**/*.lib")
-    if PLATFORM == "Windows"
-    else ("**/*.so", "**/*.so.*")
-)
 
 # ----------------------------------------------------------------------------
 # logging config
@@ -209,25 +143,16 @@ logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO, handlers=[ha
 
 
 class ShellCmd:
-    """Provides platform agnostic file/folder handling."""
+    """Provides platform-agnostic file/folder + shell helpers."""
 
     log: logging.Logger
 
     def cmd(self, shellcmd: str, cwd: Pathlike = ".") -> None:
-        """Run shell command within working directory
+        """Run shell command within working directory.
 
-        WARNING: Uses shell=True for convenience. Only call with trusted input.
-
-        Args:
-            shellcmd: Shell command to execute (must be trusted input)
-            cwd: Working directory for command execution
-
-        Raises:
-            SystemExit: If command fails
+        WARNING: shell=True for convenience. Only call with trusted input.
         """
-        # Resolve and validate cwd path
         cwd_path = Path(cwd).resolve()
-
         self.log.info(shellcmd)
         try:
             subprocess.check_call(shellcmd, shell=True, cwd=str(cwd_path))
@@ -241,24 +166,9 @@ class ShellCmd:
         tofolder: Optional[Pathlike] = None,
         max_size: int = 1024 * 1024 * 100,
     ) -> Pathlike:
-        """Download a file from a url to an optional folder
-
-        Args:
-            url: URL to download from (must be http:// or https://)
-            tofolder: Optional destination folder
-            max_size: Maximum file size in bytes (default: 100MB)
-
-        Returns:
-            Path to downloaded file
-
-        Raises:
-            ValueError: If URL scheme is invalid, filename is unsafe, or file exceeds size limit
-        """
-        # Validate URL scheme
+        """Download a file from a url to an optional folder."""
         if not url.startswith(("https://", "http://")):
             raise ValueError(f"Unsupported URL scheme: {url}")
-
-        # Sanitize basename to prevent path traversal
         basename = os.path.basename(url)
         if ".." in basename or basename.startswith("/"):
             raise ValueError(f"Invalid filename in URL: {url}")
@@ -272,28 +182,20 @@ class ShellCmd:
         self.log.info(f"Downloading {url} to {_path}")
         filename, _ = urlretrieve(url, filename=_path)
 
-        # Check file size
         if _path.stat().st_size > max_size:
             _path.unlink()
-            raise ValueError(f"Downloaded file exceeds size limit: {_path.stat().st_size} > {max_size}")
-
+            raise ValueError(
+                f"Downloaded file exceeds size limit: {_path.stat().st_size} > {max_size}"
+            )
         return Path(filename)
 
     def extract(self, archive: Pathlike, tofolder: Pathlike = ".") -> None:
-        """Extract archive with path traversal protection
-
-        Args:
-            archive: Path to archive file
-            tofolder: Destination folder for extraction
-
-        Raises:
-            ValueError: If archive contains files with path traversal attempts
-            TypeError: If archive format is not supported
-        """
+        """Extract archive with path traversal protection."""
         tofolder_resolved = Path(tofolder).resolve()
 
-        def safe_extract_tar(members: list[tarfile.TarInfo], dest: Path) -> list[tarfile.TarInfo]:
-            """Validate tar members before extraction"""
+        def safe_extract_tar(
+            members: list[tarfile.TarInfo], dest: Path
+        ) -> list[tarfile.TarInfo]:
             for member in members:
                 member_path = (dest / member.name).resolve()
                 if not str(member_path).startswith(str(dest)):
@@ -306,11 +208,12 @@ class ShellCmd:
                 tar.extractall(tofolder_resolved, members=safe_members)
         elif zipfile.is_zipfile(archive):
             with zipfile.ZipFile(archive) as zip_file:
-                # Validate all zip members before extraction
                 for info in zip_file.infolist():
                     extracted_path = (tofolder_resolved / info.filename).resolve()
                     if not str(extracted_path).startswith(str(tofolder_resolved)):
-                        raise ValueError(f"Attempted path traversal in zip: {info.filename}")
+                        raise ValueError(
+                            f"Attempted path traversal in zip: {info.filename}"
+                        )
                 zip_file.extractall(tofolder_resolved)
         else:
             raise TypeError("cannot extract from this file.")
@@ -328,7 +231,6 @@ class ShellCmd:
         recurse: bool = False,
         cwd: Pathlike = ".",
     ) -> None:
-        """git clone a repository source tree from a url"""
         _cmds = ["git clone --depth 1"]
         if branch:
             _cmds.append(f"--branch {branch}")
@@ -339,45 +241,8 @@ class ShellCmd:
             _cmds.append(str(directory))
         self.cmd(" ".join(_cmds), cwd=cwd)
 
-    def getenv(self, key: str, default: bool = False) -> bool:
-        """convert '0','1' env values to bool {True, False}"""
-        self.log.info("checking env variable: %s", key)
-        return bool(int(os.getenv(key, default)))
-
-    def chdir(self, path: Pathlike) -> None:
-        """Change current workding directory to path"""
-        self.log.info("changing working dir to: %s", path)
-        os.chdir(path)
-
-    def chmod(self, path: Pathlike, perm: int = 0o777) -> None:
-        """Change permission of file"""
-        self.log.info("change permission of %s to %s", path, perm)
-        os.chmod(path, perm)
-
-    def get(self, shellcmd: Union[str, list[str]], cwd: Pathlike = ".", shell: bool = False) -> str:
-        """get output of shellcmd"""
-        cmd_list: Union[str, list[str]]
-        if not shell:
-            if isinstance(shellcmd, str):
-                cmd_list = shellcmd.split()
-            else:
-                cmd_list = shellcmd
-        else:
-            cmd_list = shellcmd
-        return subprocess.check_output(cmd_list, encoding="utf8", shell=shell, cwd=str(cwd)).strip()
-
-    def makedirs(self, path: Pathlike, mode: int = 511, exist_ok: bool = True) -> None:
-        """Recursive directory creation function"""
-        self.log.info("making directory: %s", path)
-        os.makedirs(path, mode, exist_ok)
-
-    def move(self, src: Pathlike, dst: Pathlike) -> None:
-        """Move from src path to dst path."""
-        self.log.info("move path %s to %s", src, dst)
-        shutil.move(src, dst)
-
     def copy(self, src: Pathlike, dst: Pathlike) -> None:
-        """copy file or folders -- tries to be behave like `cp -rf`"""
+        """copy file or folder -- behaves like `cp -rf`."""
         self.log.info("copy %s to %s", src, dst)
         src, dst = Path(src), Path(dst)
         if src.is_dir():
@@ -388,9 +253,7 @@ class ShellCmd:
     def remove(self, path: Pathlike, silent: bool = False) -> None:
         """Remove file or folder."""
 
-        # handle windows error on read-only files
         def remove_readonly(func: Any, path: Any, exc_info: Any) -> None:
-            "Clear the readonly bit and reattempt the removal"
             if PY_VER_MINOR < 11:
                 if func not in (os.unlink, os.rmdir) or exc_info[1].winerror != 5:
                     raise exc_info[1]
@@ -417,30 +280,6 @@ class ShellCmd:
                 if not silent:
                     self.log.warning("file not found: %s", path)
 
-    def walk(
-        self,
-        root: Pathlike,
-        match_func: MatchFn,
-        action_func: ActionFn,
-        skip_patterns: list[str],
-    ) -> None:
-        """general recursive walk from root path with match and action functions"""
-        for root_, dirs, filenames in os.walk(root):
-            _root = Path(root_)
-            if skip_patterns:
-                for skip_pat in skip_patterns:
-                    if skip_pat in dirs:
-                        dirs.remove(skip_pat)
-            for _dir in dirs:
-                current = _root / _dir
-                if match_func(current):
-                    action_func(current)
-
-            for _file in filenames:
-                current = _root / _file
-                if match_func(current):
-                    action_func(current)
-
     def glob_copy(
         self,
         src: Pathlike,
@@ -448,69 +287,15 @@ class ShellCmd:
         patterns: list[str],
     ) -> None:
         """copy glob patterns from src dir to destination dir"""
-
         src = Path(src)
         dest = Path(dest)
-
         if not src.exists():
             raise IOError(f"src dir '{src}' not found")
-
         if not dest.exists():
             dest.mkdir()
-
         for p in patterns:
             for f in src.glob(p):
                 self.copy(f, dest)
-
-    def glob_remove(self, root: Pathlike, patterns: list[str], skip_dirs: list[str]) -> None:
-        """applies recursive glob remove using a list of patterns"""
-
-        def _match(entry: Path) -> bool:
-            # return any(fnmatch(entry, p) for p in patterns)
-            return any(fnmatch(entry.name, p) for p in patterns)
-
-        def remove(entry: Path) -> None:
-            self.remove(entry)
-
-        self.walk(root, match_func=_match, action_func=remove, skip_patterns=skip_dirs)
-
-    def pip_install(
-        self,
-        *pkgs: str,
-        reqs: Optional[str] = None,
-        upgrade: bool = False,
-        pip: Optional[str] = None,
-    ) -> None:
-        """Install python packages using pip"""
-        _cmds = []
-        if pip:
-            _cmds.append(pip)
-        else:
-            _cmds.append("pip3")
-        _cmds.append("install")
-        if reqs:
-            _cmds.append(f"-r {reqs}")
-        else:
-            if upgrade:
-                _cmds.append("--upgrade")
-            _cmds.extend(pkgs)
-        self.cmd(" ".join(_cmds))
-
-    def apt_install(self, *pkgs: str, update: bool = False) -> None:
-        """install debian packages using apt"""
-        _cmds = []
-        _cmds.append("sudo apt install")
-        if update:
-            _cmds.append("--upgrade")
-        _cmds.extend(pkgs)
-        self.cmd(" ".join(_cmds))
-
-    def brew_install(self, *pkgs: str, update: bool = False) -> None:
-        """install using homebrew"""
-        _pkgs = " ".join(pkgs)
-        if update:
-            self.cmd("brew update")
-        self.cmd(f"brew install {_pkgs}")
 
     def cmake_config(
         self,
@@ -519,7 +304,7 @@ class ShellCmd:
         *scripts: str,
         **options: Union[str, bool, int],
     ) -> None:
-        """activate cmake configuration / generation stage"""
+        """cmake configure / generate stage"""
         src_dir = Path(src_dir)
         build_dir = Path(build_dir)
         if not src_dir.exists():
@@ -529,7 +314,7 @@ class ShellCmd:
         if scripts:
             _cmds.append(" ".join(f"-C {path}" for path in scripts))
         if options:
-            # Convert Python bools to CMake ON/OFF
+
             def cmake_value(v: Union[str, bool, int]) -> Union[str, int]:
                 if isinstance(v, bool):
                     return "ON" if v else "OFF"
@@ -537,7 +322,6 @@ class ShellCmd:
 
             def cmake_flag(k: str, v: Union[str, bool, int]) -> str:
                 val = cmake_value(v)
-                # Quote values containing semicolons (e.g. architecture lists)
                 if isinstance(val, str) and ";" in val:
                     return f'-D{k}="{val}"'
                 return f"-D{k}={val}"
@@ -546,15 +330,15 @@ class ShellCmd:
         self.cmd(" ".join(_cmds))
 
     def cmake_build(self, build_dir: Pathlike, release: bool = False) -> None:
-        """activate cmake build stage"""
         _cmd = f"cmake --build {build_dir}"
         if release:
             _cmd += " --config Release"
         _cmd += f" --parallel {os.cpu_count() or 4}"
         self.cmd(_cmd)
 
-    def cmake_build_targets(self, build_dir: Pathlike, targets: list[str], release: bool = False) -> None:
-        """build specific cmake targets"""
+    def cmake_build_targets(
+        self, build_dir: Pathlike, targets: list[str], release: bool = False
+    ) -> None:
         _cmd = f"cmake --build {build_dir}"
         if release:
             _cmd += " --config Release"
@@ -563,8 +347,9 @@ class ShellCmd:
         _cmd += f" --parallel {os.cpu_count() or 4}"
         self.cmd(_cmd)
 
-    def cmake_install(self, build_dir: Pathlike, prefix: Optional[Pathlike] = None) -> None:
-        """activate cmake install stage"""
+    def cmake_install(
+        self, build_dir: Pathlike, prefix: Optional[Pathlike] = None
+    ) -> None:
         _cmds = ["cmake --install", str(build_dir)]
         if prefix:
             _cmds.append(f"--prefix {str(prefix)}")
@@ -572,68 +357,45 @@ class ShellCmd:
 
 
 # ----------------------------------------------------------------------------
-# main classes
+# project + builders
 
 
 class Project(ShellCmd):
-    """Utility class to hold project directory structure"""
+    """Holds chimera's directory layout."""
 
     cwd: Path
     build: Path
     src: Path
     thirdparty: Path
     install: Path
-    dist: Path
     scripts: Path
-    tests: Path
-    wheels: Path
-    lib: Path
 
     def __init__(self) -> None:
         self.cwd = Path.cwd()
         self.build = self.cwd / "build"
-        # self.src = self.build / "repos"
+        # Dep source trees live under build/ (separate from build/CMakeFiles).
         self.src = self.build
         self.thirdparty = self.cwd / "thirdparty"
         self.install = self.thirdparty
-        self.dist = self.cwd / "dist"
         self.scripts = self.cwd / "scripts"
-        self.tests = self.cwd / "tests"
-        self.wheels = self.cwd / "wheels"
-        self.lib = self.thirdparty / "llama.cpp" / "lib"
 
     def setup(self) -> None:
-        """create main project directories"""
-        # self.bin.mkdir(exist_ok=True)
         self.build.mkdir(exist_ok=True)
         self.src.mkdir(exist_ok=True)
         self.install.mkdir(exist_ok=True)
 
-    def clean(self) -> None:
-        """prepare project for a partial rebuild"""
-        self.remove(self.build)
-        self.remove(self.dist)
-
-    def reset(self) -> None:
-        """prepare project for a full rebuild"""
-        self.clean()
-        self.remove(self.install)
-
 
 class AbstractBuilder(ShellCmd):
-    """Abstract builder class with additional methods common to subclasses."""
+    """Common builder scaffolding."""
 
     name: str
     version: str
     repo_url: str
-    download_url_template: str
     libs: list[str]
-    # Whether this builder produces a static/dynamic form at all.
-    produces_static: bool = True
-    produces_dynamic: bool = True
-    depends_on: list[type["Builder"]]
 
-    def __init__(self, version: Optional[str] = None, project: Optional[Project] = None):
+    def __init__(
+        self, version: Optional[str] = None, project: Optional[Project] = None
+    ):
         self.version = version or self.version
         self.project = project or Project()
         self.log = logging.getLogger(self.__class__.__name__)
@@ -641,187 +403,49 @@ class AbstractBuilder(ShellCmd):
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} '{self.name}-{self.version}'>"
 
-    # def __iter__(self):
-    #     for dependency in self.depends_on:
-    #         yield dependency
-    #         yield from iter(dependency)
-
-    @property
-    def ver(self) -> str:
-        """short python version: 3.11"""
-        return ".".join(self.version.split(".")[:2])
-
-    @property
-    def ver_major(self) -> str:
-        """major compoent of semantic version: 3 in 3.11.7"""
-        return self.version.split(".")[0]
-
-    @property
-    def ver_minor(self) -> str:
-        """minor compoent of semantic version: 11 in 3.11.7"""
-        return self.version.split(".")[1]
-
-    @property
-    def ver_patch(self) -> str:
-        """patch compoent of semantic version: 7 in 3.11.7"""
-        return self.version.split(".")[2]
-
-    @property
-    def ver_nodot(self) -> str:
-        """concat major and minor version components: 311 in 3.11.7"""
-        return self.ver.replace(".", "")
-
-    @property
-    def name_version(self) -> str:
-        """return name-<fullversion>: e.g. Python-3.11.7"""
-        return f"{self.name}-{self.version}"
-
-    @property
-    def name_ver(self) -> str:
-        """return name.lower-<ver>: e.g. python3.11"""
-        return f"{self.name.lower()}{self.ver}"
-
-    @property
-    def download_url(self) -> str:
-        """return download url with version interpolated"""
-        return self.download_url_template.format(ver=self.version)
-
-    @property
-    def repo_branch(self) -> str:
-        """return repo branch"""
-        return self.name.lower()
-
     @property
     def src_dir(self) -> Path:
-        """return extracted source folder of build target"""
         return self.project.src / self.name
 
     @property
     def build_dir(self) -> Path:
-        """return 'build' folder src dir of build target"""
         return self.src_dir / "build"
 
     @property
     def prefix(self) -> Path:
-        """builder prefix path"""
         return self.project.install / self.name.lower()
 
     @property
-    def bin(self) -> Path:
-        """builder bin path"""
-        return self.prefix / "bin"
-
-    @property
     def include(self) -> Path:
-        """builder include path"""
         return self.prefix / "include"
 
     @property
     def lib(self) -> Path:
-        """builder lib path"""
         return self.prefix / "lib"
 
-    @property
-    def executable_name(self) -> str:
-        """executable name of buld target"""
-        name = self.name.lower()
-        if PLATFORM == "Windows":
-            name = f"{self.name}.exe"
-        return name
-
-    @property
-    def executable(self) -> Path:
-        """executable path of buld target"""
-        return self.bin / self.executable_name
-
-    @property
-    def libname(self) -> str:
-        """library name prefix"""
-        return f"lib{self.name}"
-
-    @property
-    def staticlib_name(self) -> str:
-        """static libname"""
-        suffix = ".a"
-        if PLATFORM == "Windows":
-            suffix = ".lib"
-        return f"{self.libname}{suffix}"
-
-    @property
-    def dylib_name(self) -> str:
-        """dynamic link libname"""
-        if PLATFORM == "Darwin":
-            return f"{self.libname}.dylib"
-        if PLATFORM == "Linux":
-            return f"{self.libname}.so"
-        if PLATFORM == "Windows":
-            return f"{self.libname}.dll"
-        return self.fail("platform not supported")
-
-    @property
-    def dylib_linkname(self) -> str:
-        """symlink to dylib"""
-        if PLATFORM == "Darwin":
-            return f"{self.libname}.dylib"
-        if PLATFORM == "Linux":
-            return f"{self.libname}.so"
-        return self.fail("platform not supported")
-
-    @property
-    def dylib(self) -> Path:
-        """dylib path"""
-        return self.lib / self.dylib_name
-
-    @property
-    def dylib_link(self) -> Path:
-        """dylib link path"""
-        return self.lib / self.dylib_linkname
-
-    @property
-    def staticlib(self) -> Path:
-        """staticlib path"""
-        return self.lib / self.staticlib_name
-
     def get_lib_path(self, build_dir: Path, subdir: str, name: str) -> Path:
-        """Get platform-specific library path from build directory.
-
-        On Windows, CMake puts libraries in Release/ subdirectory and uses
-        name.lib format. On Unix, it's libname.a directly in the directory.
-
-        Args:
-            build_dir: The CMake build directory
-            subdir: Subdirectory within build_dir (e.g., "common", "src")
-            name: Library name without prefix/extension (e.g., "common", "llama")
-
-        Returns:
-            Path to the library file
-        """
+        """Platform-specific library path from a CMake build directory."""
         base = build_dir / subdir
-
         if PLATFORM == "Windows":
-            # Try Release/ subdirectory first (multi-config generators)
             release_path = base / "Release" / f"{name}.lib"
             if release_path.exists():
                 return release_path
-            # Fall back to direct path (single-config generators)
             direct_path = base / f"{name}.lib"
             if direct_path.exists():
                 return direct_path
-            # Try other common configurations
             for config in ("RelWithDebInfo", "MinSizeRel", "Debug"):
                 config_path = base / config / f"{name}.lib"
                 if config_path.exists():
-                    self.log.warning(f"Library {name}.lib not found in Release/ or root, using {config}/ build")
+                    self.log.warning(
+                        f"Library {name}.lib not found in Release/ or root, using {config}/ build"
+                    )
                     return config_path
-            # Return expected Release path for error messages
             self.log.warning(
                 f"Library {name}.lib not found in any configuration under {base}. "
                 f"Searched: Release/, direct, RelWithDebInfo/, MinSizeRel/, Debug/"
             )
             return release_path
-        else:
-            # Unix: libname.a directly in directory
-            return base / f"lib{name}.a"
+        return base / f"lib{name}.a"
 
     def copy_lib(
         self,
@@ -831,130 +455,27 @@ class AbstractBuilder(ShellCmd):
         dest: Path,
         required: bool = True,
     ) -> bool:
-        """Copy a library from build directory to destination.
-
-        Args:
-            build_dir: The CMake build directory
-            subdir: Subdirectory within build_dir
-            name: Library name without prefix/extension
-            dest: Destination directory
-            required: If True, raise on missing library; if False, warn and skip
-
-        Returns:
-            True if copied successfully, False otherwise
-
-        Raises:
-            FileNotFoundError: If required=True and library not found
-        """
         lib_path = self.get_lib_path(build_dir, subdir, name)
         if lib_path.exists():
             self.copy(lib_path, dest)
             self.log.info(f"Copied {lib_path.name} to {dest}")
             return True
-        else:
-            if required:
-                raise FileNotFoundError(f"Required library not found: {lib_path}")
-            self.log.warning(f"Optional library not found: {lib_path}")
-            return False
-
-    @property
-    def dynamic_lib(self) -> Path:
-        """Directory holding the dynamic-build (shared) lib variants."""
-        return self.prefix / "dynamic"
-
-    @staticmethod
-    def _static_lib_filename(name: str) -> str:
-        """Translate a bare lib name (e.g. 'ggml-base') to the host-platform static filename."""
-        return f"{name}.lib" if PLATFORM == "Windows" else f"lib{name}.a"
-
-    @staticmethod
-    def _dynamic_lib_filename(name: str) -> str:
-        """Translate a bare lib name to the host-platform shared-lib filename."""
-        if PLATFORM == "Windows":
-            return f"{name}.dll"
-        if PLATFORM == "Darwin":
-            return f"lib{name}.dylib"
-        return f"lib{name}.so"
-
-    def static_lib_path(self, name: str) -> Path:
-        """Path to one static lib by bare name."""
-        return self.lib / self._static_lib_filename(name)
-
-    def dynamic_lib_path(self, name: str) -> Path:
-        """Path to one dynamic lib by bare name."""
-        return self.dynamic_lib / self._dynamic_lib_filename(name)
-
-    @property
-    def static_libs(self) -> list[Path]:
-        """Platform-resolved paths to the static-lib forms of `self.libs`."""
-        if not self.produces_static:
-            return []
-        return [self.static_lib_path(n) for n in self.libs]
-
-    @property
-    def dynamic_libs(self) -> list[Path]:
-        """Platform-resolved paths to the dynamic-lib forms of `self.libs`."""
-        if not self.produces_dynamic:
-            return []
-        return [self.dynamic_lib_path(n) for n in self.libs]
-
-    def static_libs_exist(self) -> bool:
-        """Return True iff every static lib for this builder is on disk."""
-        return all(p.exists() for p in self.static_libs)
-
-    def dynamic_libs_exist(self) -> bool:
-        """Return True iff every dynamic lib for this builder is on disk."""
-        return all(p.exists() for p in self.dynamic_libs)
-
-    def missing_static_libs(self) -> list[Path]:
-        """Static lib paths that are absent from `self.lib`."""
-        return [p for p in self.static_libs if not p.exists()]
-
-    def missing_dynamic_libs(self) -> list[Path]:
-        """Dynamic lib paths that are absent from `self.dynamic_lib`."""
-        return [p for p in self.dynamic_libs if not p.exists()]
-
-    def pre_process(self) -> None:
-        """override by subclass if needed"""
-
-    def setup(self) -> None:
-        """setup build environment"""
-
-    def configure(self) -> None:
-        """configure build"""
-
-    def build(self, shared: bool = False) -> None:
-        """build target"""
-
-    def install(self) -> None:
-        """install target"""
-
-    def clean(self) -> None:
-        """clean build"""
-
-    def post_process(self) -> None:
-        """override by subclass if needed"""
-
-    def process(self) -> None:
-        """main builder process"""
-        self.pre_process()
-        self.setup()
-        self.configure()
-        self.build()
-        self.install()
-        self.clean()
-        self.post_process()
+        if required:
+            raise FileNotFoundError(f"Required library not found: {lib_path}")
+        self.log.warning(f"Optional library not found: {lib_path}")
+        return False
 
 
 class Builder(AbstractBuilder):
-    """concrete builder class"""
+    """Concrete builder: clones source from repo_url at self.version."""
 
     def setup(self) -> None:
-        """setup build environment"""
         self.log.info(f"update from {self.name} main repo")
         self.project.setup()
         if self.version:
-            self.git_clone(self.repo_url, branch=self.version, recurse=True, cwd=self.project.src)
+            self.git_clone(
+                self.repo_url, branch=self.version, recurse=True, cwd=self.project.src
+            )
         else:
             self.git_clone(self.repo_url, recurse=True, cwd=self.project.src)
 
@@ -962,28 +483,18 @@ class Builder(AbstractBuilder):
 class GgmlBuilder(Builder):
     """Builder base for ggml-backed projects (llama.cpp / whisper.cpp / sd.cpp).
 
-    Provides shared helpers for mapping GGML_* env flags onto CMake options
-    and forwarding the usual tuning variables. Concrete subclasses must
-    implement `get_backend_cmake_options`.
+    Shared helpers for mapping GGML_* env flags onto CMake options.
+    Subclasses must implement `get_backend_cmake_options`.
     """
 
-    # Bare lib names that always ship in a ggml-backed build (either linked
-    # into the Cython extension for static builds, or bundled into the
-    # wheel for dynamic builds). Subclasses extend via `extra_libs`.
-    # Backend plugin libs (`ggml-metal`, `ggml-cuda`, ...) are NOT tracked
-    # here: they are conditional on the build-time env, and whether they
-    # end up in the wheel depends on what was actually linked. Inspect the
-    # install dir directly if you need to audit per-backend artifacts.
     base_libs: list[str] = ["ggml"]
     extra_libs: list[str] = []
 
     @property
     def libs(self) -> list[str]:  # type: ignore[override]
-        """Bare names of core libs shipped/linked by a successful build."""
         return list(self.base_libs) + list(self.extra_libs)
 
     def get_backend_cmake_options(self) -> dict[str, Any]:
-        """Each subclass defines its own backend CMake options."""
         raise NotImplementedError
 
     CUDA_TUNING_ENV_FLAGS: tuple[str, ...] = (
@@ -993,8 +504,6 @@ class GgmlBuilder(Builder):
         "GGML_CUDA_FA_ALL_QUANTS",
     )
 
-    # GGML_* env flag -> short backend name (matches the ggml subdir and
-    # cmake target suffix: ggml/src/ggml-<short>, target ggml-<short>).
     BACKEND_SHORT_NAMES: dict[str, str] = {
         "GGML_METAL": "metal",
         "GGML_CUDA": "cuda",
@@ -1005,7 +514,6 @@ class GgmlBuilder(Builder):
     }
 
     def enabled_backends_from_env(self) -> list[str]:
-        """Short names of GGML_* backends enabled via env vars."""
         result = []
         for env_name, short in self.BACKEND_SHORT_NAMES.items():
             default = env_name == "GGML_METAL" and PLATFORM == "Darwin"
@@ -1013,17 +521,9 @@ class GgmlBuilder(Builder):
                 result.append(short)
         return result
 
-    def enabled_backends_from_options(self, options: dict[str, Any]) -> list[str]:
-        """Short names of GGML_* backends set to ON in an options dict.
-
-        Reads GGML_* keys; use only with options dicts from builders that
-        keep the GGML_* prefix (Llama, Whisper). SD's SD_*-prefixed dicts
-        will always yield an empty list.
-        """
-        return [short for env_name, short in self.BACKEND_SHORT_NAMES.items() if options.get(env_name) == "ON"]
-
-    def _forward_env_flags(self, options: dict[str, Any], names: Iterable[str]) -> None:
-        """Copy any listed env vars (if set) verbatim into options."""
+    def _forward_env_flags(
+        self, options: dict[str, Any], names: Iterable[str]
+    ) -> None:
         for name in names:
             val = os.environ.get(name)
             if val is not None:
@@ -1038,13 +538,11 @@ class GgmlBuilder(Builder):
         label: str,
         suffix: str = "",
     ) -> None:
-        """Set a backend ON/OFF and log when enabled."""
         options[cmake_name] = "ON" if enabled else "OFF"
         if enabled:
             self.log.info(f"Enabling {label} backend{suffix}")
 
     def _apply_cuda_extras(self, options: dict[str, Any]) -> None:
-        """Forward CUDA architectures, compiler, and tuning flags."""
         cuda_archs = os.environ.get("CMAKE_CUDA_ARCHITECTURES")
         if cuda_archs:
             options["CMAKE_CUDA_ARCHITECTURES"] = cuda_archs
@@ -1056,14 +554,12 @@ class GgmlBuilder(Builder):
         self._forward_env_flags(options, self.CUDA_TUNING_ENV_FLAGS)
 
     def _apply_hip_archs(self, options: dict[str, Any]) -> None:
-        """Forward HIP architectures."""
         hip_archs = os.environ.get("CMAKE_HIP_ARCHITECTURES")
         if hip_archs:
             options["CMAKE_HIP_ARCHITECTURES"] = hip_archs
             self.log.info(f"  HIP architectures: {hip_archs}")
 
     def _apply_openmp(self, options: dict[str, Any]) -> None:
-        """Honour GGML_OPENMP override (upstream default is ON)."""
         openmp = os.environ.get("GGML_OPENMP")
         if openmp is not None:
             options["GGML_OPENMP"] = "ON" if openmp == "1" else "OFF"
@@ -1071,18 +567,15 @@ class GgmlBuilder(Builder):
 
 
 class LlamaCppBuilder(GgmlBuilder):
-    """build llama.cpp"""
+    """Build llama.cpp into thirdparty/llama.cpp/{include,lib}."""
 
     name: str = "llama.cpp"
     version: str = LLAMACPP_VERSION
     repo_url: str = "https://github.com/ggml-org/llama.cpp.git"
-    # llama.cpp installs ggml as a split build: the unified `ggml` plus
-    # the `ggml-base` / `ggml-cpu` partials.
     base_libs: list[str] = ["ggml", "ggml-base", "ggml-cpu"]
     extra_libs: list[str] = ["llama", "llama-common", "mtmd"]
 
     def get_backend_cmake_options(self) -> dict[str, Any]:
-        """CMake options for llama.cpp (GGML_* flag names)."""
         options: dict[str, Any] = {}
 
         metal = getenv("GGML_METAL", default=(PLATFORM == "Darwin"))
@@ -1117,51 +610,45 @@ class LlamaCppBuilder(GgmlBuilder):
 
         self._apply_openmp(options)
 
-        # GGML_NATIVE: optimize for the build machine's CPU. Must be OFF
-        # for portable/CI wheels and when GGML_CPU_ALL_VARIANTS is used.
         ggml_native = os.environ.get("GGML_NATIVE")
         if ggml_native is not None:
             options["GGML_NATIVE"] = "ON" if ggml_native == "1" else "OFF"
             self.log.info(f"  GGML_NATIVE={options['GGML_NATIVE']}")
 
-        # CPU all-variants: build ggml-cpu for multiple x86 ISAs (AVX, AVX2,
-        # AVX512, etc.) so the optimal one is selected at runtime. Requires
-        # GGML_BACKEND_DL (set automatically by build_shared).
-        if getenv("GGML_CPU_ALL_VARIANTS", default=False):
-            options["GGML_CPU_ALL_VARIANTS"] = "ON"
-            options["GGML_NATIVE"] = "OFF"
-            self.log.info("Enabling CPU all-variants (multi-ISA)")
-
         return options
 
     def copy_backend_libs(self) -> None:
-        """Copy backend-specific libraries based on enabled backends."""
+        """Copy backend-specific static libs (metal/cuda/vulkan/...) into self.lib."""
         enabled = self.enabled_backends_from_env()
         # Metal builds also need the BLAS backend lib alongside ggml-metal.
         if "metal" in enabled:
             self.copy_lib(self.build_dir, "ggml/src/ggml-blas", "ggml-blas", self.lib)
         for short in enabled:
-            self.copy_lib(self.build_dir, f"ggml/src/ggml-{short}", f"ggml-{short}", self.lib)
+            self.copy_lib(
+                self.build_dir, f"ggml/src/ggml-{short}", f"ggml-{short}", self.lib
+            )
 
     def _copy_headers(self) -> None:
         """Copy llama.cpp public headers into the prefix include dir."""
         self.glob_copy(self.src_dir / "common", self.include, patterns=["*.h", "*.hpp"])
         self.glob_copy(self.src_dir / "ggml" / "include", self.include, patterns=["*.h"])
-        # Main llama.h header.
         self.glob_copy(self.src_dir / "include", self.include, patterns=["*.h"])
         # jinja headers (required by chat.h).
         jinja_include = self.include / "jinja"
         jinja_include.mkdir(exist_ok=True)
-        self.glob_copy(self.src_dir / "common" / "jinja", jinja_include, patterns=["*.h", "*.hpp"])
+        self.glob_copy(
+            self.src_dir / "common" / "jinja", jinja_include, patterns=["*.h", "*.hpp"]
+        )
         # nlohmann JSON headers (required by json-partial.h).
         nlohmann_include = self.include / "nlohmann"
         nlohmann_include.mkdir(exist_ok=True)
-        self.glob_copy(self.src_dir / "vendor" / "nlohmann", nlohmann_include, patterns=["*.hpp"])
+        self.glob_copy(
+            self.src_dir / "vendor" / "nlohmann", nlohmann_include, patterns=["*.hpp"]
+        )
         # mtmd (multimodal) headers.
         self.glob_copy(self.src_dir / "tools" / "mtmd", self.include, patterns=["*.h"])
 
-    def build(self, shared: bool = False) -> None:
-        """main build function"""
+    def build(self) -> None:
         if not self.src_dir.exists():
             self.setup()
         self.log.info(f"building {self.name}")
@@ -1169,12 +656,10 @@ class LlamaCppBuilder(GgmlBuilder):
         self.include.mkdir(exist_ok=True)
         self._copy_headers()
 
-        # Get backend-specific CMake options
         backend_options = self.get_backend_cmake_options()
 
-        # When SD shares llama.cpp's ggml dylibs, the ggml_tensor struct
-        # layout must match.  SD requires GGML_MAX_NAME=128; propagate it
-        # to the llama.cpp build so both sides agree.
+        # SD requires GGML_MAX_NAME=128 (vs llama.cpp's 64). When both share
+        # the same ggml, both sides must agree or ggml_tensor's layout diverges.
         extra = {}
         if StableDiffusionCppBuilder.uses_shared_ggml():
             _def = f"-DGGML_MAX_NAME={StableDiffusionCppBuilder.GGML_MAX_NAME}"
@@ -1184,83 +669,11 @@ class LlamaCppBuilder(GgmlBuilder):
         self.cmake_config(
             src_dir=self.src_dir,
             build_dir=self.build_dir,
-            BUILD_SHARED_LIBS=shared,
+            BUILD_SHARED_LIBS=False,
             CMAKE_POSITION_INDEPENDENT_CODE=True,
             CMAKE_CXX_VISIBILITY_PRESET="hidden",
             CMAKE_C_VISIBILITY_PRESET="hidden",
             CMAKE_VISIBILITY_INLINES_HIDDEN=True,
-            LLAMA_CURL=False,
-            LLAMA_OPENSSL=True,  # Enable OpenSSL in cpp-httplib for HTTPS support
-            LLAMA_BUILD_SERVER=False,  # Server requires httplib
-            LLAMA_BUILD_TESTS=False,  # Tests require httplib
-            LLAMA_BUILD_EXAMPLES=False,  # Don't need examples
-            **extra,
-            **backend_options,
-        )
-        # Build specific targets to avoid httplib-dependent tools like llama-run
-        # We need: llama, ggml, llama-common, mtmd
-        # (upstream b8833 renamed the `common` target -> `llama-common`)
-        self.cmake_build_targets(build_dir=self.build_dir, targets=["llama", "llama-common", "mtmd"], release=True)
-
-        # Manually copy required libraries instead of cmake install (which tries to install all components)
-        self.lib.mkdir(parents=True, exist_ok=True)
-
-        # Copy core libraries from build directory (platform-aware)
-        self.copy_lib(self.build_dir, "common", "llama-common", self.lib)
-        self.copy_lib(self.build_dir, "vendor/cpp-httplib", "cpp-httplib", self.lib, required=False)
-        self.copy_lib(self.build_dir, "src", "llama", self.lib)
-        self.copy_lib(self.build_dir, "ggml/src", "ggml", self.lib)
-        self.copy_lib(self.build_dir, "ggml/src", "ggml-base", self.lib)
-        self.copy_lib(self.build_dir, "ggml/src", "ggml-cpu", self.lib)
-        self.copy_lib(self.build_dir, "tools/mtmd", "mtmd", self.lib)
-
-        # Copy backend-specific libraries
-        self.copy_backend_libs()
-
-    def build_shared(self) -> None:
-        """Build from source with BUILD_SHARED_LIBS=ON and copy to dynamic/.
-
-        Unlike build() which copies individual .a files via copy_lib(),
-        this collects .so/.dylib files directly from the cmake build tree
-        since BUILD_SHARED_LIBS=ON produces shared libs, not static ones.
-        """
-        # Run the cmake configure + build steps (headers + cmake config + cmake build)
-        # but skip the copy_lib steps which look for .a files.
-        if not self.src_dir.exists():
-            self.setup()
-        self.log.info(f"building {self.name} (shared)")
-        self.prefix.mkdir(exist_ok=True)
-        self.include.mkdir(exist_ok=True)
-        self._copy_headers()
-
-        backend_options = self.get_backend_cmake_options()
-        # GGML_NATIVE is incompatible with GGML_BACKEND_DL; disable it
-        # unless GGML_CPU_ALL_VARIANTS already handled it.
-        if "GGML_NATIVE" not in backend_options:
-            backend_options["GGML_NATIVE"] = "OFF"
-
-        # Match SD's GGML_MAX_NAME so ggml_tensor struct layout is identical
-        extra = {}
-        if StableDiffusionCppBuilder.uses_shared_ggml():
-            _def = f"-DGGML_MAX_NAME={StableDiffusionCppBuilder.GGML_MAX_NAME}"
-            extra["CMAKE_C_FLAGS"] = _def
-            extra["CMAKE_CXX_FLAGS"] = _def
-
-        # macOS x86_64 + Vulkan: with GGML_BACKEND_DL=ON, ggml backends are
-        # built as CMake MODULE libs (MH_BUNDLE on Apple) which cannot be
-        # linked against at build time — the downstream cyllama extensions
-        # link the backend dylibs directly, so we need MH_DYLIB output.
-        # Disable BACKEND_DL on this path to get proper SHARED dylibs.
-        use_backend_dl = True
-        if PLATFORM == "Darwin" and ARCH == "x86_64" and backend_options.get("GGML_VULKAN") == "ON":
-            use_backend_dl = False
-
-        self.cmake_config(
-            src_dir=self.src_dir,
-            build_dir=self.build_dir,
-            BUILD_SHARED_LIBS=True,
-            GGML_BACKEND_DL=use_backend_dl,
-            CMAKE_POSITION_INDEPENDENT_CODE=True,
             LLAMA_CURL=False,
             LLAMA_OPENSSL=True,
             LLAMA_BUILD_SERVER=False,
@@ -1269,388 +682,42 @@ class LlamaCppBuilder(GgmlBuilder):
             **extra,
             **backend_options,
         )
-        # With GGML_BACKEND_DL=True, backends are separate plugin targets
-        # that are not transitive dependencies of llama.  Build them explicitly.
-        # ggml-cpu is always needed; GPU backends are conditional.
-        targets = ["llama", "llama-common", "mtmd", "ggml-cpu"]
-        targets.extend(f"ggml-{short}" for short in self.enabled_backends_from_options(backend_options))
-        self.cmake_build_targets(build_dir=self.build_dir, targets=targets, release=True)
-
-        # Collect all shared libs from the build tree into dynamic/.
-        # On Darwin, SHARED_LIB_GLOBS includes "**/*.so" to pick up CMake
-        # MODULE libs (ggml backend plugins under GGML_BACKEND_DL=ON) which
-        # get renamed to .dylib below so CMakeLists' dylib glob finds them.
-        self.dynamic_lib.mkdir(parents=True, exist_ok=True)
-        patterns = SHARED_LIB_GLOBS
-
-        # On Windows, MSVC places each shared lib's DLL (RUNTIME) in
-        # build/bin/Release/ and its import .lib (ARCHIVE) in a sibling
-        # <target>/Release/ directory — different parents, so a same-dir
-        # sibling check doesn't work. Build the set of DLL stems first and
-        # accept only .lib files whose stem matches a shared lib (skipping
-        # static-lib intermediates such as ggml-cpu-feats.lib).
-        dll_stems: set[str] = set()
-        if PLATFORM == "Windows":
-            for _dll in self.build_dir.glob("**/*.dll"):
-                dll_stems.add(_dll.stem)
-
-        copied = 0
-        seen = set()
-        for pattern in patterns:
-            for item in self.build_dir.glob(pattern):
-                if PLATFORM == "Windows" and item.suffix == ".lib":
-                    if item.stem not in dll_stems:
-                        continue
-                dest_name = item.name
-                if PLATFORM == "Darwin" and item.suffix == ".so":
-                    dest_name = item.stem + ".dylib"
-                if dest_name in seen:
-                    continue
-                seen.add(dest_name)
-                dest = self.dynamic_lib / dest_name
-                if dest.exists() or dest.is_symlink():
-                    dest.unlink()
-                # Preserve symlinks (e.g. libllama.dylib -> libllama.0.dylib)
-                # to match upstream's layout and avoid duplicate real files
-                # with inherited install names. scikit-build-core preserves
-                # symlinks when installing into the wheel tree; pip/wheel
-                # may flatten them inside the .whl zip, but the downside is
-                # bounded (two copies of identical bytes, same LC_ID) and
-                # not a correctness regression under the rpath-injection
-                # scheme above.
-                if item.is_symlink():
-                    target = item.readlink()
-                    real = item.resolve()
-                    if not real.exists():
-                        self.log.warning(f"Broken symlink skipped: {item} -> {target} (target does not exist)")
-                        continue
-                    os.symlink(target, dest)
-                else:
-                    shutil.copy2(str(item), str(dest))
-                copied += 1
-                self.log.info(f"  {item.name} -> dynamic/{dest_name}")
-        self.log.info(f"Installed {copied} shared libs to {self.dynamic_lib}")
-
-        if PLATFORM == "Darwin":
-            self._sanitize_macos_dylib_rpaths()
-
-    def _sanitize_macos_dylib_rpaths(self) -> None:
-        """Remove upstream build-tree LC_RPATH entries from copied dylibs
-        and add @loader_path.
-
-        Upstream llama.cpp's CMake bakes its absolute build-tree path
-        (e.g. /Users/runner/work/.../build/llama.cpp/build/bin) into
-        LC_RPATH on every built dylib. After we copy them into
-        thirdparty/llama.cpp/dynamic/, that upstream rpath still points
-        at the build tree. During wheel repair, delocate resolves each
-        dylib's @rpath/libX.0.dylib sibling references using the
-        *dylib's own* rpath — so it finds libggml.0.9.11.dylib at the
-        upstream build path. Meanwhile the extensions' rpath (which
-        scikit-build-core applies at install time from CMakeLists) points
-        at thirdparty/llama.cpp/dynamic/, where the same basename also
-        lives. delocate's dedup rejects the collision with "Already
-        planning to copy library with same basename".
-
-        Fix: strip all existing rpaths from each real dylib and add
-        @loader_path. Then dylib-to-dylib resolution happens inside
-        dynamic/, matching the extensions' resolution; delocate sees one
-        candidate per basename. After delocate runs, the wheel has no
-        rpath at all on these files anyway (delocate sanitises + rewrites
-        load commands), so this is purely a repair-time concern."""
-        import subprocess
-
-        for dylib in sorted(self.dynamic_lib.glob("*.dylib")):
-            if dylib.is_symlink():
-                continue
-            otool = subprocess.run(
-                ["otool", "-l", str(dylib)],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout
-            existing: list[str] = []
-            lines = otool.splitlines()
-            for i, line in enumerate(lines):
-                if "cmd LC_RPATH" not in line:
-                    continue
-                # Subsequent lines: "cmdsize N", "path <value> (offset M)"
-                for j in range(i + 1, min(i + 4, len(lines))):
-                    if "path " in lines[j]:
-                        segment = lines[j].split("path ", 1)[1]
-                        path = segment.split(" (offset", 1)[0].strip()
-                        existing.append(path)
-                        break
-            for path in existing:
-                subprocess.run(
-                    ["install_name_tool", "-delete_rpath", path, str(dylib)],
-                    check=False,
-                    capture_output=True,
-                )
-            subprocess.run(
-                ["install_name_tool", "-add_rpath", "@loader_path", str(dylib)],
-                check=True,
-            )
-            self.log.info(f"  {dylib.name}: rpaths {existing} -> [@loader_path]")
-
-    # -----------------------------------------------------------------
-    # Dynamic linking: download pre-built release
-    # -----------------------------------------------------------------
-
-    def _release_asset_name(self) -> str | None:
-        """Get the expected release asset filename for the current platform."""
-        version = self.version
-        system = PLATFORM.lower()
-        arch = ARCH.lower()
-
-        if system == "darwin":
-            # Pre-built macOS releases only include Metal backend.
-            # For non-default backends (Vulkan, etc.), build from source.
-            if getenv("GGML_VULKAN", default=False):
-                return None
-            os_tag = "macos"
-            arch_tag = "arm64" if arch in ("arm64", "aarch64") else "x64"
-            return f"llama-{version}-bin-{os_tag}-{arch_tag}.tar.gz"
-        elif system == "linux":
-            arch_tag = "x64" if arch in ("x86_64", "amd64") else arch
-            # Check for GPU backends
-            if getenv("GGML_CUDA", default=False):
-                return None  # No pre-built CUDA release for Linux
-            elif getenv("GGML_SYCL", default=False):
-                return None  # No pre-built SYCL release for Linux
-            elif getenv("GGML_VULKAN", default=False):
-                return f"llama-{version}-bin-ubuntu-vulkan-{arch_tag}.tar.gz"
-            elif getenv("GGML_HIP", default=False):
-                return None  # Build from source to match installed ROCm version
-            else:
-                return f"llama-{version}-bin-ubuntu-{arch_tag}.tar.gz"
-        elif system == "windows":
-            arch_tag = "arm64" if arch in ("arm64", "aarch64") else "x64"
-            if getenv("GGML_CUDA", default=False):
-                cuda_ver = os.environ.get("LLAMACPP_CUDA_RELEASE", "12.4")
-                return f"llama-{version}-bin-win-cuda-{cuda_ver}-{arch_tag}.zip"
-            elif getenv("GGML_VULKAN", default=False):
-                return f"llama-{version}-bin-win-vulkan-{arch_tag}.zip"
-            else:
-                return f"llama-{version}-bin-win-cpu-{arch_tag}.zip"
-        else:
-            raise RuntimeError(f"Unsupported platform: {system}/{arch}")
-
-    def _release_url(self) -> str | None:
-        """Get the download URL for the pre-built release, or None if unavailable."""
-        asset = self._release_asset_name()
-        if asset is None:
-            return None
-        return f"https://github.com/ggml-org/llama.cpp/releases/download/{self.version}/{asset}"
-
-    def download_release(self) -> None:
-        """Download pre-built release and extract shared libraries.
-
-        Downloads the release tarball for the current platform, extracts
-        shared libraries (.dylib/.so/.dll) to thirdparty/llama.cpp/dynamic/.
-        Headers are still obtained from the source checkout (call build() or
-        setup() first to populate thirdparty/llama.cpp/include/).
-        """
-        # Ensure headers exist (source checkout + header copy)
-        if not self.include.exists() or not any(self.include.iterdir()):
-            self.log.info("Headers not found, running source setup for headers...")
-            if not self.src_dir.exists():
-                self.setup()
-            # Copy headers only (same as build() header section)
-            self.prefix.mkdir(exist_ok=True)
-            self.include.mkdir(exist_ok=True)
-            self.glob_copy(self.src_dir / "common", self.include, patterns=["*.h", "*.hpp"])
-            self.glob_copy(self.src_dir / "ggml" / "include", self.include, patterns=["*.h"])
-            self.glob_copy(self.src_dir / "include", self.include, patterns=["*.h"])
-            jinja_include = self.include / "jinja"
-            jinja_include.mkdir(exist_ok=True)
-            self.glob_copy(self.src_dir / "common" / "jinja", jinja_include, patterns=["*.h", "*.hpp"])
-            nlohmann_include = self.include / "nlohmann"
-            nlohmann_include.mkdir(exist_ok=True)
-            self.glob_copy(self.src_dir / "vendor" / "nlohmann", nlohmann_include, patterns=["*.hpp"])
-            self.glob_copy(self.src_dir / "tools" / "mtmd", self.include, patterns=["*.h"])
-
-        url = self._release_url()
-        if url is None:
-            raise RuntimeError(
-                f"No pre-built release available for {PLATFORM}/{ARCH} with the "
-                f"current backend configuration. Build from source instead."
-            )
-        # Copy shared libraries to dynamic/ directory
-        # Dereference symlinks so all files are concrete (wheels can't store symlinks)
-        # On Windows, SHARED_LIB_EXTS includes ".lib" import libraries so
-        # CMake find_library can resolve them on MSVC (the .dll is the
-        # runtime; the .lib is the linker stub).
-        self.dynamic_lib.mkdir(parents=True, exist_ok=True)
-        lib_exts = SHARED_LIB_EXTS
-
-        def _fetch_and_install(download_url: str) -> int:
-            self.log.info(f"Downloading pre-built release: {download_url}")
-            tmp_dir = Path(tempfile.mkdtemp())
-            try:
-                archive_path = self.download(download_url, tofolder=tmp_dir, max_size=1024 * 1024 * 500)
-                extract_dir = tmp_dir / "extracted"
-                extract_dir.mkdir()
-                self.extract(archive_path, tofolder=extract_dir)
-                # Find the extracted directory (tarball extracts to a subdirectory)
-                extracted_dirs = [d for d in extract_dir.iterdir() if d.is_dir()]
-                if extracted_dirs:
-                    release_dir = extracted_dirs[0]
-                else:
-                    release_dir = extract_dir
-                n = 0
-                for item in release_dir.iterdir():
-                    if not any(ext in item.name for ext in lib_exts):
-                        continue
-                    dest = self.dynamic_lib / item.name
-                    if dest.exists() or dest.is_symlink():
-                        dest.unlink()
-                    shutil.copy2(str(item), str(dest))
-                    n += 1
-                    suffix = ""
-                    if item.is_symlink():
-                        suffix = f" (from symlink -> {os.readlink(str(item))})"
-                    self.log.info(f"  {item.name}{suffix}")
-                self.log.info(f"Installed {n} files to {self.dynamic_lib}")
-                return n
-            finally:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-
-        _fetch_and_install(url)
-
-        # Windows CUDA: also fetch the CUDA runtime DLLs (cudart, cublas, ...)
-        # shipped in a companion archive on the llama.cpp release page. The
-        # cudart archive is not versioned by llama.cpp release -- only by CUDA
-        # version and arch.
-        if PLATFORM == "Windows" and getenv("GGML_CUDA", default=False):
-            arch = ARCH.lower()
-            arch_tag = "arm64" if arch in ("arm64", "aarch64") else "x64"
-            cuda_ver = os.environ.get("LLAMACPP_CUDA_RELEASE", "12.4")
-            cudart_asset = f"cudart-llama-bin-win-cuda-{cuda_ver}-{arch_tag}.zip"
-            cudart_url = f"https://github.com/ggml-org/llama.cpp/releases/download/{self.version}/{cudart_asset}"
-            _fetch_and_install(cudart_url)
-
-        # Windows: upstream llama.cpp release zips ship .dll files only, no
-        # .lib import libraries. MSVC's find_library / link step requires
-        # .lib, so we synthesize them from each DLL's export table via the
-        # standard dumpbin + lib /def pipeline (both tools live in the MSVC
-        # dev env that cibuildwheel activates).
-        if PLATFORM == "Windows":
-            self._generate_import_libs()
-
-    def _generate_import_libs(self) -> None:
-        """Generate .lib import libraries from .dll files in dynamic_lib/.
-
-        Uses MSVC's dumpbin to read each DLL's export table and lib /def to
-        emit the matching import lib. Skips DLLs that already have a .lib
-        sibling (e.g. if a future upstream release starts shipping them).
-
-        MSVC tools are located via vswhere rather than PATH because
-        cibuildwheel's MSVC environment is activated only for the main
-        build step -- this method runs under CIBW_BEFORE_BUILD where PATH
-        does not include the VS tool directories.
-        """
-        arch = ARCH.lower()
-        machine = "ARM64" if arch in ("arm64", "aarch64") else "X64"
-        host_arch = "Hostarm64" if arch in ("arm64", "aarch64") else "Hostx64"
-        target_arch = "arm64" if arch in ("arm64", "aarch64") else "x64"
-        export_re = re.compile(r"^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)")
-
-        # Locate MSVC tools via vswhere (ships with VS Installer at a fixed path)
-        program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-        vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
-        if not vswhere.exists():
-            raise RuntimeError(f"vswhere not found at {vswhere}")
-        vs_install = subprocess.run(
-            [str(vswhere), "-latest", "-products", "*", "-property", "installationPath"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        if not vs_install:
-            raise RuntimeError("vswhere did not locate a Visual Studio installation")
-        msvc_root = Path(vs_install) / "VC" / "Tools" / "MSVC"
-        if not msvc_root.exists():
-            raise RuntimeError(f"MSVC toolset directory missing: {msvc_root}")
-        msvc_versions = sorted(
-            [d for d in msvc_root.iterdir() if d.is_dir()],
-            key=lambda p: p.name,
+        # Build only the targets chimera needs (avoids httplib-dependent tools).
+        self.cmake_build_targets(
+            build_dir=self.build_dir,
+            targets=["llama", "llama-common", "mtmd"],
+            release=True,
         )
-        if not msvc_versions:
-            raise RuntimeError(f"No MSVC toolset versions found under {msvc_root}")
-        tool_dir = msvc_versions[-1] / "bin" / host_arch / target_arch
-        dumpbin_exe = tool_dir / "dumpbin.exe"
-        lib_exe = tool_dir / "lib.exe"
-        if not dumpbin_exe.exists() or not lib_exe.exists():
-            raise RuntimeError(f"dumpbin.exe or lib.exe missing under {tool_dir}")
-        self.log.info(f"Using MSVC tools from {tool_dir}")
 
-        self.log.info(f"Generating MSVC import libs in {self.dynamic_lib}")
-        generated = 0
-        for dll in sorted(self.dynamic_lib.glob("*.dll")):
-            lib_path = dll.with_suffix(".lib")
-            if lib_path.exists():
-                continue
-            dump = subprocess.run(
-                [str(dumpbin_exe), "/exports", str(dll)],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            names: list[str] = []
-            in_table = False
-            for line in dump.stdout.splitlines():
-                if "ordinal" in line and "name" in line and "RVA" in line:
-                    in_table = True
-                    continue
-                if not in_table:
-                    continue
-                if line.strip().startswith("Summary"):
-                    break
-                m = export_re.match(line)
-                if m:
-                    names.append(m.group(1))
-            if not names:
-                self.log.info(f"  {dll.name}: no exports, skipping")
-                continue
-            def_path = dll.with_suffix(".def")
-            def_path.write_text(f"LIBRARY {dll.name}\nEXPORTS\n" + "\n".join(names) + "\n")
-            try:
-                subprocess.run(
-                    [
-                        str(lib_exe),
-                        f"/def:{def_path}",
-                        f"/out:{lib_path}",
-                        f"/machine:{machine}",
-                        "/nologo",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                generated += 1
-                self.log.info(f"  {lib_path.name} ({len(names)} exports)")
-            finally:
-                def_path.unlink(missing_ok=True)
-                dll.with_suffix(".exp").unlink(missing_ok=True)
-        self.log.info(f"Generated {generated} import libs")
+        self.lib.mkdir(parents=True, exist_ok=True)
+        self.copy_lib(self.build_dir, "common", "llama-common", self.lib)
+        self.copy_lib(
+            self.build_dir, "vendor/cpp-httplib", "cpp-httplib", self.lib, required=False
+        )
+        self.copy_lib(self.build_dir, "src", "llama", self.lib)
+        self.copy_lib(self.build_dir, "ggml/src", "ggml", self.lib)
+        self.copy_lib(self.build_dir, "ggml/src", "ggml-base", self.lib)
+        self.copy_lib(self.build_dir, "ggml/src", "ggml-cpu", self.lib)
+        self.copy_lib(self.build_dir, "tools/mtmd", "mtmd", self.lib)
+        self.copy_backend_libs()
 
 
 class WhisperCppBuilder(GgmlBuilder):
-    """build whisper.cpp"""
+    """Build whisper.cpp into thirdparty/whisper.cpp/{include,lib}."""
 
     name: str = "whisper.cpp"
     version: str = WHISPERCPP_VERSION
     repo_url: str = "https://github.com/ggml-org/whisper.cpp"
-    # whisper.cpp ships a single combined `ggml` lib (no split partials).
     base_libs: list[str] = ["ggml"]
     extra_libs: list[str] = ["whisper", "common"]
 
     def get_backend_cmake_options(self) -> dict[str, Any]:
-        """CMake options for whisper.cpp (GGML_* flag names, Darwin-gated Metal)."""
         options: dict[str, Any] = {}
         sfx = " for whisper.cpp"
 
-        metal = getenv("GGML_METAL", default=(PLATFORM == "Darwin")) and PLATFORM == "Darwin"
+        metal = (
+            getenv("GGML_METAL", default=(PLATFORM == "Darwin")) and PLATFORM == "Darwin"
+        )
         cuda = getenv("GGML_CUDA", default=False)
         vulkan = getenv("GGML_VULKAN", default=False)
         sycl = getenv("GGML_SYCL", default=False)
@@ -1680,63 +747,59 @@ class WhisperCppBuilder(GgmlBuilder):
         self._apply_openmp(options)
         return options
 
-    def build(self, shared: bool = False) -> None:
-        """whisper.cpp main build function"""
+    def build(self) -> None:
         if not self.src_dir.exists():
             self.setup()
         self.log.info(f"building {self.name}")
         self.prefix.mkdir(exist_ok=True)
         self.include.mkdir(exist_ok=True)
-        self.glob_copy(self.src_dir / "examples", self.include, patterns=["*.h", "*.hpp"])
+        self.glob_copy(
+            self.src_dir / "examples", self.include, patterns=["*.h", "*.hpp"]
+        )
 
-        # Get backend options
         backend_options = self.get_backend_cmake_options()
 
         self.cmake_config(
             src_dir=self.src_dir,
             build_dir=self.build_dir,
-            BUILD_SHARED_LIBS=shared,
+            BUILD_SHARED_LIBS=False,
             CMAKE_POSITION_INDEPENDENT_CODE=True,
             CMAKE_CXX_VISIBILITY_PRESET="hidden",
             CMAKE_C_VISIBILITY_PRESET="hidden",
             CMAKE_VISIBILITY_INLINES_HIDDEN=True,
-            CMAKE_INSTALL_LIBDIR="lib",  # Prevent lib64 on 64-bit Linux
+            CMAKE_INSTALL_LIBDIR="lib",  # avoid lib64 on 64-bit Linux
             **backend_options,
         )
         self.cmake_build(build_dir=self.build_dir, release=True)
         self.cmake_install(build_dir=self.build_dir, prefix=self.prefix)
         self.copy_lib(self.build_dir, "examples", "common", self.lib)
-        # self.glob_copy(self.build_dir / "bin", self.bin, patterns=["*"])
 
 
 class StableDiffusionCppBuilder(GgmlBuilder):
-    """build stable-diffusion.cpp"""
+    """Build stable-diffusion.cpp into thirdparty/stable-diffusion.cpp/{include,lib}."""
 
     name: str = "stable-diffusion.cpp"
     version: str = SDCPP_VERSION
     repo_url: str = "https://github.com/leejet/stable-diffusion.cpp.git"
-    # SD installs only its own lib; ggml comes from llama.cpp when
-    # SD_USE_VENDORED_GGML=0, otherwise from SD's vendored copy.
     base_libs: list[str] = ["stable-diffusion"]
     extra_libs: list[str] = []
 
-    # stable-diffusion.cpp requires GGML_MAX_NAME=128 (see its CMakeLists.txt:233
-    # and ggml_extend.hpp:94). llama.cpp defaults to 64. When SD shares
-    # llama.cpp's ggml dylibs (SD_USE_VENDORED_GGML=0), both sides must agree on
-    # this value or the ggml_tensor struct layout diverges and tensor copies crash.
+    # SD requires GGML_MAX_NAME=128 (its CMakeLists.txt:233, ggml_extend.hpp:94).
+    # llama.cpp defaults to 64. When SD shares llama.cpp's ggml
+    # (SD_USE_VENDORED_GGML=0, chimera's default), both sides must agree.
     GGML_MAX_NAME: int = 128
 
     @staticmethod
     def uses_shared_ggml() -> bool:
-        """Return True when SD is configured to share llama.cpp's ggml."""
         return os.environ.get("SD_USE_VENDORED_GGML") == "0"
 
     def get_backend_cmake_options(self) -> dict[str, Any]:
-        """CMake options for stable-diffusion.cpp (SD_* flag names, no BLAS)."""
         options: dict[str, Any] = {}
         sfx = " for stable-diffusion.cpp"
 
-        metal = getenv("GGML_METAL", default=(PLATFORM == "Darwin")) and PLATFORM == "Darwin"
+        metal = (
+            getenv("GGML_METAL", default=(PLATFORM == "Darwin")) and PLATFORM == "Darwin"
+        )
         cuda = getenv("GGML_CUDA", default=False)
         vulkan = getenv("GGML_VULKAN", default=False)
         sycl = getenv("GGML_SYCL", default=False)
@@ -1758,47 +821,38 @@ class StableDiffusionCppBuilder(GgmlBuilder):
         return options
 
     def _sync_ggml_abi(self) -> None:
-        """Sync ggml ABI between stable-diffusion.cpp and llama.cpp.
+        """Replace SD's vendored ggml with llama.cpp's so enum values agree.
 
-        stable-diffusion.cpp vendors its own ggml (potentially older), but the
-        final extension links against llama.cpp's ggml dylibs.  If enum values
-        (ggml_op, ggml_type) diverge between versions, the SD code will build
-        compute graphs with wrong op ids, causing assertion failures at runtime.
-
-        We replace SD's vendored ggml directory with llama.cpp's ggml so that
-        headers, source, and the runtime dylibs all use the same version.
+        SD vendors its own ggml. When chimera links SD against llama.cpp's
+        ggml, ggml_op / ggml_type ids must match between header and runtime
+        or compute graphs build with wrong op ids and assert at runtime.
         """
-        import shutil
-
         llama_ggml = self.project.src / "llama.cpp" / "ggml"
         sd_ggml = self.src_dir / "ggml"
         if not llama_ggml.exists() or not sd_ggml.exists():
-            self.log.warn("Cannot sync ggml ABI: llama.cpp or SD ggml dir missing")
+            self.log.warning("Cannot sync ggml ABI: llama.cpp or SD ggml dir missing")
             return
-
-        # Replace SD's vendored ggml with llama.cpp's copy
         shutil.rmtree(sd_ggml)
         shutil.copytree(llama_ggml, sd_ggml)
-        self.log.info("Replaced SD's vendored ggml with llama.cpp's ggml for ABI compatibility")
+        self.log.info(
+            "Replaced SD's vendored ggml with llama.cpp's ggml for ABI compatibility"
+        )
 
-    def build(self, shared: bool = False, examples: bool = True) -> None:
-        """stable-diffusion.cpp main build function"""
+    def build(self, examples: bool = True) -> None:
         if not self.src_dir.exists():
             self.setup()
         self.log.info(f"building {self.name}")
 
-        # Sync ggml ABI from llama.cpp before compiling so that enum
-        # values (ggml_op, ggml_type) match the dylibs we link against.
-        # Only needed when SD links against llama.cpp's shared ggml
-        # (--sd-shared-ggml). By default SD uses its own vendored ggml
-        # statically, so syncing would overwrite the vendored source.
+        # Sync ggml ABI from llama.cpp before compiling so SD and llama.cpp
+        # use the same ggml_op / ggml_type values. Only needed when SD links
+        # against llama.cpp's ggml (chimera's default, SD_USE_VENDORED_GGML=0).
         if os.environ.get("SD_USE_VENDORED_GGML") == "0":
             self._sync_ggml_abi()
 
         self.prefix.mkdir(exist_ok=True)
         self.include.mkdir(exist_ok=True)
         self.glob_copy(self.src_dir, self.include, patterns=["*.h", "*.hpp"])
-        # Copy stb headers for zero-dependency image I/O
+        # stb headers for zero-dependency image I/O
         stb_src = self.src_dir / "thirdparty"
         if stb_src.exists():
             for stb_file in ["stb_image.h", "stb_image_write.h", "stb_image_resize.h"]:
@@ -1807,18 +861,17 @@ class StableDiffusionCppBuilder(GgmlBuilder):
                     self.copy(stb_path, self.include)
                     self.log.info(f"Copied {stb_file} to include directory")
 
-        # Get backend options
         backend_options = self.get_backend_cmake_options()
 
         self.cmake_config(
             src_dir=self.src_dir,
             build_dir=self.build_dir,
-            BUILD_SHARED_LIBS=shared,
+            BUILD_SHARED_LIBS=False,
             CMAKE_POSITION_INDEPENDENT_CODE=True,
             CMAKE_CXX_VISIBILITY_PRESET="hidden",
             CMAKE_C_VISIBILITY_PRESET="hidden",
             CMAKE_VISIBILITY_INLINES_HIDDEN=True,
-            CMAKE_INSTALL_LIBDIR="lib",  # Prevent lib64 on 64-bit Linux
+            CMAKE_INSTALL_LIBDIR="lib",
             SD_BUILD_EXAMPLES=examples,
             **backend_options,
         )
@@ -1828,16 +881,11 @@ class StableDiffusionCppBuilder(GgmlBuilder):
 
 
 # ----------------------------------------------------------------------------
-# argdeclare
+# argparse decorator scaffolding
 
-
-# TypeVar representing "any callable", used to type the decorators below so
-# they preserve the wrapped function's concrete signature. Returning
-# `Callable[[_F], _F]` tells type-checkers "takes an F, returns the same F"
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 
-# option decorator
 def option(*args: Any, **kwds: Any) -> Callable[[_F], _F]:
     def _decorator(func: _F) -> _F:
         _option = (args, kwds)
@@ -1850,27 +898,17 @@ def option(*args: Any, **kwds: Any) -> Callable[[_F], _F]:
     return _decorator
 
 
-# bool option decorator
 def opt(long: str, short: str, desc: str, **kwargs: Any) -> Callable[[_F], _F]:
     return option(long, short, help=desc, action="store_true", **kwargs)
 
 
-# arg decorator
-arg = option
-
-
-# combines option decorators
-def option_group(*options: Callable[[_F], _F]) -> Callable[[_F], _F]:
-    def _decorator(func: _F) -> _F:
-        for option in options:
-            func = option(func)
-        return func
-
-    return _decorator
-
-
 class MetaCommander(type):
-    def __new__(cls, classname: str, bases: tuple[type, ...], classdict: dict[str, Any]) -> "MetaCommander":
+    def __new__(
+        cls,
+        classname: str,
+        bases: tuple[type, ...],
+        classdict: dict[str, Any],
+    ) -> "MetaCommander":
         classdict = dict(classdict)
         subcmds: dict[str, dict[str, Any]] = {}
         for name, func in list(classdict.items()):
@@ -1885,34 +923,32 @@ class MetaCommander(type):
 
 
 class Application(ShellCmd, metaclass=MetaCommander):
-    """cyllama build manager"""
+    """chimera build manager"""
 
-    version: str = "0.0.4"
+    version: str = CHIMERA_VERSION
     epilog: str = ""
     default_args: list[str] = ["--help"]
     project: Project
     parser: argparse.ArgumentParser
     options: argparse.Namespace
-    _argparse_subcmds: dict[str, Any]  # Added by metaclass
+    _argparse_subcmds: dict[str, Any]
 
     def __init__(self) -> None:
         self.project = Project()
         self.log = logging.getLogger(self.__class__.__name__)
 
     def parse_args(self) -> argparse.ArgumentParser:
-        parser = argparse.ArgumentParser(
-            # prog = self.name,
+        return argparse.ArgumentParser(
             formatter_class=argparse.RawDescriptionHelpFormatter,
             description=self.__doc__,
             epilog=self.epilog,
         )
-        return parser
 
     def cmdline(self) -> None:
         self.parser = self.parse_args()
-
-        self.parser.add_argument("-v", "--version", action="version", version="%(prog)s " + self.version)
-
+        self.parser.add_argument(
+            "-v", "--version", action="version", version="%(prog)s " + self.version
+        )
         subparsers = self.parser.add_subparsers(
             title="subcommands",
             description="valid subcommands",
@@ -1936,16 +972,6 @@ class Application(ShellCmd, metaclass=MetaCommander):
         options.func(self, options)
 
     # ------------------------------------------------------------------------
-    # setup
-
-    def do_setup(self, args: argparse.Namespace) -> None:
-        """setup prerequisites"""
-        # for Builder in [LlamaCppBuilder, WhisperCppBuilder, StableDiffusionCppBuilder]:
-        for Builder in [LlamaCppBuilder]:
-            builder = Builder()
-            builder.setup()
-
-    # ------------------------------------------------------------------------
     # build
 
     @opt("--metal", "-m", "enable Metal backend (macOS)")
@@ -1954,27 +980,27 @@ class Application(ShellCmd, metaclass=MetaCommander):
     @opt("--sycl", "-y", "enable SYCL backend (Intel GPUs)")
     @opt("--hip", "-H", "enable HIP/ROCm backend (AMD GPUs)")
     @opt("--opencl", "-o", "enable OpenCL backend")
-    @option("--blas", help="enable BLAS backend (use GGML_BLAS_VENDOR env var for vendor)", action="store_true")
-    @option("--no-openmp", help="disable OpenMP", action="store_true")
-    @opt("--cpu-only", "-C", "disable all GPU backends (CPU only)")
     @option(
-        "--cpu-all-variants",
-        help="build CPU backend variants for all x86 ISAs (requires --dynamic)",
+        "--blas",
+        help="enable BLAS backend (use GGML_BLAS_VENDOR env var for vendor)",
         action="store_true",
     )
-    @opt("-w", "--whisper-cpp", "build whisper-cpp")
-    @opt("-d", "--stable-diffusion", "build stable-diffusion")
-    @opt("-l", "--llama-cpp", "build llama-cpp")
-    @opt("-s", "--shared", "build shared libraries")
-    @opt("-a", "--all", "build all")
-    @opt("-D", "--deps-only", "build dependencies only, skip editable install")
-    @opt("--dynamic", "-Y", "download pre-built llama.cpp release (dynamic linking)")
+    @option("--no-openmp", help="disable OpenMP", action="store_true")
+    @opt("--cpu-only", "-C", "disable all GPU backends (CPU only)")
+    @opt("-l", "--llama-cpp", "build llama.cpp only")
+    @opt("-w", "--whisper-cpp", "build whisper.cpp only")
+    @opt("-d", "--stable-diffusion", "build stable-diffusion.cpp only")
+    @opt("-a", "--all", "build all three dependencies")
+    @opt("-D", "--deps-only", "(retained for Makefile compatibility; no-op)")
     @option(
-        "--no-sd-examples", help="skip building stable-diffusion.cpp examples (sd-cli, sd-server)", action="store_true"
+        "--no-sd-examples",
+        help="skip building stable-diffusion.cpp examples (sd-cli, sd-server)",
+        action="store_true",
     )
     @option(
         "--sd-shared-ggml",
-        help="link stable-diffusion against llama.cpp's shared ggml instead of its own vendored copy",
+        help="link stable-diffusion against llama.cpp's shared ggml "
+        "(required for chimera; sets SD_USE_VENDORED_GGML=0)",
         action="store_true",
     )
     @option(
@@ -1993,15 +1019,10 @@ class Application(ShellCmd, metaclass=MetaCommander):
         help=f"stable-diffusion.cpp version (default: {SDCPP_VERSION})",
     )
     def do_build(self, args: argparse.Namespace) -> None:
-        """build packages"""
-        # Set backend environment variables based on command-line args
+        """fetch + build third-party dependencies into thirdparty/<project>/"""
         if args.cpu_only:
-            os.environ["GGML_METAL"] = "0"
-            os.environ["GGML_CUDA"] = "0"
-            os.environ["GGML_VULKAN"] = "0"
-            os.environ["GGML_SYCL"] = "0"
-            os.environ["GGML_HIP"] = "0"
-            os.environ["GGML_OPENCL"] = "0"
+            for k in ("GGML_METAL", "GGML_CUDA", "GGML_VULKAN", "GGML_SYCL", "GGML_HIP", "GGML_OPENCL"):
+                os.environ[k] = "0"
         else:
             if args.metal:
                 os.environ["GGML_METAL"] = "1"
@@ -2019,27 +1040,19 @@ class Application(ShellCmd, metaclass=MetaCommander):
                 os.environ["GGML_BLAS"] = "1"
         if args.no_openmp:
             os.environ["GGML_OPENMP"] = "0"
-        if args.cpu_all_variants:
-            os.environ["GGML_CPU_ALL_VARIANTS"] = "1"
 
         if args.sd_shared_ggml:
             os.environ["SD_USE_VENDORED_GGML"] = "0"
 
-        # Map builder classes to their version arguments
         builder_versions = {
             LlamaCppBuilder: args.llama_version,
             WhisperCppBuilder: args.whisper_version,
             StableDiffusionCppBuilder: args.sd_version,
         }
 
-        _builders = []
-
+        _builders: list[type[Builder]] = []
         if args.all:
-            _builders = [
-                LlamaCppBuilder,
-                WhisperCppBuilder,
-                StableDiffusionCppBuilder,
-            ]
+            _builders = [LlamaCppBuilder, WhisperCppBuilder, StableDiffusionCppBuilder]
         else:
             if args.llama_cpp:
                 _builders.append(LlamaCppBuilder)
@@ -2048,687 +1061,125 @@ class Application(ShellCmd, metaclass=MetaCommander):
             if args.stable_diffusion:
                 _builders.append(StableDiffusionCppBuilder)
 
+        if not _builders:
+            self.log.error(
+                "No builders selected; pass --all or one of --llama-cpp / "
+                "--whisper-cpp / --stable-diffusion"
+            )
+            return
+
         for BuilderClass in _builders:
             version = builder_versions.get(BuilderClass)
             builder = BuilderClass(version=version)
-            if args.dynamic and BuilderClass == LlamaCppBuilder:
-                assert isinstance(builder, LlamaCppBuilder)
-                asset = builder._release_asset_name()
-                # When SD shares llama.cpp's ggml, the shared libs must be
-                # built with GGML_MAX_NAME=128 so ggml_tensor's layout matches
-                # what SD was compiled with. Upstream pre-built releases use
-                # the default GGML_MAX_NAME=64, so skip them and build from
-                # source to propagate the define.
-                if asset is None or StableDiffusionCppBuilder.uses_shared_ggml():
-                    if asset is not None:
-                        self.log.info(
-                            "SD_USE_VENDORED_GGML=0: building llama.cpp from "
-                            "source to propagate GGML_MAX_NAME=128 (skipping "
-                            "upstream pre-built release)"
-                        )
-                    else:
-                        self.log.warning(
-                            "No pre-built dynamic release available for this "
-                            "platform/backend combo, building from source with "
-                            "BUILD_SHARED_LIBS=ON"
-                        )
-                    builder.build_shared()
-                else:
-                    builder.download_release()
-            else:
-                kwargs = {}
-                if isinstance(builder, StableDiffusionCppBuilder) and args.no_sd_examples:
-                    kwargs["examples"] = False
-                builder.build(**kwargs)
-
-        # Write build config (combined backend + version info)
-        self._write_build_config(builder_versions)
-
-        # Build using scikit-build-core (editable install)
-        if not args.deps_only:
-            if args.dynamic:
-                os.environ["WITH_DYLIB"] = "1"
-            _cmd = "uv sync --reinstall-package cyllama"
-            self.cmd(_cmd)
-
-    def _write_build_config(self, builder_versions: dict[type["Builder"], str]) -> None:
-        """Write build info to src/cyllama/_build_info.py."""
-        import re
-
-        build_dir = Path("build")
-        info: dict[str, Any] = {}
-
-        def _read_ggml_version(cmake_path: Path) -> str | None:
-            if not cmake_path.exists():
-                return None
-            content = cmake_path.read_text()
-            major = re.search(r"set\(GGML_VERSION_MAJOR\s+(\d+)\)", content)
-            minor = re.search(r"set\(GGML_VERSION_MINOR\s+(\d+)\)", content)
-            patch = re.search(r"set\(GGML_VERSION_PATCH\s+(\d+)\)", content)
-            if major and minor and patch:
-                return f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
-            return None
-
-        # By default, all backends link against llama.cpp's ggml (both static
-        # and dynamic builds). When SD_USE_VENDORED_GGML=1, stable-diffusion.cpp
-        # uses its own vendored ggml instead, so we report that version.
-        #
-        # Read ggml versions from each builder's source tree.  Collect all
-        # versions first so we can determine the canonical (llama.cpp) one.
-        # Search multiple paths: the build source tree (always present after
-        # build()), then the sd.cpp vendored copy (as a last-resort reference
-        # for the ggml ABI version when llama.cpp sources were cleaned up).
-        ggml_versions: dict[type, str | None] = {}
-        for BuilderClass in builder_versions:
-            ggml_versions[BuilderClass] = _read_ggml_version(build_dir / BuilderClass.name / "ggml" / "CMakeLists.txt")
-
-        llama_ggml_version = ggml_versions.get(LlamaCppBuilder)
-        # Fallback: if llama.cpp sources are unavailable (e.g. --dynamic
-        # download_release skipped cloning), try whisper.cpp's ggml which
-        # shares the same version as llama.cpp's.
-        if not llama_ggml_version:
-            llama_ggml_version = ggml_versions.get(WhisperCppBuilder)
-        sd_uses_vendored_ggml = os.environ.get("SD_USE_VENDORED_GGML") == "1"
-
-        for BuilderClass, version in builder_versions.items():
-            name = BuilderClass.name.replace(".", "_").replace("-", "_")
-            info[f"{name}_version"] = version
-
-            ggml_ver = ggml_versions[BuilderClass]
-            if ggml_ver is not None:
-                use_vendored = sd_uses_vendored_ggml and BuilderClass == StableDiffusionCppBuilder
-                if not use_vendored and llama_ggml_version:
-                    info[f"{name}_ggml_version"] = llama_ggml_version
-                else:
-                    info[f"{name}_ggml_version"] = ggml_ver
-                    if not use_vendored and not llama_ggml_version:
-                        self.log.warning(
-                            f"Could not determine llama.cpp ggml version; "
-                            f"reporting {BuilderClass.name}'s vendored ggml {ggml_ver}"
-                        )
-
-        # Build backend config from environment
-        def _opt(key: str) -> str | None:
-            return os.environ.get(key) or None
-
-        backend = {
-            "cuda": {
-                "enabled": getenv("GGML_CUDA", default=False),
-                "architectures": _opt("CMAKE_CUDA_ARCHITECTURES"),
-                "compiler": _opt("CMAKE_CUDA_COMPILER"),
-                "fa_all_quants": _opt("GGML_CUDA_FA_ALL_QUANTS"),
-                "force_cublas": _opt("GGML_CUDA_FORCE_CUBLAS"),
-                "force_mmq": _opt("GGML_CUDA_FORCE_MMQ"),
-                "peer_max_batch_size": _opt("GGML_CUDA_PEER_MAX_BATCH_SIZE"),
-            },
-            "hip": {
-                "enabled": getenv("GGML_HIP", default=False),
-                "architectures": _opt("CMAKE_HIP_ARCHITECTURES"),
-                "rocwmma_fattn": getenv("GGML_HIP_ROCWMMA_FATTN", default=False),
-            },
-            "metal": {
-                "enabled": getenv("GGML_METAL", default=(PLATFORM == "Darwin")),
-            },
-            "vulkan": {
-                "enabled": getenv("GGML_VULKAN", default=False),
-            },
-            "sycl": {
-                "enabled": getenv("GGML_SYCL", default=False),
-            },
-            "opencl": {
-                "enabled": getenv("GGML_OPENCL", default=False),
-            },
-            "blas": {
-                "enabled": getenv("GGML_BLAS", default=False),
-                "vendor": _opt("GGML_BLAS_VENDOR"),
-            },
-            "openmp": _opt("GGML_OPENMP"),
-        }
-
-        import json
-
-        config = {
-            "backend": backend,
-            "versions": dict(sorted(info.items())),
-        }
-        out_path = Path("build/build_config.json")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w") as f:
-            json.dump(config, f, indent=2)
-            f.write("\n")
-        self.log.info(f"Wrote build config to {out_path}")
-
-    # ------------------------------------------------------------------------
-    # write-build-config
-
-    def do_write_build_config(self, args: argparse.Namespace) -> None:
-        """write build_config.json from current GGML_* env vars"""
-        self._write_build_config(
-            {
-                LlamaCppBuilder: LLAMACPP_VERSION,
-                WhisperCppBuilder: WHISPERCPP_VERSION,
-                StableDiffusionCppBuilder: SDCPP_VERSION,
-            }
-        )
-
-    # ------------------------------------------------------------------------
-    # fix_macos_vulkan_wheel
-
-    @option("wheel", help="path to a repaired wheel, or a directory containing one")
-    def do_fix_macos_vulkan_wheel(self, args: argparse.Namespace) -> None:
-        """Rewrite hardcoded Homebrew libvulkan path in a macOS Vulkan wheel.
-
-        Homebrew's libvulkan.1.dylib has its install id set to its absolute
-        Homebrew-Intel prefix (/usr/local/opt/vulkan-loader/lib/libvulkan.1.dylib).
-        Everything linked against it on the CI runner records that absolute
-        path as LC_LOAD_DYLIB, so the resulting .so/.dylib files in the wheel
-        fail to load on any machine where that exact path doesn't exist
-        (Apple Silicon Homebrew at /opt/homebrew/..., MacPorts, etc.).
-        delocate's --exclude libvulkan leaves the reference untouched, so we
-        post-process the repaired wheel here: rewrite LC_LOAD_DYLIB to
-        @rpath/libvulkan.1.dylib and add LC_RPATH entries for the two common
-        Homebrew prefixes (/opt/homebrew/lib, /usr/local/lib) so the user's
-        brew install vulkan-loader resolves regardless of architecture.
-        """
-        import subprocess
-        import zipfile
-        import tempfile
-
-        OLD = "/usr/local/opt/vulkan-loader/lib/libvulkan.1.dylib"
-        NEW = "@rpath/libvulkan.1.dylib"
-        RPATHS = ["/opt/homebrew/lib", "/usr/local/lib"]
-
-        target = Path(args.wheel).resolve()
-        if target.is_dir():
-            candidates = sorted(
-                target.glob("*.whl"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if not candidates:
-                self.log.error(f"no *.whl found in {target}")
-                sys.exit(1)
-            wheel_path = candidates[0]
-        elif target.is_file():
-            wheel_path = target
-        else:
-            self.log.error(f"wheel not found: {target}")
-            sys.exit(1)
-
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td)
-            with zipfile.ZipFile(wheel_path) as z:
-                z.extractall(tmp)
-
-            patched = 0
-            for f in tmp.rglob("*"):
-                if f.is_symlink() or not f.is_file():
-                    continue
-                if f.suffix not in (".so", ".dylib"):
-                    continue
-                otool = subprocess.run(
-                    ["otool", "-L", str(f)],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if OLD not in otool.stdout:
-                    continue
-                subprocess.run(
-                    ["install_name_tool", "-change", OLD, NEW, str(f)],
-                    check=True,
-                )
-                rpaths_out = subprocess.run(
-                    ["otool", "-l", str(f)],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                ).stdout
-                existing_rpaths: set[str] = set()
-                lines = rpaths_out.splitlines()
-                for i, line in enumerate(lines):
-                    if "cmd LC_RPATH" not in line:
-                        continue
-                    for j in range(i + 1, min(i + 4, len(lines))):
-                        if "path " in lines[j]:
-                            seg = lines[j].split("path ", 1)[1]
-                            existing_rpaths.add(seg.split(" (offset", 1)[0].strip())
-                            break
-                for rp in RPATHS:
-                    if rp not in existing_rpaths:
-                        subprocess.run(
-                            ["install_name_tool", "-add_rpath", rp, str(f)],
-                            check=True,
-                        )
-                subprocess.run(
-                    ["codesign", "--force", "--sign", "-", str(f)],
-                    check=True,
-                    capture_output=True,
-                )
-                patched += 1
-                self.log.info(f"patched {f.relative_to(tmp)}")
-
-            if patched == 0:
-                self.log.info(f"no files referenced {OLD}; wheel untouched")
-                return
-
-            # Regenerate RECORD and repack. `wheel pack` does both.
-            dist_info_dirs = list(tmp.glob("*.dist-info"))
-            if len(dist_info_dirs) != 1:
-                self.log.error(f"expected exactly one *.dist-info dir, got {dist_info_dirs}")
-                sys.exit(1)
-            out_dir = wheel_path.parent
-            subprocess.run(
-                [sys.executable, "-m", "wheel", "pack", str(tmp), "--dest-dir", str(out_dir)],
-                check=True,
-            )
-            self.log.info(f"patched {patched} files, repacked wheel in {out_dir}")
-
-    # ------------------------------------------------------------------------
-    # test
-
-    # ------------------------------------------------------------------------
-    # check_vendor
-
-    def do_check_vendor(self, args: argparse.Namespace) -> None:
-        """verify thirdparty/llama.cpp/include/ matches pinned llama.cpp version"""
-        import subprocess
-        import tempfile
-
-        builder = LlamaCppBuilder()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            # Clone into a scratch dir so local build/ state is not disturbed.
-            clone_cmd = [
-                "git",
-                "clone",
-                "--depth",
-                "1",
-                "--branch",
-                builder.version,
-                "--recurse-submodules",
-                "--shallow-submodules",
-                builder.repo_url,
-                str(tmp_path / "llama.cpp"),
-            ]
-            subprocess.run(clone_cmd, check=True)
-            src = tmp_path / "llama.cpp"
-
-            expected = tmp_path / "include"
-            expected.mkdir()
-            builder.glob_copy(src / "common", expected, patterns=["*.h", "*.hpp"])
-            builder.glob_copy(src / "ggml" / "include", expected, patterns=["*.h"])
-            builder.glob_copy(src / "include", expected, patterns=["*.h"])
-            (expected / "jinja").mkdir(exist_ok=True)
-            builder.glob_copy(src / "common" / "jinja", expected / "jinja", patterns=["*.h", "*.hpp"])
-            (expected / "nlohmann").mkdir(exist_ok=True)
-            builder.glob_copy(src / "vendor" / "nlohmann", expected / "nlohmann", patterns=["*.hpp"])
-            builder.glob_copy(src / "tools" / "mtmd", expected, patterns=["*.h"])
-
-            committed = builder.include
-            result = subprocess.run(
-                ["diff", "-r", "-q", str(committed), str(expected)],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                print(
-                    f"ERROR: thirdparty/llama.cpp/include/ differs from pinned llama.cpp@{builder.version}",
-                    file=sys.stderr,
-                )
-                print(result.stdout, file=sys.stderr)
-                print(result.stderr, file=sys.stderr)
-                sys.exit(1)
-            print(f"OK: vendored headers match llama.cpp@{builder.version}")
-
-    # ------------------------------------------------------------------------
-    # test
-
-    @opt("--pytest", "-p", "run pytest")
-    def do_test(self, args: argparse.Namespace) -> None:
-        """test modules"""
-        if args.pytest:
-            self.cmd("pytest -vv tests")
-        else:
-            for t in self.project.tests.glob("test_*.py"):
-                self.cmd(f'"{PYTHON}" {t}')
-
-    # ------------------------------------------------------------------------
-    # clean
-
-    @opt("--reset", "-r", "reset project (removes build/ and thirdparty libs)")
-    @opt("--verbose", "-v", "verbose cleaning ops")
-    def do_clean(self, args: argparse.Namespace) -> None:
-        """clean build artifacts"""
-        cwd = self.project.cwd
-        src = cwd / "src" / "cyllama"
-        verbose = args.verbose
-
-        # Directories to remove
-        dir_targets = ["dist", ".coverage"]
-        dir_pats = ["build/lib.*", "build/temp.*", "build/cp*"]
-
-        # Glob patterns
-        glob_pats = [".*_cache", "*.egg-info", "__pycache__", ".DS_Store"]
-
-        # Generated Cython .cpp files
-        cython_cpp_files = [
-            src / "llama" / "llama_cpp.cpp",
-            src / "llama" / "server" / "embedded.cpp",
-            src / "whisper" / "whisper_cpp.cpp",
-            src / "sd" / "stable_diffusion.cpp",
-        ]
-
-        # Clean directories
-        for t in dir_targets:
-            self.remove(cwd / t, silent=not verbose)
-
-        # Clean directory patterns
-        for pat in dir_pats:
-            for m in cwd.glob(pat):
-                self.remove(m, silent=not verbose)
-
-        # Clean glob patterns recursively
-        for p in glob_pats:
-            for m in cwd.glob(p):
-                self.remove(m, silent=not verbose)
-            for m in cwd.glob("**/" + p):
-                self.remove(m, silent=not verbose)
-
-        # Clean .so files
-        for so in src.glob("*.so"):
-            self.remove(so, silent=not verbose)
-        for so in src.glob("**/*.so"):
-            self.remove(so, silent=not verbose)
-
-        # Clean generated Cython .cpp files
-        for cpp in cython_cpp_files:
-            if cpp.exists():
-                self.remove(cpp, silent=not verbose)
-
-        # Clean dynamic/ from thirdparty deps
-        thirdparty = cwd / "thirdparty"
-        for dep in ["llama.cpp", "whisper.cpp", "stable-diffusion.cpp"]:
-            self.remove(thirdparty / dep / "dynamic", silent=not verbose)
-
-        # Reset: also remove build/, thirdparty libs, and .venv
-        if args.reset:
-            self.remove(cwd / "build", silent=not verbose)
-            self.remove(cwd / ".venv", silent=not verbose)
-
-            for dep in ["llama.cpp", "whisper.cpp", "stable-diffusion.cpp"]:
-                dep_dir = thirdparty / dep
-                for subdir in ["bin", "lib", "include"]:
-                    self.remove(dep_dir / subdir, silent=not verbose)
-
-        self.log.info("Clean complete")
+            kwargs: dict[str, Any] = {}
+            if isinstance(builder, StableDiffusionCppBuilder) and args.no_sd_examples:
+                kwargs["examples"] = False
+            builder.build(**kwargs)
 
     # ------------------------------------------------------------------------
     # info
 
-    @opt("--snapshot", "-s", "commit and push with dependency versions")
     def do_info(self, args: argparse.Namespace) -> None:
-        """show version info for dependencies"""
-        build_dir = self.project.cwd / "build"
-        deps = [
-            ("llama.cpp", build_dir / "llama.cpp"),
-            ("whisper.cpp", build_dir / "whisper.cpp"),
-            ("sd.cpp", build_dir / "stable-diffusion.cpp"),
-        ]
-
-        versions = []
-        for name, src_dir in deps:
+        """show pinned + checked-out dependency versions"""
+        pinned = {
+            "llama.cpp": LLAMACPP_VERSION,
+            "whisper.cpp": WHISPERCPP_VERSION,
+            "stable-diffusion.cpp": SDCPP_VERSION,
+        }
+        print(f"chimera:               {CHIMERA_VERSION}")
+        for name, ver in pinned.items():
+            print(f"{name + ':':22s} pinned={ver}", end="")
+            src_dir = self.project.src / name
             if not src_dir.exists():
-                if not args.snapshot:
-                    self.log.info(f"{name}: not downloaded")
+                print("  (not cloned)")
                 continue
-
-            # Get git info
             try:
                 short = subprocess.run(
-                    ["git", "rev-parse", "--short", "HEAD"], cwd=src_dir, capture_output=True, text=True, check=True
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=src_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
                 ).stdout.strip()
-
-                tag_result = subprocess.run(
-                    ["git", "tag", "--points-at", "HEAD"], cwd=src_dir, capture_output=True, text=True, check=True
-                )
-                tag = tag_result.stdout.strip().split("\n")[0] if tag_result.stdout.strip() else ""
-
+                tag = subprocess.run(
+                    ["git", "tag", "--points-at", "HEAD"],
+                    cwd=src_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout.strip().split("\n")[0]
                 if tag:
-                    versions.append(f"{name}:{tag}")
-                    if not args.snapshot:
-                        self.log.info(f"{name}: tag={tag} commit={short}")
+                    print(f"  checked-out=tag:{tag} ({short})")
                 else:
-                    versions.append(f"{name}:{short}")
-                    if not args.snapshot:
-                        self.log.info(f"{name}: commit={short}")
+                    print(f"  checked-out=commit:{short}")
             except (subprocess.CalledProcessError, FileNotFoundError):
-                self.log.warning(f"{name}: unable to get git info")
-
-        # Handle --snapshot: commit and push with version info
-        if args.snapshot:
-            if not versions:
-                self.log.error("No dependencies found, cannot create snapshot")
-                return
-
-            version_str = " ".join(versions)
-            commit_msg = f"synced to {version_str}"
-
-            self.log.info(f"Creating snapshot: {commit_msg}")
-
-            try:
-                # git add --all
-                subprocess.run(["git", "add", "--all", "."], cwd=self.project.cwd, check=True)
-
-                # git commit
-                subprocess.run(["git", "commit", "-m", commit_msg], cwd=self.project.cwd, check=True)
-
-                # git push
-                subprocess.run(["git", "push"], cwd=self.project.cwd, check=True)
-
-                self.log.info("Snapshot complete")
-            except subprocess.CalledProcessError as e:
-                self.log.error(f"Snapshot failed: {e}")
+                print("  (unable to read git state)")
 
     # ------------------------------------------------------------------------
-    # bump
+    # clean
 
-    @opt("--major", "-M", "increment major version (X.0.0)")
-    @opt("--minor", "-m", "increment minor version (0.X.0)")
-    @opt("--dry-run", "-n", "show what would be done without making changes")
-    def do_bump(self, args: argparse.Namespace) -> None:
-        """bump version and create git tag"""
-        import re
-
-        # Files containing version
-        pyproject_path = self.project.cwd / "pyproject.toml"
-        init_path = self.project.cwd / "src" / "cyllama" / "__init__.py"
-
-        # Read current version from pyproject.toml
-        pyproject_content = pyproject_path.read_text()
-        version_match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject_content, re.MULTILINE)
-        if not version_match:
-            self.log.error("Could not find version in pyproject.toml")
-            return
-
-        current_version = version_match.group(1)
-        self.log.info(f"Current version: {current_version}")
-
-        # Parse semantic version
-        parts = current_version.split(".")
-        if len(parts) != 3:
-            self.log.error(f"Invalid semantic version format: {current_version}")
-            return
-
-        try:
-            major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
-        except ValueError:
-            self.log.error(f"Invalid version numbers: {current_version}")
-            return
-
-        # Calculate new version
-        if args.major:
-            major += 1
-            minor = 0
-            patch = 0
-        elif args.minor:
-            minor += 1
-            patch = 0
-        else:
-            # Default: patch increment
-            patch += 1
-
-        new_version = f"{major}.{minor}.{patch}"
-        self.log.info(f"New version: {new_version}")
-
-        if args.dry_run:
-            self.log.info("Dry run - no changes made")
-            self.log.info(f"Would update: {pyproject_path}")
-            self.log.info(f"Would update: {init_path}")
-            self.log.info(f"Would create git tag: {new_version}")
-            return
-
-        # Update pyproject.toml
-        new_pyproject = re.sub(
-            r'^(version\s*=\s*)"[^"]+"', f'\\1"{new_version}"', pyproject_content, flags=re.MULTILINE
-        )
-        pyproject_path.write_text(new_pyproject)
-        self.log.info(f"Updated {pyproject_path}")
-
-        # Update __init__.py
-        init_content = init_path.read_text()
-        new_init = re.sub(r'^(__version__\s*=\s*)"[^"]+"', f'\\1"{new_version}"', init_content, flags=re.MULTILINE)
-        init_path.write_text(new_init)
-        self.log.info(f"Updated {init_path}")
-
-        # Git operations
-        try:
-            # Stage version files
-            subprocess.run(["git", "add", str(pyproject_path), str(init_path)], cwd=self.project.cwd, check=True)
-
-            # Commit
-            subprocess.run(["git", "commit", "-m", f"bump version to {new_version}"], cwd=self.project.cwd, check=True)
-
-            # Create tag
-            subprocess.run(["git", "tag", new_version], cwd=self.project.cwd, check=True)
-            self.log.info(f"Created git tag: {new_version}")
-
-            # Push commit and tag
-            subprocess.run(["git", "push"], cwd=self.project.cwd, check=True)
-            subprocess.run(["git", "push", "origin", "tag", new_version], cwd=self.project.cwd, check=True)
-            self.log.info(f"Pushed tag {new_version} to origin")
-
-        except subprocess.CalledProcessError as e:
-            self.log.error(f"Git operation failed: {e}")
-            return
-
-        self.log.info(f"Version bump complete: {current_version} -> {new_version}")
-
-    # ------------------------------------------------------------------------
-    # status
-
-    @opt("--no-color", "-n", "disable colored output")
-    def do_status(self, args: argparse.Namespace) -> None:
-        """report which dependency libs are built (static + dynamic forms)"""
-        use_color = COLOR and sys.stdout.isatty() and not args.no_color
-
-        def paint(text: str, code: str) -> str:
-            return f"\033[{code}m{text}\033[0m" if use_color else text
-
-        state_color = {"OK": "32", "PARTIAL": "33", "MISSING": "31", "N/A": "90"}
-
-        builders = [
-            LlamaCppBuilder(),
-            WhisperCppBuilder(),
-            StableDiffusionCppBuilder(),
-        ]
-        for b in builders:
-            if not b.libs:
-                print(f"{b.name}: no libs declared")
-                continue
-            for kind, produces, expected_paths, missing_paths, root in [
-                ("static", b.produces_static, b.static_libs, b.missing_static_libs(), b.lib),
-                ("dynamic", b.produces_dynamic, b.dynamic_libs, b.missing_dynamic_libs(), b.dynamic_lib),
-            ]:
-                if not produces:
-                    na = paint("N/A", state_color["N/A"])
-                    print(f"{b.name} [{kind}]: {na}  ({kind} form not produced by this builder)")
-                    continue
-                present_count = len(expected_paths) - len(missing_paths)
-                if not missing_paths:
-                    state = "OK"
-                elif present_count == 0:
-                    state = "MISSING"
-                else:
-                    state = "PARTIAL"
-                painted_state = paint(state, state_color[state])
-                print(f"{b.name} [{kind}]: {painted_state}  ({present_count}/{len(expected_paths)} libs in {root})")
-                for p in expected_paths:
-                    if p in missing_paths:
-                        line = paint(f"  X {p.name}", state_color["MISSING"])
-                    else:
-                        line = paint(f"    {p.name}", state_color["OK"])
-                    print(line)
+    @opt("--reset", "-r", "also remove thirdparty/<dep>/{bin,lib,include}")
+    @opt("--verbose", "-v", "verbose cleaning ops")
+    def do_clean(self, args: argparse.Namespace) -> None:
+        """remove build/ (and optionally thirdparty dep install dirs)"""
+        verbose = args.verbose
+        self.remove(self.project.cwd / "build", silent=not verbose)
+        if args.reset:
+            thirdparty = self.project.cwd / "thirdparty"
+            for dep in ["llama.cpp", "whisper.cpp", "stable-diffusion.cpp"]:
+                dep_dir = thirdparty / dep
+                for subdir in ["bin", "lib", "include"]:
+                    self.remove(dep_dir / subdir, silent=not verbose)
+        self.log.info("Clean complete")
 
     # ------------------------------------------------------------------------
     # download
 
-    @opt("--llama", "-l", "download default llama model")
-    @opt("--whisper", "-w", "download whisper model")
-    @option("--whisper-model", "-W", default="base.en", help="whisper model name (default: base.en)")
-    @option("--models-dir", "-d", default="models", help="models directory (default: models)")
+    @opt("--llama", "-l", "download default Llama model")
+    @opt("--whisper", "-w", "download Whisper model")
+    @option(
+        "--whisper-model",
+        "-W",
+        default="base.en",
+        help="whisper model name (default: base.en)",
+    )
+    @option(
+        "--models-dir",
+        "-d",
+        default="models",
+        help="models directory (default: models)",
+    )
     def do_download(self, args: argparse.Namespace) -> None:
-        """download models"""
+        """download a test model for `chimera gen` / `chimera whisper`"""
         models_dir = Path(args.models_dir)
         models_dir.mkdir(parents=True, exist_ok=True)
 
         if args.llama:
-            # Download default llama model
             model_name = "Llama-3.2-1B-Instruct-Q8_0.gguf"
             model_path = models_dir / model_name
             if model_path.exists():
                 self.log.info(f"Model already exists: {model_path}")
             else:
-                url = f"https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/{model_name}"
+                url = (
+                    f"https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/"
+                    f"resolve/main/{model_name}"
+                )
                 self.log.info(f"Downloading {model_name}...")
                 urlretrieve(url, model_path)
                 self.log.info(f"Downloaded to {model_path}")
 
         if args.whisper:
-            # Download whisper model
             model_name = args.whisper_model
             valid_models = [
-                "tiny",
-                "tiny.en",
-                "tiny-q5_1",
-                "tiny.en-q5_1",
-                "tiny-q8_0",
-                "base",
-                "base.en",
-                "base-q5_1",
-                "base.en-q5_1",
-                "base-q8_0",
-                "small",
-                "small.en",
-                "small.en-tdrz",
-                "small-q5_1",
-                "small.en-q5_1",
-                "small-q8_0",
-                "medium",
-                "medium.en",
-                "medium-q5_0",
-                "medium.en-q5_0",
+                "tiny", "tiny.en", "tiny-q5_1", "tiny.en-q5_1", "tiny-q8_0",
+                "base", "base.en", "base-q5_1", "base.en-q5_1", "base-q8_0",
+                "small", "small.en", "small.en-tdrz", "small-q5_1",
+                "small.en-q5_1", "small-q8_0",
+                "medium", "medium.en", "medium-q5_0", "medium.en-q5_0",
                 "medium-q8_0",
-                "large-v1",
-                "large-v2",
-                "large-v2-q5_0",
-                "large-v2-q8_0",
-                "large-v3",
-                "large-v3-q5_0",
-                "large-v3-turbo",
-                "large-v3-turbo-q5_0",
-                "large-v3-turbo-q8_0",
+                "large-v1", "large-v2", "large-v2-q5_0", "large-v2-q8_0",
+                "large-v3", "large-v3-q5_0", "large-v3-turbo",
+                "large-v3-turbo-q5_0", "large-v3-turbo-q8_0",
             ]
             if model_name not in valid_models:
                 self.log.error(f"Invalid whisper model: {model_name}")
@@ -2751,417 +1202,6 @@ class Application(ShellCmd, metaclass=MetaCommander):
 
         if not args.llama and not args.whisper:
             self.log.info("Specify --llama or --whisper to download models")
-            self.log.info("  --llama: Download Llama-3.2-1B-Instruct-Q8_0.gguf")
-            self.log.info("  --whisper: Download whisper model (use --whisper-model to specify)")
-
-    # ------------------------------------------------------------------------
-    # bins
-
-    @opt("--clean", "-c", "clean before building")
-    def do_bins(self, args: argparse.Namespace) -> None:
-        """build llama.cpp CLI binaries"""
-        build_dir = self.project.cwd / "build" / "llama.cpp"
-        prefix = self.project.cwd / "thirdparty" / "llama.cpp"
-        bin_dir = prefix / "bin"
-
-        if not build_dir.exists():
-            self.log.error(f"llama.cpp source not found at {build_dir}")
-            self.log.info("Run 'python manage.py build -l' first to download llama.cpp")
-            return
-
-        bins_build_dir = build_dir / "build-bins"
-
-        if args.clean:
-            self.log.info("Cleaning previous binary build...")
-            self.remove(bins_build_dir)
-            self.remove(bin_dir)
-
-        bin_dir.mkdir(parents=True, exist_ok=True)
-
-        # Get backend options
-        builder = LlamaCppBuilder()
-        backend_options = builder.get_backend_cmake_options()
-
-        # Configure cmake for binaries
-        cmake_options = {
-            "BUILD_SHARED_LIBS": False,
-            "CMAKE_POSITION_INDEPENDENT_CODE": True,
-            "LLAMA_BUILD_EXAMPLES": True,
-            "LLAMA_BUILD_SERVER": True,
-            "LLAMA_BUILD_TESTS": False,
-            "LLAMA_CURL": False,
-            **backend_options,
-        }
-
-        self.log.info("Configuring llama.cpp binaries...")
-        builder.cmake_config(
-            src_dir=build_dir,
-            build_dir=bins_build_dir,
-            **cmake_options,
-        )
-
-        self.log.info("Building binaries...")
-        self.cmd(f"cmake --build {bins_build_dir} --config Release -j", cwd=build_dir)
-
-        # Copy binaries
-        self.log.info(f"Installing binaries to {bin_dir}...")
-        bin_src = bins_build_dir / "bin"
-        if bin_src.exists():
-            for binary in bin_src.glob("llama-*"):
-                if binary.is_file():
-                    shutil.copy2(binary, bin_dir)
-
-        # Count installed binaries
-        bin_count = len(list(bin_dir.glob("llama-*")))
-        self.log.info(f"Installed {bin_count} binaries to {bin_dir}")
-        self.log.info(f'Add to PATH: export PATH="{bin_dir}:$PATH"')
-
-    # ------------------------------------------------------------------------
-    # profile
-
-    @option("-m", "--model", default="models/Llama-3.2-1B-Instruct-Q8_0.gguf", help="model path")
-    @opt("--tokenization", "-t", "profile tokenization")
-    @opt("--inference", "-i", "profile inference")
-    @opt("--logits", "-l", "profile logits retrieval")
-    @opt("--batch", "-b", "profile batch operations")
-    @opt("--properties", "-p", "profile property access")
-    @opt("--all", "-a", "profile all operations")
-    @option("--iterations", "-n", type=int, default=100, help="iterations per test")
-    @option("--output", "-o", default=None, help="output directory for profile data")
-    def do_profile(self, args: argparse.Namespace) -> None:
-        """profile cyllama operations using cProfile"""
-        import time
-
-        model_path = Path(args.model)
-        if not model_path.exists():
-            self.log.error(f"Model not found: {model_path}")
-            return
-
-        # Import cyllama
-        try:
-            sys.path.insert(0, str(self.project.cwd / "src"))
-            from cyllama.llama.llama_cpp import (
-                LlamaContext,
-                LlamaContextParams,
-                LlamaModel,
-                LlamaModelParams,
-                LlamaSampler,
-                LlamaSamplerChainParams,
-                llama_batch_get_one,
-            )
-        except ImportError as e:
-            self.log.error(f"Failed to import cyllama: {e}")
-            return
-
-        profiles: dict[str, cProfile.Profile] = {}
-        iterations = args.iterations
-
-        # Determine what to profile
-        profile_all = args.all or not any([args.tokenization, args.inference, args.logits, args.batch, args.properties])
-
-        # Load model once for all tests
-        self.log.info(f"Loading model: {model_path}")
-        model_params = LlamaModelParams()
-        model = LlamaModel(str(model_path), model_params)
-        vocab = model.get_vocab()
-
-        # Profile tokenization
-        if profile_all or args.tokenization:
-            print("\n=== Profiling Tokenization ===")
-            test_texts = [
-                "Hello world",
-                "This is a longer sentence to tokenize.",
-                "Machine learning and AI " * 5,
-            ]
-
-            def tokenize_benchmark() -> int:
-                total = 0
-                for text in test_texts:
-                    for _ in range(iterations):
-                        tokens = vocab.tokenize(text, add_special=True, parse_special=False)
-                        total += len(tokens)
-                return total
-
-            pr = cProfile.Profile()
-            pr.enable()
-            t0 = time.perf_counter()
-            total_tokens = tokenize_benchmark()
-            elapsed = time.perf_counter() - t0
-            pr.disable()
-
-            print(f"Tokenized {total_tokens} tokens in {elapsed:.3f}s ({total_tokens / elapsed:.0f} tokens/s)")
-            self._print_profile_stats(pr, 10)
-            profiles["tokenization"] = pr
-
-        # Profile inference
-        if profile_all or args.inference:
-            print("\n=== Profiling Inference ===")
-
-            ctx_params = LlamaContextParams()
-            ctx_params.n_ctx = 256
-            ctx_params.n_batch = 512
-            ctx = LlamaContext(model, ctx_params)
-
-            sampler_params = LlamaSamplerChainParams()
-            sampler = LlamaSampler(sampler_params)
-            sampler.add_greedy()
-
-            prompt_tokens = vocab.tokenize("The future of AI is", add_special=True, parse_special=False)
-
-            def inference_benchmark() -> int:
-                generated = 0
-                for _ in range(min(iterations // 10, 10)):  # Fewer iterations, inference is slow
-                    ctx.kv_cache_clear()
-                    batch = llama_batch_get_one(prompt_tokens)
-                    ctx.decode(batch)
-                    for _ in range(20):  # Generate 20 tokens
-                        token = sampler.sample(ctx, -1)
-                        if model.token_is_eog(token):
-                            break
-                        sampler.accept(token)
-                        batch = llama_batch_get_one([token])
-                        ctx.decode(batch)
-                        generated += 1
-                return generated
-
-            pr = cProfile.Profile()
-            pr.enable()
-            t0 = time.perf_counter()
-            total_generated = inference_benchmark()
-            elapsed = time.perf_counter() - t0
-            pr.disable()
-
-            print(f"Generated {total_generated} tokens in {elapsed:.3f}s ({total_generated / elapsed:.1f} tokens/s)")
-            self._print_profile_stats(pr, 10)
-            profiles["inference"] = pr
-
-        # Profile logits retrieval
-        if profile_all or args.logits:
-            print("\n=== Profiling Logits Retrieval ===")
-
-            ctx_params = LlamaContextParams()
-            ctx_params.n_ctx = 128
-            ctx = LlamaContext(model, ctx_params)
-
-            tokens = vocab.tokenize("Test", add_special=True, parse_special=False)
-            batch = llama_batch_get_one(tokens)
-            ctx.decode(batch)
-
-            def logits_benchmark() -> int:
-                total = 0
-                for _ in range(iterations):
-                    logits = ctx.get_logits()
-                    total += len(logits)
-                return total
-
-            pr = cProfile.Profile()
-            pr.enable()
-            t0 = time.perf_counter()
-            total_logits = logits_benchmark()
-            elapsed = time.perf_counter() - t0
-            pr.disable()
-
-            print(f"Retrieved {total_logits:,} logit values in {elapsed:.3f}s ({total_logits / elapsed:,.0f} values/s)")
-            self._print_profile_stats(pr, 10)
-            profiles["logits"] = pr
-
-        # Profile batch operations
-        if profile_all or args.batch:
-            print("\n=== Profiling Batch Operations ===")
-
-            test_tokens = list(range(100))
-
-            def batch_benchmark() -> int:
-                total = 0
-                for _ in range(iterations * 10):
-                    llama_batch_get_one(test_tokens)
-                    total += 1
-                return total
-
-            pr = cProfile.Profile()
-            pr.enable()
-            t0 = time.perf_counter()
-            total_batches = batch_benchmark()
-            elapsed = time.perf_counter() - t0
-            pr.disable()
-
-            print(f"Created {total_batches} batches in {elapsed:.3f}s ({total_batches / elapsed:.0f} batches/s)")
-            self._print_profile_stats(pr, 10)
-            profiles["batch"] = pr
-
-        # Profile property access
-        if profile_all or args.properties:
-            print("\n=== Profiling Property Access ===")
-
-            def properties_benchmark() -> int:
-                total = 0
-                for _ in range(iterations * 10):
-                    total += model.n_embd
-                    total += model.n_layer
-                    total += model.n_vocab
-                return total
-
-            pr = cProfile.Profile()
-            pr.enable()
-            t0 = time.perf_counter()
-            _ = properties_benchmark()
-            elapsed = time.perf_counter() - t0
-            pr.disable()
-
-            accesses = iterations * 10 * 3
-            print(f"{accesses} property accesses in {elapsed:.3f}s ({accesses / elapsed:.0f} accesses/s)")
-            self._print_profile_stats(pr, 10)
-            profiles["properties"] = pr
-
-        # Save profile data if output directory specified
-        if args.output:
-            output_dir = Path(args.output)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            for name, pr in profiles.items():
-                pr.dump_stats(output_dir / f"{name}_profile.prof")
-                self.log.info(f"Saved {name} profile to {output_dir / f'{name}_profile.prof'}")
-
-        print("\n" + "=" * 50)
-        print("Profiling Complete!")
-        print("\nKey metrics:")
-        print("- cumtime: Total time spent in function and its callees")
-        print("- tottime: Time spent in function only (excluding callees)")
-        print("- ncalls: Number of times the function was called")
-
-    def _print_profile_stats(self, pr: cProfile.Profile, n: int = 10) -> None:
-        """Print top N functions from profile."""
-        import pstats
-        import io
-
-        s = io.StringIO()
-        ps = pstats.Stats(pr, stream=s)
-        ps.sort_stats("cumulative")
-        ps.print_stats(n)
-        for line in s.getvalue().split("\n")[: n + 10]:
-            print(line)
-
-    # ------------------------------------------------------------------------
-    # bench
-
-    @option("-m", "--model", default="models/Llama-3.2-1B-Instruct-Q8_0.gguf", help="model path")
-    @option("-p", "--prompt", default="Explain the theory of relativity in simple terms.", help="prompt")
-    @option("-n", "--n-tokens", type=int, default=100, help="tokens to generate")
-    @option("-r", "--runs", type=int, default=3, help="number of runs")
-    @opt("--no-warmup", "-W", "skip warmup run")
-    def do_bench(self, args: argparse.Namespace) -> None:
-        """run performance benchmark"""
-        import statistics
-        import time
-
-        model_path = Path(args.model)
-        if not model_path.exists():
-            self.log.error(f"Model not found: {model_path}")
-            self.log.info("Run 'python manage.py download --llama' to download default model")
-            return
-
-        # Import cyllama
-        try:
-            sys.path.insert(0, str(self.project.cwd / "src"))
-            from cyllama.llama.llama_cpp import (
-                LlamaModel,
-                LlamaContext,
-                LlamaModelParams,
-                LlamaContextParams,
-                LlamaSampler,
-                LlamaSamplerChainParams,
-                llama_batch_get_one,
-            )
-        except ImportError as e:
-            self.log.error(f"Failed to import cyllama: {e}")
-            self.log.info("Run 'python manage.py build -l' first")
-            return
-
-        self.log.info(f"Loading model: {model_path}")
-        model_params = LlamaModelParams()
-        model = LlamaModel(path_model=str(model_path), params=model_params)
-
-        ctx_params = LlamaContextParams()
-        ctx_params.n_ctx = 2048
-        ctx_params.n_batch = 512
-        ctx = LlamaContext(model=model, params=ctx_params)
-
-        sampler_params = LlamaSamplerChainParams()
-        sampler = LlamaSampler(sampler_params)
-        sampler.add_greedy()
-
-        prompt_tokens = model.tokenize(args.prompt.encode(), add_bos=True, special=True)
-        n_prompt = len(prompt_tokens)
-
-        results = []
-
-        # Warmup
-        if not args.no_warmup:
-            self.log.info("Warmup run...")
-            ctx.kv_cache_clear()
-            batch = llama_batch_get_one(prompt_tokens)
-            ctx.decode(batch)
-            for _ in range(10):
-                token = sampler.sample(ctx, -1)
-                sampler.accept(token)
-                batch = llama_batch_get_one([token])
-                ctx.decode(batch)
-
-        self.log.info(f"Running {args.runs} benchmark iterations...")
-
-        for run in range(args.runs):
-            ctx.kv_cache_clear()
-
-            # Prefill
-            t0 = time.perf_counter()
-            batch = llama_batch_get_one(prompt_tokens)
-            ctx.decode(batch)
-            prefill_time = (time.perf_counter() - t0) * 1000
-
-            # Decode
-            t0 = time.perf_counter()
-            generated = 0
-            for _ in range(args.n_tokens):
-                token = sampler.sample(ctx, -1)
-                if model.token_is_eog(token):
-                    break
-                sampler.accept(token)
-                batch = llama_batch_get_one([token])
-                ctx.decode(batch)
-                generated += 1
-            decode_time = (time.perf_counter() - t0) * 1000
-
-            prefill_speed = n_prompt / (prefill_time / 1000)
-            decode_speed = generated / (decode_time / 1000) if decode_time > 0 else 0
-
-            results.append(
-                {
-                    "prefill_ms": prefill_time,
-                    "decode_ms": decode_time,
-                    "prefill_tps": prefill_speed,
-                    "decode_tps": decode_speed,
-                    "generated": generated,
-                }
-            )
-
-            self.log.info(f"  Run {run + 1}: prefill={prefill_speed:.1f} t/s, decode={decode_speed:.1f} t/s")
-
-        # Summary
-        avg_prefill = statistics.mean(r["prefill_tps"] for r in results)
-        avg_decode = statistics.mean(r["decode_tps"] for r in results)
-        std_prefill = statistics.stdev(r["prefill_tps"] for r in results) if len(results) > 1 else 0
-        std_decode = statistics.stdev(r["decode_tps"] for r in results) if len(results) > 1 else 0
-
-        print()
-        print("=" * 50)
-        print(f"Benchmark Results ({args.runs} runs)")
-        print("=" * 50)
-        print(f"Model: {model_path.name}")
-        print(f"Prompt tokens: {n_prompt}")
-        print(f"Generated tokens: {results[0]['generated']}")
-        print()
-        print(f"Prefill: {avg_prefill:.1f} +/- {std_prefill:.1f} tokens/sec")
-        print(f"Decode:  {avg_decode:.1f} +/- {std_decode:.1f} tokens/sec")
-        print("=" * 50)
 
 
 if __name__ == "__main__":

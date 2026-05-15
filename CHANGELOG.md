@@ -5,6 +5,24 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `scripts/manage.py` trimmed of cyllama-specific code (wheel building,
+  Cython artifact cleanup, `profile` / `bench` / `bump` / `bins` /
+  `check-vendor` / `fix-macos-vulkan-wheel` / `write-build-config` /
+  `status` / `test` subcommands, dynamic-wheel `build_shared` /
+  `download_release` / macOS dylib rpath sanitization / MSVC import-lib
+  generation, dynamic-lib path machinery, `pip_install` / `apt_install` /
+  `brew_install` helpers, `STABLE_BUILD` env split). ~3170 -> ~1210
+  lines. Retained subcommands: `build`, `info`, `clean`, `download`.
+  `-D/--deps-only` kept as a no-op for Makefile compatibility.
+- `--help` output: compact spacing (short + long flags packed together
+  via `long_option_alignment_ratio(0.0f)`; explicit `usage()` string and
+  a `CompactFormatter` that trims `make_usage`'s trailing `"\n\n"` to
+  `"\n"` so section breaks are single blank lines).
+- Top-level description tightened to
+  `chimera - {llama,whisper,stable-diffusion}.cpp multitool`.
+
 ## [0.1.0]
 
 ### Added
