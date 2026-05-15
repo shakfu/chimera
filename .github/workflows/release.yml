@@ -14,6 +14,10 @@ jobs:
   build:
     name: build (${{ matrix.os }}, ${{ matrix.backend }})
     runs-on: ${{ matrix.os }}
+    # Match ci.yml: Windows is experimental until proven, but a missing
+    # Windows binary should not block a tag release of macOS/Linux. The
+    # publish job's `fail_on_unmatched_files` is relaxed accordingly.
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -21,11 +25,20 @@ jobs:
           - os: macos-14
             backend: metal
             artifact: chimera-macos-arm64
+            experimental: false
           - os: ubuntu-latest
             backend: cpu
             artifact: chimera-linux-x86_64
+            experimental: false
+          - os: windows-latest
+            backend: cpu
+            artifact: chimera-windows-x86_64.exe
+            experimental: true
     env:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,6 +56,17 @@ jobs:
         run: |
           if ! command -v cmake >/dev/null 2>&1; then brew install cmake; fi
 
+      - name: install windows deps
+        if: runner.os == 'Windows'
+        run: |
+          cmake --version
+          python --version
+          where cl.exe || true
+
+      - name: setup msvc
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: build
         run: make build
 
@@ -52,7 +76,19 @@ jobs:
       - name: stage artifact
         run: |
           mkdir -p dist
-          cp build/chimera "dist/${{ matrix.artifact }}"
+          # MSVC produces build/Release/chimera.exe; everywhere else it's
+          # build/chimera. Probe and copy whichever exists.
+          if [[ -f build/chimera ]]; then
+            cp build/chimera "dist/${{ matrix.artifact }}"
+          elif [[ -f build/Release/chimera.exe ]]; then
+            cp build/Release/chimera.exe "dist/${{ matrix.artifact }}"
+          elif [[ -f build/chimera.exe ]]; then
+            cp build/chimera.exe "dist/${{ matrix.artifact }}"
+          else
+            echo "could not locate built chimera binary" >&2
+            ls -la build/ build/Release/ 2>&1 || true
+            exit 1
+          fi
           (cd dist && \
             (sha256sum "${{ matrix.artifact }}" 2>/dev/null || shasum -a 256 "${{ matrix.artifact }}") \
             > "${{ matrix.artifact }}.sha256")
@@ -65,6 +101,11 @@ jobs:
 
   publish:
     needs: build
+    # Run even if the Windows build failed -- macOS/Linux artifacts should
+    # still publish. `if: always()` plus the relaxed file matcher below
+    # mean a missing windows leg degrades the release rather than
+    # aborting it.
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'failure')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -87,4 +128,8 @@ jobs:
             dist/chimera-macos-arm64.sha256
             dist/chimera-linux-x86_64
             dist/chimera-linux-x86_64.sha256
-          fail_on_unmatched_files: true
+            dist/chimera-windows-x86_64.exe
+            dist/chimera-windows-x86_64.exe.sha256
+          # Don't fail the release if Windows artifacts are missing while
+          # that leg is still experimental.
+          fail_on_unmatched_files: false
