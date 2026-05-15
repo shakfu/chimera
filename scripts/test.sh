@@ -19,13 +19,36 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CHIMERA="${CHIMERA:-$REPO_ROOT/build/chimera}"
 MODELS="$REPO_ROOT/models"
 SMOKE_ONLY=0
 [[ "${1:-}" == "--smoke" ]] && SMOKE_ONLY=1
 
-if [[ ! -x "$CHIMERA" ]]; then
-    echo "FAIL: chimera binary not found at $CHIMERA" >&2
+# Locate the built binary. Single-config generators (Unix Makefiles,
+# Ninja) put it directly at build/chimera; multi-config generators
+# (MSBuild, Xcode) put it under build/<Config>/chimera[.exe].
+locate_chimera() {
+    local candidates=(
+        "$REPO_ROOT/build/chimera"
+        "$REPO_ROOT/build/chimera.exe"
+        "$REPO_ROOT/build/Release/chimera.exe"
+        "$REPO_ROOT/build/Release/chimera"
+        "$REPO_ROOT/build/Debug/chimera.exe"
+        "$REPO_ROOT/build/Debug/chimera"
+    )
+    for c in "${candidates[@]}"; do
+        if [[ -x "$c" || -f "$c" ]]; then
+            printf '%s' "$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
+CHIMERA="${CHIMERA:-$(locate_chimera || true)}"
+
+if [[ -z "$CHIMERA" || ! -f "$CHIMERA" ]]; then
+    echo "FAIL: chimera binary not found under $REPO_ROOT/build/" >&2
+    echo "      searched: build/chimera, build/chimera.exe, build/{Release,Debug}/chimera[.exe]" >&2
     echo "      (run 'make build' first, or set CHIMERA=...)" >&2
     exit 1
 fi

@@ -6,11 +6,11 @@ PREFIX ?= /usr/local
 DESTDIR ?=
 
 build: deps
-	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF
-	@cmake --build $(BUILD_DIR) --target chimera -j
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release
+	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 rebuild:
-	@cmake --build $(BUILD_DIR) --target chimera -j
+	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 deps:
 	@SD_USE_VENDORED_GGML=0 $(PYTHON) scripts/manage.py build --all --deps-only --sd-shared-ggml
