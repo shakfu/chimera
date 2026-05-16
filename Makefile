@@ -1,6 +1,19 @@
 .PHONY: deps build rebuild clean reset test smoke install uninstall
 
-PYTHON ?= python3
+# Python interpreter, picked at make-invocation time by probing the host.
+# Order: `python3` (Linux / macOS / Conda / venv), `python` (Windows
+# python.org default, Microsoft Store Python, some Linux distros), `py -3`
+# (Windows Python Launcher, ships with python.org installers since 3.6).
+# Falls back to a literal `python3` if nothing is found so the failure is
+# obvious. Requires a POSIX shell — the project already needs bash for
+# `scripts/test.sh`, and the Windows CI leg uses git-bash, so this is
+# satisfied everywhere we build. Override with `make PYTHON=<cmd>` for
+# unusual environments (e.g. `PYTHON="uv run python"`).
+PYTHON ?= $(shell \
+    if command -v python3 >/dev/null 2>&1; then echo python3;  \
+    elif command -v python  >/dev/null 2>&1; then echo python; \
+    elif command -v py      >/dev/null 2>&1; then echo py -3;  \
+    else echo python3; fi)
 BUILD_DIR ?= build
 PREFIX ?= /usr/local
 DESTDIR ?=

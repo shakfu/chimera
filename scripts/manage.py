@@ -93,7 +93,7 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.1.0"
+CHIMERA_VERSION = "0.1.1"
 LLAMACPP_VERSION = "b9119"
 WHISPERCPP_VERSION = "v1.8.4"
 SDCPP_VERSION = "master-596-90e87bc"
