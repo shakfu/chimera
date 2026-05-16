@@ -77,3 +77,10 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# agentics
+.claude
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+

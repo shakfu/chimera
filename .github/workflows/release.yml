@@ -3,11 +3,15 @@ name: release
 on:
   push:
     tags:
-      - 'v*'
+      # We tag releases as bare semver (e.g. `0.1.2`). The `v`-prefixed
+      # form is also accepted in case the project ever flips convention
+      # or someone uses it manually.
+      - '[0-9]+.[0-9]+.[0-9]+*'
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g. v0.1.0). Must already exist.'
+        description: 'Tag to release (e.g. 0.1.2 or v0.1.2). Must already exist.'
         required: true
 
 jobs:
@@ -24,15 +28,15 @@ jobs:
         include:
           - os: macos-14
             backend: metal
-            artifact: chimera-macos-arm64
+            target: macos-arm64
             experimental: false
           - os: ubuntu-latest
             backend: cpu
-            artifact: chimera-linux-x86_64
+            target: linux-x86_64
             experimental: false
           - os: windows-latest
             backend: cpu
-            artifact: chimera-windows-x86_64.exe
+            target: windows-x86_64.exe
             experimental: true
     env:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
@@ -74,29 +78,42 @@ jobs:
         run: make smoke
 
       - name: stage artifact
+        # Builds the versioned filename `chimera-<version>-<target>`, e.g.
+        # chimera-0.1.2-macos-arm64. The version comes from the tag the
+        # workflow was triggered on (bare semver like `0.1.2`, or a
+        # `v`-prefixed form). The `${TAG#v}` strip is a no-op for bare
+        # semver and removes the prefix from `v0.1.2`.
         run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          ARTIFACT="chimera-${VERSION}-${{ matrix.target }}"
+          echo "artifact name: ${ARTIFACT}"
+
           mkdir -p dist
           # MSVC produces build/Release/chimera.exe; everywhere else it's
           # build/chimera. Probe and copy whichever exists.
           if [[ -f build/chimera ]]; then
-            cp build/chimera "dist/${{ matrix.artifact }}"
+            cp build/chimera "dist/${ARTIFACT}"
           elif [[ -f build/Release/chimera.exe ]]; then
-            cp build/Release/chimera.exe "dist/${{ matrix.artifact }}"
+            cp build/Release/chimera.exe "dist/${ARTIFACT}"
           elif [[ -f build/chimera.exe ]]; then
-            cp build/chimera.exe "dist/${{ matrix.artifact }}"
+            cp build/chimera.exe "dist/${ARTIFACT}"
           else
             echo "could not locate built chimera binary" >&2
             ls -la build/ build/Release/ 2>&1 || true
             exit 1
           fi
           (cd dist && \
-            (sha256sum "${{ matrix.artifact }}" 2>/dev/null || shasum -a 256 "${{ matrix.artifact }}") \
-            > "${{ matrix.artifact }}.sha256")
+            (sha256sum "${ARTIFACT}" 2>/dev/null || shasum -a 256 "${ARTIFACT}") \
+            > "${ARTIFACT}.sha256")
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}*
+          # upload-artifact name is for internal storage between jobs;
+          # the version-suffixed filename inside `path` is what gets
+          # downloaded + published.
+          name: ${{ matrix.target }}
+          path: dist/chimera-*-${{ matrix.target }}*
           if-no-files-found: error
 
   publish:
@@ -110,6 +127,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -118,18 +139,66 @@ jobs:
       - name: list staged files
         run: ls -la dist/
 
+      - name: extract release notes from CHANGELOG
+        # Pulls the section under `## [<version>]` out of CHANGELOG.md and
+        # writes it to release-notes.md, prefixed with a "Changes since
+        # the last Release" header. Falls back to `## [Unreleased]` if the
+        # version-named section doesn't exist (handy if the tag was made
+        # before CHANGELOG was renamed).
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+
+          extract_section() {
+            local header="$1"
+            # Exact string compare (not regex) so dots in "0.1.2" don't
+            # match "0.1.1" via `.`-as-any-char.
+            awk -v hdr="## [$header]" '
+              $0 == hdr               { in_section = 1; next }
+              in_section && /^## \[/  { exit }
+              in_section               { print }
+            ' CHANGELOG.md
+          }
+
+          SECTION="$(extract_section "$VERSION")"
+          if [ -z "${SECTION// }" ]; then
+            echo "no '## [$VERSION]' section in CHANGELOG.md; falling back to '## [Unreleased]'" >&2
+            SECTION="$(extract_section Unreleased)"
+          fi
+
+          if [ -z "${SECTION// }" ]; then
+            echo "no CHANGELOG section found; release will fall back to auto-generated notes" >&2
+            echo "FOUND=0" >> "$GITHUB_ENV"
+          else
+            {
+              echo "## Changes since the last Release"
+              echo
+              # Strip leading/trailing blank lines from the extracted block.
+              printf '%s\n' "$SECTION" | awk '/[^[:space:]]/ {found=1} found {print}' \
+                | awk 'BEGIN{n=0} {a[n++]=$0} END{while(n>0 && a[n-1] ~ /^[[:space:]]*$/) n--; for(i=0;i<n;i++) print a[i]}'
+            } > release-notes.md
+            echo "FOUND=1" >> "$GITHUB_ENV"
+            echo "--- release-notes.md ---"
+            cat release-notes.md
+          fi
+
       - name: create / update GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          generate_release_notes: true
+          # Use our extracted CHANGELOG section when we found one; let
+          # action-gh-release auto-generate notes otherwise.
+          body_path: ${{ env.FOUND == '1' && 'release-notes.md' || '' }}
+          generate_release_notes: ${{ env.FOUND != '1' }}
+          # Glob picks up the versioned filenames produced by the build job
+          # (`chimera-<version>-<target>` + the .sha256 sidecars).
           files: |
-            dist/chimera-macos-arm64
-            dist/chimera-macos-arm64.sha256
-            dist/chimera-linux-x86_64
-            dist/chimera-linux-x86_64.sha256
-            dist/chimera-windows-x86_64.exe
-            dist/chimera-windows-x86_64.exe.sha256
+            dist/chimera-*-macos-arm64
+            dist/chimera-*-macos-arm64.sha256
+            dist/chimera-*-linux-x86_64
+            dist/chimera-*-linux-x86_64.sha256
+            dist/chimera-*-windows-x86_64.exe
+            dist/chimera-*-windows-x86_64.exe.sha256
           # Don't fail the release if Windows artifacts are missing while
           # that leg is still experimental.
           fail_on_unmatched_files: false
