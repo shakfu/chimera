@@ -131,6 +131,22 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+// SetConsoleCtrlHandler + PHANDLER_ROUTINE live here. We include
+// <windows.h> only on Windows because it's enormous (~10 k declarations
+// on a typical SDK) and not needed by the POSIX signal path. Define the
+// NOMINMAX / WIN32_LEAN_AND_MEAN guards so it doesn't fight nlohmann/json
+// or anything else that exposes `min`/`max` as identifiers, and skip the
+// Winsock + GDI surface we don't touch.
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
+
 namespace {
 
 using json = nlohmann::ordered_json;

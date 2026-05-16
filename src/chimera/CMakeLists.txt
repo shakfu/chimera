@@ -153,7 +153,17 @@ if(UNIX AND NOT APPLE)
         list(APPEND _CHIMERA_GGML_LIBS ${LIB_GGML_OPENCL})
     endif()
 
+    # GNU ld is single-pass left-to-right: an archive only contributes
+    # the members needed by *currently-unresolved* symbols. server-context
+    # references symbols in llama-common (common_speculative_*,
+    # common_remote_get_content, ...) that were already skipped over when
+    # llama-common was first processed, because nothing earlier in the
+    # link had asked for them. --start-group / --end-group makes ld
+    # iterate the inner archives until they reach a fixed point, which
+    # is exactly the case for archives with bidirectional references.
+    # macOS's linker iterates by default so this is GNU-ld-only.
     target_link_libraries(chimera PRIVATE
+        -Wl,--start-group
         ${LIB_LLAMA}
         ${LIB_LLAMA_COMMON}
         ${LIB_MTMD}
@@ -162,6 +172,7 @@ if(UNIX AND NOT APPLE)
         ${LIB_WHISPER_COMMON}
         ${LIB_WHISPER}
         ${LIB_SD}
+        -Wl,--end-group
         -Wl,--whole-archive
         ${_CHIMERA_GGML_LIBS}
         -Wl,--no-whole-archive
