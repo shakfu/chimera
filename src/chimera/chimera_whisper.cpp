@@ -284,6 +284,10 @@ TranscribeResult transcribe(whisper_context * ctx, const TranscribeRequest & req
     params.translate        = req.translate;
     params.no_context       = req.no_context;
     params.no_timestamps    = !req.emit_timestamps;
+    // OpenAI's `timestamp_granularities=["word"]` maps here. Per-token
+    // timing is heavier than the segment-level default; only turn it on
+    // when the caller actually wants it.
+    params.token_timestamps = req.word_timestamps;
     params.print_progress   = false;
     params.print_realtime   = false;
     params.print_timestamps = false;
@@ -325,6 +329,58 @@ TranscribeResult transcribe(whisper_context * ctx, const TranscribeRequest & req
         s.t0   = whisper_full_get_segment_t0(ctx, i);
         s.t1   = whisper_full_get_segment_t1(ctx, i);
         s.text = trim(whisper_full_get_segment_text(ctx, i));
+
+        // Per-word timestamps: walk the segment's tokens, skip special
+        // tokens (text starts with `<|`...), and group subword pieces
+        // into words. Whisper's tokenizer prefixes the first piece of
+        // each word with a leading space; later pieces of the same word
+        // do not. We use that signal to detect word boundaries. CJK
+        // languages without inter-word spacing will produce
+        // one-word-per-token, which is still reasonable.
+        if (req.word_timestamps) {
+            const int n_tok = whisper_full_n_tokens(ctx, i);
+            Word cur{};
+            bool have_cur = false;
+            auto flush = [&]() {
+                if (!have_cur) return;
+                cur.text = trim(cur.text);
+                if (!cur.text.empty()) s.words.push_back(cur);
+                have_cur = false;
+                cur = Word{};
+            };
+            // Any token id >= whisper_token_beg is a timestamp marker
+            // (rendered as `[_BEG_]`, `[_TT_550]`, ...); skip them. The
+            // text-based guards below catch the remaining specials
+            // (`<|en|>`, `[_EOT_]`, etc.) which sit below that threshold.
+            const whisper_token tok_beg = whisper_token_beg(ctx);
+            for (int j = 0; j < n_tok; ++j) {
+                const whisper_token_data td =
+                    whisper_full_get_token_data(ctx, i, j);
+                if (td.id >= tok_beg) continue;
+
+                const char * raw = whisper_full_get_token_text(ctx, i, j);
+                if (raw == nullptr) continue;
+                const std::string text = raw;
+                if (text.empty()) continue;
+                if (text.size() >= 2 && text[0] == '<' && text[1] == '|') continue;
+                if (text.size() >= 2 && text[0] == '[' && text[1] == '_') continue;
+                // A leading-space token (or the first non-special token
+                // of the segment) begins a new word.
+                const bool starts_word = !have_cur || (!text.empty() && text[0] == ' ');
+                if (starts_word) {
+                    flush();
+                    cur.t0   = td.t0;
+                    cur.t1   = td.t1;
+                    cur.text = text;
+                    have_cur = true;
+                } else {
+                    cur.t1   = td.t1;
+                    cur.text += text;
+                }
+            }
+            flush();
+        }
+
         if (!result.text.empty() && !s.text.empty()) {
             result.text += ' ';
         }

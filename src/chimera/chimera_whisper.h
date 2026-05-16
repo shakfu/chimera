@@ -22,12 +22,24 @@ using WhisperContextPtr = std::unique_ptr<whisper_context, WhisperContextDeleter
 
 namespace chimera_whisper {
 
-// A single finalized whisper segment. Times are in 10 ms units (whisper.cpp's
-// native unit) when produced by transcribe(); convert via `ms = t * 10`.
-struct Segment {
+// One word inside a segment, populated when `TranscribeRequest::word_timestamps`
+// is set. `text` is the user-visible word (no leading space). Tokens that
+// don't begin a word (subword continuations) are merged into the previous
+// word; special tokens (`<|...|>`) are skipped.
+struct Word {
     int64_t     t0;   // start, 10ms units
     int64_t     t1;   // end,   10ms units
     std::string text;
+};
+
+// A single finalized whisper segment. Times are in 10 ms units (whisper.cpp's
+// native unit) when produced by transcribe(); convert via `ms = t * 10`.
+// `words` is populated only when `TranscribeRequest::word_timestamps` is true.
+struct Segment {
+    int64_t           t0;   // start, 10ms units
+    int64_t           t1;   // end,   10ms units
+    std::string       text;
+    std::vector<Word> words;
 };
 
 struct TranscribeRequest {
@@ -44,6 +56,12 @@ struct TranscribeRequest {
 
     int  threads      = -1;     // -1 = leave whisper's default
     std::string initial_prompt; // optional priming text (params.initial_prompt)
+
+    // When true, whisper produces per-token timing data which transcribe()
+    // groups into Word entries on each Segment. Required for OpenAI's
+    // `timestamp_granularities=["word"]` response. Adds compute; off by
+    // default. Maps to whisper's `params.token_timestamps`.
+    bool word_timestamps = false;
 
     // Optional callback invoked from whisper's new_segment_callback for each
     // finalized segment as it arrives. Used by the CLI for streaming output;

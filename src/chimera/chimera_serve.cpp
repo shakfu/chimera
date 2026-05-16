@@ -29,7 +29,10 @@
 //                                       is held in-process and lost on restart.
 //
 // Audio (only when --enable-audio):
-//   POST /v1/audio/transcriptions       (whisper.cpp; WAV-only, see handler comment)
+//   POST /v1/audio/transcriptions       transcribe in source language (whisper.cpp)
+//   POST /v1/audio/translations         translate to English regardless of input
+//                                       language (whisper's built-in translate mode)
+//                                       — both currently WAV-only; see handler comment
 //
 // Image (only when --enable-image):
 //   POST /v1/images/generations         txt2img (stable-diffusion.cpp)
@@ -316,8 +319,15 @@ std::string format_vtt(const chimera_whisper::TranscribeResult & r) {
 
 json format_verbose_json(const chimera_whisper::TranscribeResult & r,
                          const std::string & task,
-                         const std::string & language) {
+                         const std::string & language,
+                         bool                include_words) {
     json segs = json::array();
+    // OpenAI's "verbose_json" emits per-word entries at the top level (one
+    // flat array of {word, start, end}), not inside each segment. We do
+    // the same — agrees with what python-openai expects when
+    // `timestamp_granularities=["word"]` is passed.
+    json all_words = json::array();
+
     for (size_t i = 0; i < r.segments.size(); ++i) {
         // OpenAI's spec uses fractional-seconds (double) for start/end.
         // 10ms units -> seconds via /100.0.
@@ -328,19 +338,40 @@ json format_verbose_json(const chimera_whisper::TranscribeResult & r,
             { "end",   r.segments[i].t1 / 100.0 },
             { "text",  r.segments[i].text },
         });
+
+        if (include_words) {
+            for (const auto & w : r.segments[i].words) {
+                all_words.push_back({
+                    { "word",  w.text },
+                    { "start", w.t0 / 100.0 },
+                    { "end",   w.t1 / 100.0 },
+                });
+            }
+        }
     }
-    return {
+    json out = {
         { "task",     task },
         { "language", language },
         { "duration", r.audio_duration_s },
         { "text",     r.text },
         { "segments", segs },
     };
+    if (include_words) {
+        out["words"] = std::move(all_words);
+    }
+    return out;
 }
 
-// Build the handler bound to /v1/audio/transcriptions. Captures the
-// per-server whisper context + mutex by reference; both live in command_serve
-// for as long as the handler can be invoked, so the reference is safe.
+// Build the handler bound to /v1/audio/{transcriptions,translations}.
+// Captures the per-server whisper context + mutex by reference; both
+// live in command_serve for as long as the handler can be invoked, so
+// the reference is safe.
+//
+// `translate=true` is the difference between the two routes: whisper
+// emits the source language verbatim for transcriptions, or English
+// regardless of the input language for translations (whisper's built-in
+// translate mode). Everything else is shared, so the two routes bind
+// the same handler factory with different translate flags.
 //
 // SUPPORTED audio formats (Phase 2): WAV (RIFF/WAVE, PCM 8/16/24/32-bit
 // integer, or 32-bit float). The OpenAI spec also accepts mp3, mp4, mpeg,
@@ -354,9 +385,10 @@ json format_verbose_json(const chimera_whisper::TranscribeResult & r,
 // also ignored; segment-level timing is always returned in verbose_json.
 server_http_context::handler_t make_audio_transcribe_handler(
     whisper_context * ctx,
-    std::mutex      & ctx_mutex) {
+    std::mutex      & ctx_mutex,
+    bool              translate = false) {
 
-    return [ctx, &ctx_mutex](const server_http_req & req) -> server_http_res_ptr {
+    return [ctx, &ctx_mutex, translate](const server_http_req & req) -> server_http_res_ptr {
         auto err_res = [](int code, const std::string & msg) {
             auto res = std::make_unique<server_http_res>();
             res->status = code;
@@ -388,6 +420,34 @@ server_http_context::handler_t make_audio_transcribe_handler(
         const std::string lang = fields.value("language", std::string("auto"));
         const std::string prompt = fields.value("prompt", std::string());
 
+        // OpenAI's `timestamp_granularities` is an array of strings;
+        // `["word"]` (or `["segment", "word"]`) turns on per-word
+        // timing. The default is segment-only, which is what we already
+        // emit. Tolerate the field being a string instead of array (some
+        // clients pass it that way) or being absent entirely.
+        // The OpenAI Python SDK + curl `-F 'timestamp_granularities[]=word'`
+        // send the form key with PHP-style `[]` brackets; JSON bodies use
+        // the bare key. Accept either, and tolerate string-or-array shape.
+        bool want_word_ts = false;
+        auto check_granularity = [&](const json & g) {
+            if (g.is_array()) {
+                for (const auto & v : g) {
+                    if (v.is_string() && v.get<std::string>() == "word") {
+                        want_word_ts = true;
+                        return;
+                    }
+                }
+            } else if (g.is_string() && g.get<std::string>() == "word") {
+                want_word_ts = true;
+            }
+        };
+        if (fields.contains("timestamp_granularities")) {
+            check_granularity(fields["timestamp_granularities"]);
+        }
+        if (!want_word_ts && fields.contains("timestamp_granularities[]")) {
+            check_granularity(fields["timestamp_granularities[]"]);
+        }
+
         // Decode WAV. Phase 2 limitation: only RIFF/WAVE is supported; mp3,
         // m4a, webm, etc. need a follow-up decoder. The error message names
         // the limitation so callers don't have to read the source.
@@ -405,10 +465,11 @@ server_http_context::handler_t make_audio_transcribe_handler(
         chimera_whisper::TranscribeRequest treq;
         treq.audio_16k_mono  = std::move(audio);
         treq.language        = lang;
-        treq.translate       = false;
+        treq.translate       = translate;
         treq.no_context      = false;
         treq.emit_timestamps = true;   // needed for verbose_json/srt/vtt
         treq.initial_prompt  = prompt;
+        treq.word_timestamps = want_word_ts;
 
         chimera_whisper::TranscribeResult result;
         {
@@ -440,7 +501,9 @@ server_http_context::handler_t make_audio_transcribe_handler(
             res->content_type = "text/vtt; charset=utf-8";
             res->data = format_vtt(result);
         } else if (fmt == "verbose_json") {
-            res->data = format_verbose_json(result, "transcribe", out_lang).dump();
+            res->data = format_verbose_json(
+                result, translate ? "translate" : "transcribe", out_lang,
+                want_word_ts).dump();
         } else {
             // Default: simple {"text": "..."} per OpenAI spec.
             res->data = json{{ "text", result.text }}.dump();
@@ -1410,7 +1473,10 @@ int command_serve(const ServeOptions & opts) {
     if (whisper_ctx) {
         ctx_http.post("/v1/audio/transcriptions",
                       ex_wrapper(make_audio_transcribe_handler(
-                          whisper_ctx.get(), whisper_mutex)));
+                          whisper_ctx.get(), whisper_mutex, /*translate=*/false)));
+        ctx_http.post("/v1/audio/translations",
+                      ex_wrapper(make_audio_transcribe_handler(
+                          whisper_ctx.get(), whisper_mutex, /*translate=*/true)));
     }
     if (sd_ctx) {
         ctx_http.post("/v1/images/generations",
@@ -1461,7 +1527,7 @@ int command_serve(const ServeOptions & opts) {
               << "  meta:  /v1/models  /health  /metrics  /props\n"
               << "  tools: /infill  /tokenize  /detokenize  /apply-template\n"
               << "  anthropic: /v1/messages  /v1/messages/count_tokens\n";
-    if (whisper_ctx) std::cout << "  audio: /v1/audio/transcriptions\n";
+    if (whisper_ctx) std::cout << "  audio: /v1/audio/transcriptions  /v1/audio/translations\n";
     if (sd_ctx)      std::cout << "  image: /v1/images/generations  /v1/images/edits  /v1/images/variations\n";
     if (rag_ctx.embedder) std::cout << "  rag:   /v1/vector_stores  /v1/vector_stores/:name{,/delete,/files,/search}\n";
     if (opts.persist_chats) {
