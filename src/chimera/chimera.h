@@ -98,6 +98,55 @@ struct SdOptions {
 int command_whisper(const WhisperOptions & opts);
 int command_sd(const SdOptions & opts);
 
+// OpenAI-compatible HTTP server backed by llama.cpp's server-context engine.
+// First-cut scope is text generation only; audio/image endpoints are planned
+// follow-ups. Field names mirror common_params so the translation in
+// command_serve is one-for-one. Defaults are picked to match llama-server's
+// behavior when the corresponding flag is omitted.
+struct ServeOptions {
+    std::string model;             // required (--model)
+    std::string mmproj;             // optional (--mmproj), enables vision/audio inputs
+    std::string host = "127.0.0.1"; // --host
+    int         port = 8080;        // --port
+    int         n_ctx = 0;          // --ctx-size; 0 = the model's training context
+    int         n_batch = 2048;     // --batch-size (logical)
+    int         n_ubatch = 512;     // --ubatch-size (physical); reduced for embeddings
+    int         threads = -1;       // --threads; -1 = let common_params auto-pick
+    int         gpu_layers = -1;    // --gpu-layers; -1 = auto
+    int         parallel = 1;       // --parallel; number of concurrent slots
+    std::string api_key;            // --api-key; empty disables auth
+    bool        embedding = false;  // --embeddings; switches model to embed mode
+
+    // Phase 2: opt-in audio. When non-empty, a whisper.cpp model is loaded
+    // alongside the LLM and POST /v1/audio/transcriptions becomes available.
+    std::string audio_model;        // --enable-audio <whisper.gguf>
+
+    // Phase 3: opt-in image. When non-empty, a stable-diffusion.cpp model is
+    // loaded alongside the LLM and POST /v1/images/{generations,edits,
+    // variations} become available. The context is built with
+    // vae_decode_only=false so the encode path is available for img2img
+    // (/edits and /variations).
+    std::string sd_model;           // --enable-image <sd.gguf>
+
+    // Phase 4 (RAG): opt-in vector store. When non-empty, the named GGUF
+    // embedding model is loaded alongside the LLM and the
+    // POST/GET /v1/vector_stores/* routes are bound. Ingest and search
+    // requests targeting a collection whose recorded embedding_model does
+    // not match this one are rejected with a 400 (single-model server in
+    // this cut).
+    std::string rag_embedding_model;  // --enable-rag <embedding.gguf>
+    std::string rag_db_path;          // --rag-db (default: $CHIMERA_DB or platform default)
+
+    // Phase 5 (chat persistence): when true, every /v1/chat/completions
+    // exchange is saved to the chats + messages tables (one new chat row
+    // per request — the OpenAI API doesn't carry a chat id). Uses the
+    // same SQLite DB as the CLI's `chat --persist`.
+    bool        persist_chats = false; // --persist-chats
+    std::string chat_db_path;          // --chat-db (default: $CHIMERA_DB or platform default)
+};
+
+int command_serve(const ServeOptions & opts);
+
 void chimera_silence_whisper_log();
 void chimera_restore_whisper_log();
 void chimera_silence_sd_log();

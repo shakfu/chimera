@@ -93,13 +93,22 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.1.1"
+CHIMERA_VERSION = "0.1.2"
 LLAMACPP_VERSION = "b9119"
 WHISPERCPP_VERSION = "v1.8.4"
 SDCPP_VERSION = "master-596-90e87bc"
 # linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
 # commit in CHANGELOG for traceability.
 LINENOISE_VERSION = "master"
+# SQLite amalgamation; upstream files live at sqlite.org/<year>/
+# sqlite-amalgamation-<digits>.zip, where the digits encode major*1000000 +
+# minor*10000 + patch*100. 3470000 == 3.47.0.
+SQLITE_VERSION = "3.47.0"
+SQLITE_VERSION_URL_DIGITS = "3470000"
+SQLITE_VERSION_URL_YEAR = "2024"
+# sqlite-vec: vendored single-file extension built by chimera_db.cpp via
+# sqlite3_vec_init. We pin a release tag for reproducibility.
+SQLITE_VEC_VERSION = "v0.1.6"
 
 if PLATFORM == "Darwin":
     MACOSX_DEPLOYMENT_TARGET = setenv("MACOSX_DEPLOYMENT_TARGET", "12.6")
@@ -576,7 +585,8 @@ class LlamaCppBuilder(GgmlBuilder):
     version: str = LLAMACPP_VERSION
     repo_url: str = "https://github.com/ggml-org/llama.cpp.git"
     base_libs: list[str] = ["ggml", "ggml-base", "ggml-cpu"]
-    extra_libs: list[str] = ["llama", "llama-common", "mtmd"]
+    extra_libs: list[str] = ["llama", "llama-common", "mtmd",
+                             "server-context", "cpp-httplib"]
 
     def get_backend_cmake_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {}
@@ -650,6 +660,29 @@ class LlamaCppBuilder(GgmlBuilder):
         )
         # mtmd (multimodal) headers.
         self.glob_copy(self.src_dir / "tools" / "mtmd", self.include, patterns=["*.h"])
+        # server-context (OpenAI-compatible engine) headers. server-context
+        # itself is a STATIC library upstream; server-http is *not* — it lives
+        # only in llama-server's own source list, so its .cpp is also copied
+        # below as an auxiliary source the consumer (chimera) compiles into
+        # its own target.
+        self.glob_copy(self.src_dir / "tools" / "server", self.include,
+                       patterns=["server-*.h"])
+        # cpp-httplib (single-header). server-http.cpp includes it as
+        # `<cpp-httplib/httplib.h>`, so the header goes under a subdir of
+        # the same name, not at the include root.
+        httplib_src = self.src_dir / "vendor" / "cpp-httplib"
+        httplib_dst = self.include / "cpp-httplib"
+        if httplib_src.exists():
+            httplib_dst.mkdir(exist_ok=True)
+            self.glob_copy(httplib_src, httplib_dst, patterns=["httplib.h"])
+        # Auxiliary source files: server-http.cpp is not part of
+        # libserver-context.a (upstream compiles it directly into the
+        # llama-server binary). Stash it under src-aux/ so chimera's
+        # CMakeLists can compile it as part of the chimera target.
+        src_aux = self.prefix / "src-aux"
+        src_aux.mkdir(exist_ok=True)
+        self.glob_copy(self.src_dir / "tools" / "server", src_aux,
+                       patterns=["server-http.cpp"])
 
     def build(self) -> None:
         if not self.src_dir.exists():
@@ -679,29 +712,42 @@ class LlamaCppBuilder(GgmlBuilder):
             CMAKE_VISIBILITY_INLINES_HIDDEN=True,
             LLAMA_CURL=False,
             LLAMA_OPENSSL=True,
-            LLAMA_BUILD_SERVER=False,
+            # LLAMA_BUILD_SERVER=ON adds tools/server to the cmake graph so the
+            # server-context STATIC library target is defined. We do NOT build
+            # the llama-server *executable* below; only the static lib and the
+            # vendored cpp-httplib are needed to power `chimera serve`. The
+            # 11 MB Web UI is skipped via LLAMA_BUILD_WEBUI=OFF.
+            LLAMA_BUILD_SERVER=True,
+            LLAMA_BUILD_WEBUI=False,
             LLAMA_BUILD_TESTS=False,
             LLAMA_BUILD_EXAMPLES=False,
             **extra,
             **backend_options,
         )
-        # Build only the targets chimera needs (avoids httplib-dependent tools).
+        # Build only the targets chimera needs. Notably, the llama-server
+        # executable is intentionally absent — we link server-context as a
+        # library and provide our own (smaller) entry point in chimera_serve.
         self.cmake_build_targets(
             build_dir=self.build_dir,
-            targets=["llama", "llama-common", "mtmd"],
+            targets=["llama", "llama-common", "mtmd",
+                     "server-context", "cpp-httplib"],
             release=True,
         )
 
         self.lib.mkdir(parents=True, exist_ok=True)
         self.copy_lib(self.build_dir, "common", "llama-common", self.lib)
+        # cpp-httplib is now a hard dep (was optional when SERVER=OFF). Drop
+        # required=False so a missing artifact becomes a visible build error
+        # rather than a silent skip that explodes at chimera link time.
         self.copy_lib(
-            self.build_dir, "vendor/cpp-httplib", "cpp-httplib", self.lib, required=False
+            self.build_dir, "vendor/cpp-httplib", "cpp-httplib", self.lib
         )
         self.copy_lib(self.build_dir, "src", "llama", self.lib)
         self.copy_lib(self.build_dir, "ggml/src", "ggml", self.lib)
         self.copy_lib(self.build_dir, "ggml/src", "ggml-base", self.lib)
         self.copy_lib(self.build_dir, "ggml/src", "ggml-cpu", self.lib)
         self.copy_lib(self.build_dir, "tools/mtmd", "mtmd", self.lib)
+        self.copy_lib(self.build_dir, "tools/server", "server-context", self.lib)
         self.copy_backend_libs()
 
 
@@ -924,6 +970,135 @@ class LinenoiseBuilder(Builder):
         self.copy_lib(self.build_dir, ".", "linenoise", self.lib)
 
 
+class SqliteBuilder(AbstractBuilder):
+    """Vendor SQLite as a single-translation-unit amalgamation.
+
+    Unlike the other builders this one neither configures nor compiles
+    anything: SQLite is shipped as plain C (sqlite3.c + sqlite3.h) and
+    chimera's own CMake target compiles it inline (the same pattern we
+    use for tools/server/server-http.cpp). manage.py here is only
+    responsible for fetching the amalgamation and dropping the two
+    files into thirdparty/sqlite/{include,src-aux}/.
+    """
+
+    name: str = "sqlite"
+    version: str = SQLITE_VERSION
+    repo_url: str = ""   # not git; we fetch the .zip from sqlite.org
+    libs: list[str] = []
+
+    def setup(self) -> None:
+        # We download lazily inside build(); nothing to do upfront beyond
+        # ensuring the project root exists.
+        self.project.setup()
+
+    def build(self) -> None:
+        self.log.info(f"fetching {self.name} {self.version}")
+        self.prefix.mkdir(parents=True, exist_ok=True)
+        self.include.mkdir(exist_ok=True)
+        src_aux = self.prefix / "src-aux"
+        src_aux.mkdir(exist_ok=True)
+
+        # If the destination files already exist with the pinned version,
+        # skip the download — manage.py re-runs on every `make deps`.
+        sentinel = self.prefix / f".version-{self.version}"
+        if sentinel.exists():
+            self.log.info(f"{self.name} {self.version} already vendored")
+            return
+
+        zip_name = f"sqlite-amalgamation-{SQLITE_VERSION_URL_DIGITS}.zip"
+        url = f"https://sqlite.org/{SQLITE_VERSION_URL_YEAR}/{zip_name}"
+        stage = self.project.src / self.name
+        stage.mkdir(parents=True, exist_ok=True)
+        archive = self.download(url, tofolder=stage)
+        self.extract(archive, tofolder=stage)
+
+        extracted = stage / f"sqlite-amalgamation-{SQLITE_VERSION_URL_DIGITS}"
+        if not extracted.exists():
+            raise FileNotFoundError(
+                f"expected extracted directory not found: {extracted}")
+
+        # The amalgamation ships sqlite3.c + sqlite3.h (plus shell.c +
+        # sqlite3ext.h which we don't need for embedded use).
+        self.copy(extracted / "sqlite3.h", self.include / "sqlite3.h")
+        # sqlite3ext.h is also needed when loading extensions like
+        # sqlite-vec via the sqlite3_load_extension API path. We don't go
+        # via load_extension (we statically link sqlite3_vec_init), but
+        # sqlite-vec.c #includes "sqlite3ext.h" so the header must be
+        # present alongside the source.
+        self.copy(extracted / "sqlite3ext.h", self.include / "sqlite3ext.h")
+        self.copy(extracted / "sqlite3.c", src_aux / "sqlite3.c")
+
+        sentinel.write_text(self.version)
+        self.log.info(f"vendored {self.name} {self.version}")
+
+
+class SqliteVecBuilder(AbstractBuilder):
+    """Vendor sqlite-vec (asg017/sqlite-vec) as a single-TU amalgamation.
+
+    Same shape as SqliteBuilder: no library is built; chimera compiles
+    the source file into its own target.
+    """
+
+    name: str = "sqlite-vec"
+    version: str = SQLITE_VEC_VERSION
+    repo_url: str = "https://github.com/asg017/sqlite-vec.git"
+    libs: list[str] = []
+
+    def setup(self) -> None:
+        self.project.setup()
+        if self.src_dir.exists():
+            return
+        # Shallow clone at the pinned tag.
+        self.git_clone(self.repo_url, branch=self.version, cwd=self.project.src)
+
+    def build(self) -> None:
+        self.log.info(f"fetching {self.name} {self.version}")
+        if not self.src_dir.exists():
+            self.setup()
+        self.prefix.mkdir(parents=True, exist_ok=True)
+        self.include.mkdir(exist_ok=True)
+        src_aux = self.prefix / "src-aux"
+        src_aux.mkdir(exist_ok=True)
+
+        sentinel = self.prefix / f".version-{self.version}"
+        if sentinel.exists():
+            self.log.info(f"{self.name} {self.version} already vendored")
+            return
+
+        c_src = self.src_dir / "sqlite-vec.c"
+        if not c_src.exists():
+            raise FileNotFoundError(f"sqlite-vec.c not found at {c_src}")
+
+        # sqlite-vec ships sqlite-vec.h.tmpl rather than a prebuilt header;
+        # upstream's CMake fills the ${VERSION_*} placeholders at build
+        # time. We expand them here so chimera's compile sees a concrete
+        # sqlite-vec.h. The template variables we care about all derive
+        # from the pinned tag.
+        tmpl_path = self.src_dir / "sqlite-vec.h.tmpl"
+        if not tmpl_path.exists():
+            raise FileNotFoundError(f"sqlite-vec.h.tmpl not found at {tmpl_path}")
+        tag = self.version.lstrip("v")  # "v0.1.6" -> "0.1.6"
+        parts = tag.split(".")
+        while len(parts) < 3:
+            parts.append("0")
+        substitutions = {
+            "${VERSION}":       tag,
+            "${VERSION_MAJOR}": parts[0],
+            "${VERSION_MINOR}": parts[1],
+            "${VERSION_PATCH}": parts[2],
+            "${DATE}":          "chimera-vendored",
+            "${SOURCE}":        f"asg017/sqlite-vec@{self.version}",
+        }
+        header = tmpl_path.read_text()
+        for k, v in substitutions.items():
+            header = header.replace(k, v)
+        (self.include / "sqlite-vec.h").write_text(header)
+        self.copy(c_src, src_aux / "sqlite-vec.c")
+
+        sentinel.write_text(self.version)
+        self.log.info(f"vendored {self.name} {self.version}")
+
+
 # ----------------------------------------------------------------------------
 # argparse decorator scaffolding
 
@@ -1035,6 +1210,8 @@ class Application(ShellCmd, metaclass=MetaCommander):
     @opt("-w", "--whisper-cpp", "build whisper.cpp only")
     @opt("-d", "--stable-diffusion", "build stable-diffusion.cpp only")
     @opt("-L", "--linenoise", "build linenoise only")
+    @opt("-q", "--sqlite", "vendor SQLite amalgamation only")
+    @opt("-Q", "--sqlite-vec", "vendor sqlite-vec amalgamation only")
     @opt("-a", "--all", "build all dependencies")
     @opt("-D", "--deps-only", "(retained for Makefile compatibility; no-op)")
     @option(
@@ -1068,6 +1245,16 @@ class Application(ShellCmd, metaclass=MetaCommander):
         default=LINENOISE_VERSION,
         help=f"linenoise version/branch (default: {LINENOISE_VERSION})",
     )
+    @option(
+        "--sqlite-version",
+        default=SQLITE_VERSION,
+        help=f"SQLite version (default: {SQLITE_VERSION})",
+    )
+    @option(
+        "--sqlite-vec-version",
+        default=SQLITE_VEC_VERSION,
+        help=f"sqlite-vec tag (default: {SQLITE_VEC_VERSION})",
+    )
     def do_build(self, args: argparse.Namespace) -> None:
         """fetch + build third-party dependencies into thirdparty/<project>/"""
         if args.cpu_only:
@@ -1099,12 +1286,14 @@ class Application(ShellCmd, metaclass=MetaCommander):
             WhisperCppBuilder: args.whisper_version,
             StableDiffusionCppBuilder: args.sd_version,
             LinenoiseBuilder: args.linenoise_version,
+            SqliteBuilder: args.sqlite_version,
+            SqliteVecBuilder: args.sqlite_vec_version,
         }
 
-        _builders: list[type[Builder]] = []
+        _builders: list[type[AbstractBuilder]] = []
         if args.all:
             _builders = [LlamaCppBuilder, WhisperCppBuilder, StableDiffusionCppBuilder,
-                         LinenoiseBuilder]
+                         LinenoiseBuilder, SqliteBuilder, SqliteVecBuilder]
         else:
             if args.llama_cpp:
                 _builders.append(LlamaCppBuilder)
@@ -1114,11 +1303,15 @@ class Application(ShellCmd, metaclass=MetaCommander):
                 _builders.append(StableDiffusionCppBuilder)
             if args.linenoise:
                 _builders.append(LinenoiseBuilder)
+            if args.sqlite:
+                _builders.append(SqliteBuilder)
+            if args.sqlite_vec:
+                _builders.append(SqliteVecBuilder)
 
         if not _builders:
             self.log.error(
                 "No builders selected; pass --all or one of --llama-cpp / "
-                "--whisper-cpp / --stable-diffusion"
+                "--whisper-cpp / --stable-diffusion / --sqlite / --sqlite-vec"
             )
             return
 

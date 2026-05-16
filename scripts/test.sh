@@ -160,8 +160,43 @@ done
 if [[ -n "$EMBED_MODEL" ]]; then
     run "embed $(basename "$EMBED_MODEL")" \
         "$CHIMERA" embed -m "$EMBED_MODEL" -p "a quick brown fox"
+
+    # Vector-store smoke: create a collection, ingest a small corpus
+    # with one passage that should clearly win on a targeted query, and
+    # check the top hit. Uses CHIMERA_DB so the test never touches the
+    # user's real chimera.db. Cleaned up at the end of the block.
+    VEC_DB="$(mktemp -t chimera-vec-XXXXXX).db"
+    VEC_DOC="$(mktemp -t chimera-vec-doc-XXXXXX).txt"
+    cat > "$VEC_DOC" <<'EOF'
+The chimera serve subcommand exposes an OpenAI-compatible HTTP server.
+
+The whisper.cpp wrapper accepts WAV audio files only in the first cut.
+
+SQLite plus sqlite-vec is embedded for RAG and persistent chat history.
+EOF
+    if CHIMERA_DB="$VEC_DB" "$CHIMERA" index create -n rag_test -e "$EMBED_MODEL" >/dev/null 2>&1 \
+        && CHIMERA_DB="$VEC_DB" "$CHIMERA" index ingest -n rag_test -f "$VEC_DOC" \
+            --chunk-chars 128 --chunk-overlap 16 >/dev/null 2>&1; then
+        VEC_HIT="$(CHIMERA_DB="$VEC_DB" "$CHIMERA" search -n rag_test \
+            -q "audio file formats" -k 1 2>/dev/null)"
+        if printf '%s' "$VEC_HIT" | grep -q 'WAV audio files'; then
+            printf "  PASS  %s\n" "vector store (rag_test top hit on 'audio file formats')"
+            pass=$((pass + 1))
+        else
+            printf "  FAIL  %s\n" "vector store top hit"
+            printf "        got: %s\n" "$VEC_HIT"
+            fail=$((fail + 1))
+            failed_names+=("vector-store")
+        fi
+    else
+        printf "  FAIL  %s\n" "vector store create/ingest"
+        fail=$((fail + 1))
+        failed_names+=("vector-store-setup")
+    fi
+    rm -f "$VEC_DB" "$VEC_DB-wal" "$VEC_DB-shm" "$VEC_DOC"
 else
     skip_test "embed" "no embedding model under $MODELS/"
+    skip_test "vector store" "no embedding model under $MODELS/"
 fi
 
 # whisper: needs both a ggml model and a WAV. jfk.wav ships with whisper.cpp.
@@ -270,6 +305,29 @@ if [[ -f "$GEN_MODEL" ]]; then
         fail=$((fail + 1))
         failed_names+=("chat-kv-cache")
     fi
+
+    # chat --persist + --list + --search: verifies SQLite chat persistence
+    # round-trips. Uses a unique nonsense word so the FTS5 hit is
+    # unambiguous. The model's *reply* doesn't matter here — what we test
+    # is that the conversation is saved and findable.
+    CHAT_DB="$(mktemp -t chimera-chat-XXXXXX).db"
+    PERSIST_OUT="$(printf "my secret token is xyzzy42.\n/exit\n" | \
+        "$CHIMERA" chat -m "$GEN_MODEL" --db "$CHAT_DB" --persist -n 4 \
+            --color never 2>/dev/null || true)"
+    LIST_OUT="$("$CHIMERA"   chat --db "$CHAT_DB" --list             2>/dev/null || true)"
+    SEARCH_OUT="$("$CHIMERA" chat --db "$CHAT_DB" --search xyzzy42   2>/dev/null || true)"
+    if printf '%s' "$LIST_OUT"   | grep -q '#1' \
+        && printf '%s' "$SEARCH_OUT" | grep -q '\[xyzzy42\]'; then
+        printf "  PASS  %s\n" "chat --persist + --list + --search round-trip"
+        pass=$((pass + 1))
+    else
+        printf "  FAIL  %s\n" "chat persistence round-trip"
+        printf "        list:   %s\n" "$LIST_OUT"
+        printf "        search: %s\n" "$SEARCH_OUT"
+        fail=$((fail + 1))
+        failed_names+=("chat-persistence")
+    fi
+    rm -f "$CHAT_DB" "$CHAT_DB-wal" "$CHAT_DB-shm"
 fi
 
 echo

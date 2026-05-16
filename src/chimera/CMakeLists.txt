@@ -34,10 +34,24 @@ endif()
 
 add_executable(chimera
     "${CMAKE_CURRENT_LIST_DIR}/chimera.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_chat_store.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_db.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_embed.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_vector_store.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_whisper.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_sd.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_serve.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/llama_build_info_shim.cpp"
     "${CHIMERA_STB_IMPL}"
+    # server-http.cpp is the HTTP-frontend half of llama-server. Upstream
+    # compiles it directly into the llama-server executable rather than into
+    # libserver-context.a; we do the same, pulling the source out of the
+    # llama.cpp tree via the src-aux/ directory that manage.py populates.
+    "${LLAMACPP_SRC_AUX}/server-http.cpp"
+    # SQLite + sqlite-vec amalgamations. Both are plain C, single TU, with
+    # no external deps; we compile them straight into the chimera target.
+    "${SQLITE_SRC_AUX}/sqlite3.c"
+    "${SQLITE_VEC_SRC_AUX}/sqlite-vec.c"
 )
 
 target_include_directories(chimera PRIVATE
@@ -45,6 +59,33 @@ target_include_directories(chimera PRIVATE
     "${LLAMACPP_INCLUDE}"
     "${WHISPERCPP_INCLUDE}"
     "${SDCPP_INCLUDE}"
+    "${SQLITE_INCLUDE}"
+    "${SQLITE_VEC_INCLUDE}"
+)
+
+# SQLite compile-time tuning. The flags trim ~50 KB of dead code we don't
+# use, force WAL-friendly defaults, and pre-enable FTS5 (needed by the chat
+# search feature) + math functions (sqlite-vec uses some of these). See
+# doc/dev/sqlite.md § 2 for the per-flag rationale.
+#
+# SQLITE_CORE switches sqlite-vec.h between extension-mode (where sqlite
+# calls route through a sqlite3_api function-pointer table loaded at
+# runtime) and core-mode (direct symbol calls). Since we statically link
+# sqlite-vec.c into the same target as sqlite3.c, core-mode is correct.
+target_compile_definitions(chimera PRIVATE
+    SQLITE_CORE
+    SQLITE_DQS=0
+    SQLITE_DEFAULT_MEMSTATUS=0
+    SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+    SQLITE_LIKE_DOESNT_MATCH_BLOBS
+    SQLITE_MAX_EXPR_DEPTH=0
+    SQLITE_OMIT_DECLTYPE
+    SQLITE_OMIT_DEPRECATED
+    SQLITE_OMIT_PROGRESS_CALLBACK
+    SQLITE_OMIT_SHARED_CACHE
+    SQLITE_THREADSAFE=2
+    SQLITE_ENABLE_FTS5
+    SQLITE_ENABLE_MATH_FUNCTIONS
 )
 
 # Optional linenoise: header + macro flag are added only when the parent
@@ -54,7 +95,11 @@ if(CHIMERA_LINK_LINENOISE)
     target_compile_definitions(chimera PRIVATE CHIMERA_HAS_LINENOISE)
 endif()
 
-target_compile_options(chimera PRIVATE ${CXX_COMPILE_OPTIONS})
+# CXX_COMPILE_OPTIONS contains -std=c++17 (or /std:c++17 on MSVC), which
+# the C compiler rejects. Gate the option list to C++ sources only so
+# sqlite3.c / sqlite-vec.c / server-http.cpp (wait — that's C++) get
+# only the flags they accept. server-http.cpp is .cpp so it's fine.
+target_compile_options(chimera PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CXX_COMPILE_OPTIONS}>)
 set_target_properties(chimera PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
@@ -72,6 +117,19 @@ target_compile_definitions(chimera PRIVATE
     CHIMERA_LLAMACPP_VERSION="${LLAMACPP_VERSION}"
     CHIMERA_WHISPERCPP_VERSION="${WHISPERCPP_VERSION}"
     CHIMERA_SDCPP_VERSION="${SDCPP_VERSION}"
+)
+
+# Build-time intent baked in for `chimera info`. Each empty-string macro
+# is filtered out at render time so we only print knobs that were
+# actually set. See top-level CMakeLists for how these are derived.
+target_compile_definitions(chimera PRIVATE
+    CHIMERA_BUILT_BACKENDS="${CHIMERA_BUILT_BACKENDS}"
+    CHIMERA_CUDA_ARCHITECTURES="${CHIMERA_CUDA_ARCHITECTURES}"
+    CHIMERA_HIP_ARCHITECTURES="${CHIMERA_HIP_ARCHITECTURES}"
+    CHIMERA_BLAS_VENDOR="${CHIMERA_BLAS_VENDOR}"
+    CHIMERA_CUDA_FORCE_MMQ="${CHIMERA_CUDA_FORCE_MMQ}"
+    CHIMERA_CUDA_FORCE_CUBLAS="${CHIMERA_CUDA_FORCE_CUBLAS}"
+    CHIMERA_HIP_ROCWMMA_FATTN="${CHIMERA_HIP_ROCWMMA_FATTN}"
 )
 
 if(UNIX AND NOT APPLE)
@@ -99,6 +157,8 @@ if(UNIX AND NOT APPLE)
         ${LIB_LLAMA}
         ${LIB_LLAMA_COMMON}
         ${LIB_MTMD}
+        ${LIB_SERVER_CONTEXT}
+        ${LIB_CPP_HTTPLIB}
         ${LIB_WHISPER_COMMON}
         ${LIB_WHISPER}
         ${LIB_SD}
@@ -112,6 +172,8 @@ elseif(APPLE)
         ${LIB_LLAMA}
         ${LIB_LLAMA_COMMON}
         ${LIB_MTMD}
+        ${LIB_SERVER_CONTEXT}
+        ${LIB_CPP_HTTPLIB}
         ${LIB_WHISPER_COMMON}
         ${LIB_WHISPER}
         ${LIB_SD}
@@ -153,6 +215,8 @@ else()
         ${LIB_GGML_BASE}
         ${LIB_GGML_CPU}
         ${LIB_MTMD}
+        ${LIB_SERVER_CONTEXT}
+        ${LIB_CPP_HTTPLIB}
         ${LIB_WHISPER_COMMON}
         ${LIB_WHISPER}
         ${LIB_SD}

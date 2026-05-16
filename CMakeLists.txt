@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 # Extract chimera + bundled third-party versions from scripts/manage.py
 # (the single source of truth). Falls back to "unknown" if the regex misses.
 file(READ "${CMAKE_SOURCE_DIR}/scripts/manage.py" _manage_py)
-foreach(_pair "CHIMERA_VERSION" "LLAMACPP_VERSION" "WHISPERCPP_VERSION" "SDCPP_VERSION" "LINENOISE_VERSION")
+foreach(_pair "CHIMERA_VERSION" "LLAMACPP_VERSION" "WHISPERCPP_VERSION" "SDCPP_VERSION" "LINENOISE_VERSION" "SQLITE_VERSION" "SQLITE_VEC_VERSION")
     string(REGEX MATCH "${_pair} = \"([^\"]+)\"" _ "${_manage_py}")
     if(CMAKE_MATCH_1)
         set(${_pair} "${CMAKE_MATCH_1}")
@@ -20,6 +20,8 @@ message(STATUS "llama.cpp version:      ${LLAMACPP_VERSION}")
 message(STATUS "whisper.cpp version:    ${WHISPERCPP_VERSION}")
 message(STATUS "sd.cpp version:         ${SDCPP_VERSION}")
 message(STATUS "linenoise version:      ${LINENOISE_VERSION}")
+message(STATUS "sqlite version:         ${SQLITE_VERSION}")
+message(STATUS "sqlite-vec version:     ${SQLITE_VEC_VERSION}")
 
 # -----------------------------------------------------------------------------
 # Options
@@ -112,6 +114,50 @@ message(STATUS "GGML_SYCL:   ${GGML_SYCL}")
 message(STATUS "GGML_OPENCL: ${GGML_OPENCL}")
 
 # -----------------------------------------------------------------------------
+# Build-time intent capture for `chimera info`.
+#
+# We bake the enabled-backend list + tuning knobs into compile-time string
+# macros so `chimera info` can report what the binary was *built* for in
+# addition to what its ggml registry happens to expose at runtime. The two
+# normally agree; when they don't (driver missing, registry init failed,
+# etc.) the divergence is the bug-report signal.
+#
+# Modelled on cyllama's build_config.json but without the sidecar file —
+# `#define` keeps chimera's "one static binary, nothing else to install"
+# posture intact.
+# -----------------------------------------------------------------------------
+set(_CHIMERA_BUILT_BACKENDS "")
+foreach(_b "GGML_METAL=Metal" "GGML_CUDA=CUDA" "GGML_VULKAN=Vulkan"
+           "GGML_HIP=HIP" "GGML_SYCL=SYCL" "GGML_OPENCL=OpenCL"
+           "GGML_BLAS=BLAS")
+    string(REPLACE "=" ";" _kv "${_b}")
+    list(GET _kv 0 _flag)
+    list(GET _kv 1 _label)
+    if(${_flag})
+        if(_CHIMERA_BUILT_BACKENDS STREQUAL "")
+            set(_CHIMERA_BUILT_BACKENDS "${_label}")
+        else()
+            set(_CHIMERA_BUILT_BACKENDS "${_CHIMERA_BUILT_BACKENDS},${_label}")
+        endif()
+    endif()
+endforeach()
+if(_CHIMERA_BUILT_BACKENDS STREQUAL "")
+    set(_CHIMERA_BUILT_BACKENDS "CPU")
+endif()
+set(CHIMERA_BUILT_BACKENDS "${_CHIMERA_BUILT_BACKENDS}")
+
+# Tuning knobs we surface in `info`. Each becomes an empty-string macro
+# when not set, so the consumer just filters out the empties.
+set(CHIMERA_CUDA_ARCHITECTURES "$ENV{CMAKE_CUDA_ARCHITECTURES}")
+set(CHIMERA_HIP_ARCHITECTURES  "$ENV{CMAKE_HIP_ARCHITECTURES}")
+set(CHIMERA_BLAS_VENDOR        "$ENV{GGML_BLAS_VENDOR}")
+set(CHIMERA_CUDA_FORCE_MMQ     "$ENV{GGML_CUDA_FORCE_MMQ}")
+set(CHIMERA_CUDA_FORCE_CUBLAS  "$ENV{GGML_CUDA_FORCE_CUBLAS}")
+set(CHIMERA_HIP_ROCWMMA_FATTN  "$ENV{GGML_HIP_ROCWMMA_FATTN}")
+
+message(STATUS "built backends:         ${CHIMERA_BUILT_BACKENDS}")
+
+# -----------------------------------------------------------------------------
 # Platform-specific static-library naming
 # -----------------------------------------------------------------------------
 if(APPLE)
@@ -160,12 +206,38 @@ endfunction()
 # -----------------------------------------------------------------------------
 # Static libraries
 # -----------------------------------------------------------------------------
-static_lib(LIB_LLAMA         "${LLAMACPP_LIB}" "llama")
-static_lib(LIB_LLAMA_COMMON  "${LLAMACPP_LIB}" "llama-common")
-static_lib(LIB_GGML          "${LLAMACPP_LIB}" "ggml")
-static_lib(LIB_GGML_BASE     "${LLAMACPP_LIB}" "ggml-base")
-static_lib(LIB_GGML_CPU      "${LLAMACPP_LIB}" "ggml-cpu")
-static_lib(LIB_MTMD          "${LLAMACPP_LIB}" "mtmd")
+static_lib(LIB_LLAMA           "${LLAMACPP_LIB}" "llama")
+static_lib(LIB_LLAMA_COMMON    "${LLAMACPP_LIB}" "llama-common")
+static_lib(LIB_GGML            "${LLAMACPP_LIB}" "ggml")
+static_lib(LIB_GGML_BASE       "${LLAMACPP_LIB}" "ggml-base")
+static_lib(LIB_GGML_CPU        "${LLAMACPP_LIB}" "ggml-cpu")
+static_lib(LIB_MTMD            "${LLAMACPP_LIB}" "mtmd")
+static_lib(LIB_SERVER_CONTEXT  "${LLAMACPP_LIB}" "server-context")
+static_lib(LIB_CPP_HTTPLIB     "${LLAMACPP_LIB}" "cpp-httplib")
+
+# server-http.cpp is not part of libserver-context.a (upstream compiles it
+# directly into the llama-server executable). manage.py drops it here so the
+# chimera target can pull it into its own compilation.
+set(LLAMACPP_SRC_AUX "${LLAMACPP_DIR}/src-aux")
+
+# SQLite + sqlite-vec are shipped as single-translation-unit amalgamations
+# (sqlite3.c, sqlite-vec.c). manage.py vendors them under thirdparty/<name>/
+# with the same include/+src-aux/ layout as the llama-server pieces above.
+# chimera's CMakeLists pulls both .c files into the chimera target's source
+# list rather than building a separate library.
+set(SQLITE_DIR     "${CMAKE_SOURCE_DIR}/thirdparty/sqlite")
+set(SQLITE_VEC_DIR "${CMAKE_SOURCE_DIR}/thirdparty/sqlite-vec")
+set(SQLITE_INCLUDE     "${SQLITE_DIR}/include")
+set(SQLITE_VEC_INCLUDE "${SQLITE_VEC_DIR}/include")
+set(SQLITE_SRC_AUX     "${SQLITE_DIR}/src-aux")
+set(SQLITE_VEC_SRC_AUX "${SQLITE_VEC_DIR}/src-aux")
+foreach(_aux "${SQLITE_SRC_AUX}/sqlite3.c" "${SQLITE_VEC_SRC_AUX}/sqlite-vec.c")
+    if(NOT EXISTS "${_aux}")
+        message(FATAL_ERROR
+            "Missing vendored source: ${_aux}\n"
+            "Run: python scripts/manage.py build --sqlite --sqlite-vec  (or --all)")
+    endif()
+endforeach()
 
 if(GGML_METAL)
     static_lib(LIB_GGML_BLAS  "${LLAMACPP_LIB}" "ggml-blas")
@@ -205,12 +277,29 @@ else()
     list(APPEND SYSTEM_LIBS kernel32 user32 advapi32)
 endif()
 
+# cpp-httplib on macOS reads trust-anchor certs from the system keychain
+# (SecCertificateCopyData / SecTrustCopyAnchorCertificates). Link Security
+# + CoreFoundation so those symbols resolve. Required for `chimera serve`.
+if(APPLE)
+    list(APPEND SYSTEM_LIBS "-framework Security" "-framework CoreFoundation")
+endif()
+
 # OpenMP: ggml-cpu's CMake enables OpenMP by default when the compiler
 # supports it. On Linux + gcc that means libgomp symbols (GOMP_barrier,
 # GOMP_parallel, omp_get_thread_num, ...) end up in libggml-cpu.a, and
 # the final chimera link needs the runtime. macOS / Apple clang has no
 # OpenMP by default so find_package fails silently and ggml builds
 # without OpenMP -- nothing to link.
+# OpenSSL: cpp-httplib is compiled with LLAMA_OPENSSL=ON (manage.py) so it
+# references X509_*, SSL_*, EVP_*, etc. The chimera serve subcommand uses
+# cpp-httplib to host the OpenAI-compatible API; we therefore need the
+# system OpenSSL runtime at link time. Brew-installed OpenSSL on macOS
+# typically lives outside CMake's default search paths -- caller can set
+# OPENSSL_ROOT_DIR if find_package can't locate it.
+find_package(OpenSSL REQUIRED)
+message(STATUS "OpenSSL:                found (${OPENSSL_VERSION})")
+list(APPEND SYSTEM_LIBS OpenSSL::SSL OpenSSL::Crypto)
+
 find_package(OpenMP QUIET)
 if(OpenMP_CXX_FOUND)
     message(STATUS "OpenMP:                 found (${OpenMP_CXX_VERSION})")

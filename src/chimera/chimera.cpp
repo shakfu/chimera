@@ -33,6 +33,12 @@
 
 #include "chat.h"
 #include "chimera.h"
+#include "chimera_chat_store.h"
+#include "chimera_db.h"
+#include "chimera_embed.h"
+#include "chimera_sd.h"
+#include "chimera_vector_store.h"
+#include "chimera_whisper.h"
 #include "common.h"
 #include "ggml.h"
 #include "llama.h"
@@ -257,7 +263,8 @@ std::string chat_sample_loop(
     const llama_vocab * vocab,
     int n_predict,
     const common_chat_parser_params & parser_params,
-    std::vector<llama_token> * out_tokens) {
+    std::vector<llama_token> * out_tokens,
+    std::string * out_reasoning = nullptr) {
 
     std::string raw;
     std::string content;
@@ -294,6 +301,9 @@ std::string chat_sample_loop(
         }
     }
     std::cout << '\n';
+    if (out_reasoning) {
+        *out_reasoning = prev.reasoning_content;
+    }
     return content;
 }
 
@@ -726,10 +736,19 @@ std::string describe_modalities(mtmd_context * mctx) {
     return s;
 }
 
+// Persistent-chat configuration. Empty defaults are "ephemeral mode" —
+// no DB connection, no chat row, identical to pre-phase-3 behavior.
+struct ChatPersistence {
+    bool        persist     = false;   // --persist: opt-in save per turn
+    std::string resume;                // --resume <id|last>; empty = new chat
+    std::string db_path;               // --db override; empty = default_path()
+};
+
 int command_chat(const LlamaCommonOptions & opts,
                  const std::string & system_prompt,
                  const std::string & template_override,
-                 ColorMode color_mode) {
+                 ColorMode color_mode,
+                 const ChatPersistence & persist_cfg = {}) {
     const bool color_on = apply_color_mode(color_mode);
 
     Spinner spinner;
@@ -773,6 +792,70 @@ int command_chat(const LlamaCommonOptions & opts,
     std::vector<common_chat_msg> history;
     if (!system_prompt.empty()) {
         history.push_back(make_chat_msg("system", system_prompt));
+    }
+
+    // ---- chat persistence wiring (phase 3) ----------------------------
+    // chat_conn stays alive for the whole session. chat_id == 0 means
+    // "ephemeral mode" — no DB writes happen. We open the DB lazily so
+    // ephemeral sessions don't touch the filesystem.
+    chimera_db::Connection chat_conn;
+    int64_t chat_id = 0;
+    // The basename of opts.model is recorded on the chats row as model_alias.
+    // Same string the banner uses at line ~870 (declared again below).
+    const std::string chat_model_alias =
+        std::filesystem::path(opts.model).filename().string();
+    if (persist_cfg.persist || !persist_cfg.resume.empty()) {
+        chat_conn = chimera_db::open_and_migrate(
+            persist_cfg.db_path.empty()
+                ? chimera_db::default_path() : persist_cfg.db_path);
+    }
+    if (!persist_cfg.resume.empty()) {
+        std::optional<chimera_chat_store::Chat> existing;
+        if (persist_cfg.resume == "last" || persist_cfg.resume == "latest") {
+            existing = chimera_chat_store::latest_chat(chat_conn.get());
+            if (!existing) {
+                fail(ExitCode::BadInput, "no chats to resume");
+            }
+        } else {
+            try {
+                const int64_t id = std::stoll(persist_cfg.resume);
+                existing = chimera_chat_store::load_chat(chat_conn.get(), id);
+            } catch (const std::exception &) {
+                fail(ExitCode::BadInput,
+                     "invalid --resume value: '" + persist_cfg.resume +
+                     "' (expected an integer chat id or 'last')");
+            }
+            if (!existing) {
+                fail(ExitCode::BadInput,
+                     "no such chat id: " + persist_cfg.resume);
+            }
+        }
+        if (existing->model_alias != chat_model_alias && !existing->model_alias.empty()) {
+            std::cerr << Sem::Info
+                      << "note: chat #" << existing->id << " was started with model '"
+                      << existing->model_alias << "', resuming under '" << chat_model_alias
+                      << "'." << Sem::Reset << "\n";
+        }
+        chat_id = existing->id;
+        const auto stored = chimera_chat_store::load_messages(chat_conn.get(), chat_id);
+        // Replace any system-prompt we seeded above with whatever the
+        // resumed chat actually carries. Then append the rest in order.
+        history.clear();
+        for (const auto & m : stored) {
+            history.push_back(make_chat_msg(m.role, m.content));
+        }
+        std::cout << Sem::Info << "resumed chat #" << chat_id
+                  << " (" << stored.size() << " messages, model "
+                  << existing->model_alias << ")" << Sem::Reset << "\n";
+    } else if (persist_cfg.persist) {
+        chat_id = chimera_chat_store::create_chat(
+            chat_conn.get(), opts.model, chat_model_alias, system_prompt,
+            /*source=*/"chat");
+        std::cout << Sem::Info << "persistent chat #" << chat_id
+                  << " (DB: " << (persist_cfg.db_path.empty()
+                                  ? chimera_db::default_path()
+                                  : persist_cfg.db_path)
+                  << ")" << Sem::Reset << "\n";
     }
 
     std::string         cur_text_prefix;   // /read /glob accumulator
@@ -941,13 +1024,27 @@ int command_chat(const LlamaCommonOptions & opts,
             conv_media.clear();
             cur_text_prefix.clear();
             multimodal_active = false;
-            std::cout << Sem::Info << "chat history cleared."
-                      << Sem::Reset << "\n";
+            // Persistent mode: /clear starts a fresh chat row rather than
+            // wiping the existing one. The old chat is still in the DB,
+            // just no longer the active session.
+            if (chat_conn.ok() && persist_cfg.persist) {
+                chat_id = chimera_chat_store::create_chat(
+                    chat_conn.get(), opts.model, chat_model_alias, system_prompt, "chat");
+                std::cout << Sem::Info
+                          << "chat history cleared; started new chat #"
+                          << chat_id << "." << Sem::Reset << "\n";
+            } else {
+                std::cout << Sem::Info << "chat history cleared."
+                          << Sem::Reset << "\n";
+            }
             continue;
         } else if (line == "/regen") {
             bool dropped = false;
             while (!history.empty() && history.back().role == "assistant") {
                 history.pop_back();
+                if (chat_id) {
+                    chimera_chat_store::delete_last_message(chat_conn.get(), chat_id);
+                }
                 dropped = true;
             }
             if (!dropped) {
@@ -992,6 +1089,25 @@ int command_chat(const LlamaCommonOptions & opts,
             }
             content += line;
             history.push_back(make_chat_msg("user", content));
+            // Persistent mode: serialize the just-attached media paths
+            // into media_json so a future --resume could in principle
+            // re-attach them. Phase 3 does not auto-reattach on resume.
+            std::string media_json;
+            if (!pending_media.empty()) {
+                media_json = "[";
+                bool first = true;
+                for (const auto & m : pending_media) {
+                    if (!first) media_json += ",";
+                    media_json += "\"" + m.path + "\"";
+                    first = false;
+                }
+                media_json += "]";
+            }
+            if (chat_id) {
+                chimera_chat_store::append_message(
+                    chat_conn.get(), chat_id, "user", content,
+                    /*reasoning=*/"", media_json);
+            }
             for (auto & m : pending_media) conv_media.push_back(std::move(m));
             pending_media.clear();
             should_generate = true;
@@ -1023,6 +1139,7 @@ int command_chat(const LlamaCommonOptions & opts,
 
         std::vector<llama_token> generated;
         std::string reply;
+        std::string reply_reasoning;   // populated when the model emits <think>...</think>
         size_t n_prompt = 0;
         double t_prompt = 0.0;
         double t_gen    = 0.0;
@@ -1074,7 +1191,8 @@ int command_chat(const LlamaCommonOptions & opts,
             }
             const auto t1 = clock::now();
             reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
-                                     opts.n_predict, parser_params, &generated);
+                                     opts.n_predict, parser_params, &generated,
+                                     &reply_reasoning);
             t_gen = secs(clock::now() - t1);
         } else {
             // Text-only fast path: KV-prefix reuse via token comparison.
@@ -1102,7 +1220,8 @@ int command_chat(const LlamaCommonOptions & opts,
             for (llama_token tok : tail) common_sampler_accept(sampler.get(), tok, false);
             const auto t1 = clock::now();
             reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
-                                     opts.n_predict, parser_params, &generated);
+                                     opts.n_predict, parser_params, &generated,
+                                     &reply_reasoning);
             t_gen = secs(clock::now() - t1);
             kv_tokens = full_tokens;
             kv_tokens.insert(kv_tokens.end(), generated.begin(), generated.end());
@@ -1118,6 +1237,13 @@ int command_chat(const LlamaCommonOptions & opts,
         }
 
         history.push_back(make_chat_msg("assistant", reply));
+        if (chat_id) {
+            chimera_chat_store::append_message(
+                chat_conn.get(), chat_id, "assistant", reply,
+                reply_reasoning, /*media_json=*/"",
+                static_cast<int>(n_prompt),
+                static_cast<int>(generated.size()));
+        }
     }
 
 #ifdef CHIMERA_HAS_LINENOISE
@@ -1171,67 +1297,17 @@ enum llama_pooling_type parse_pooling(const std::string & name) {
 int command_embed(const EmbedOptions & opts) {
     const std::string text = resolve_prompt(opts.input, opts.input_file);
 
-    LlamaCommonOptions load_opts;
-    load_opts.model = opts.model;
-    load_opts.gpu_layers = opts.gpu_layers;
-    load_opts.use_mmap = opts.use_mmap;
-    auto model = load_llama_model(load_opts);
-    const llama_vocab * vocab = llama_model_get_vocab(model.get());
-
-    const auto tokens = tokenize(vocab, text, true, true);
-    if (tokens.empty()) {
-        fail(ExitCode::BadInput, "input tokenized to zero tokens");
-    }
-
-    const int32_t n_embd = llama_model_n_embd(model.get());
-    const uint32_t n_train = llama_model_n_ctx_train(model.get());
-    const uint32_t requested_ctx = opts.n_ctx == 0 ? n_train : opts.n_ctx;
-
-    llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx = std::max<uint32_t>(requested_ctx, static_cast<uint32_t>(tokens.size()));
-    cparams.n_batch = std::max<uint32_t>(opts.n_batch, static_cast<uint32_t>(tokens.size()));
-    cparams.n_ubatch = cparams.n_batch;
-    cparams.n_threads = opts.threads;
-    cparams.n_threads_batch = opts.threads;
-    cparams.embeddings = true;
-    cparams.pooling_type = parse_pooling(opts.pooling);
-    cparams.no_perf = true;
-
-    LlamaContextPtr ctx(llama_init_from_model(model.get(), cparams));
-    if (!ctx) {
-        fail(ExitCode::Load, "failed to create llama context");
-    }
-
-    if (llama_decode(ctx.get(),
-                     llama_batch_get_one(const_cast<llama_token *>(tokens.data()),
-                                         static_cast<int32_t>(tokens.size()))) != 0) {
-        fail(ExitCode::Generate, "failed to decode input for embedding");
-    }
-
-    const enum llama_pooling_type ptype = cparams.pooling_type;
-    const float * emb = nullptr;
-    if (ptype == LLAMA_POOLING_TYPE_NONE) {
-        emb = llama_get_embeddings(ctx.get());
-    } else {
-        emb = llama_get_embeddings_seq(ctx.get(), 0);
-        if (emb == nullptr) {
-            emb = llama_get_embeddings_ith(ctx.get(),
-                                           static_cast<int32_t>(tokens.size()) - 1);
-        }
-    }
-    if (emb == nullptr) {
-        fail(ExitCode::Generate, "no embeddings produced (model may not support pooling)");
-    }
-
-    std::vector<float> vec(emb, emb + n_embd);
-    if (opts.normalize) {
-        double norm_sq = 0.0;
-        for (float v : vec) norm_sq += static_cast<double>(v) * v;
-        const float norm = static_cast<float>(std::sqrt(norm_sq));
-        if (norm > 0.0f) {
-            for (float & v : vec) v /= norm;
-        }
-    }
+    chimera_embed::Config cfg;
+    cfg.model      = opts.model;
+    cfg.pooling    = opts.pooling;
+    cfg.threads    = opts.threads;
+    cfg.gpu_layers = opts.gpu_layers;
+    cfg.n_ctx      = opts.n_ctx;
+    cfg.n_batch    = opts.n_batch;
+    cfg.normalize  = opts.normalize;
+    cfg.use_mmap   = opts.use_mmap;
+    chimera_embed::Embedder embedder(cfg);
+    const auto vec = embedder.embed(text);
 
     std::ofstream out_file;
     std::ostream * out = &std::cout;
@@ -1242,7 +1318,6 @@ int command_embed(const EmbedOptions & opts) {
         }
         out = &out_file;
     }
-
     *out << std::setprecision(8);
     for (size_t i = 0; i < vec.size(); ++i) {
         if (i > 0) *out << ' ';
@@ -1252,11 +1327,598 @@ int command_embed(const EmbedOptions & opts) {
     return 0;
 }
 
+// ---- chunking ----------------------------------------------------------
+
+// Character-window fixed-overlap chunker with a sentence-boundary nudge.
+// Phase-2 first cut; token-based chunking is doc/dev/sqlite.md §11.4. ~2048
+// chars maps to roughly ~500 tokens of English (4 chars/tok rule of thumb).
+struct TextChunk {
+    std::string text;
+    int         index;
+};
+
+std::vector<TextChunk> chunk_text(const std::string & text,
+                                  size_t window_chars  = 2048,
+                                  size_t overlap_chars = 256) {
+    std::vector<TextChunk> chunks;
+    if (text.empty()) return chunks;
+    size_t pos = 0;
+    int idx = 0;
+    while (pos < text.size()) {
+        size_t end = std::min(pos + window_chars, text.size());
+        if (end < text.size()) {
+            // Within the last 5 % of the window, prefer a paragraph or
+            // sentence boundary so chunks don't sever mid-sentence.
+            const size_t backstop = pos + (window_chars * 95) / 100;
+            for (const char * pat : {"\n\n", ". ", "! ", "? ", "\n"}) {
+                const auto p = text.rfind(pat, end);
+                if (p != std::string::npos && p > backstop) {
+                    end = p + std::strlen(pat);
+                    break;
+                }
+            }
+        }
+        std::string slice = text.substr(pos, end - pos);
+        // Trim leading/trailing whitespace from each chunk.
+        slice = trim(std::move(slice));
+        if (!slice.empty()) {
+            chunks.push_back({std::move(slice), idx++});
+        }
+        if (end >= text.size()) break;
+        pos = (end > overlap_chars) ? end - overlap_chars : 0;
+    }
+    return chunks;
+}
+
+// ---- index / search subcommand implementations ------------------------
+
+// `chimera index create` — load the model long enough to discover its
+// embedding dim, then record the collection metadata. We don't ingest
+// anything here; that's a separate operation. Done as one upfront step
+// rather than on-demand so subsequent `ingest` and `search` calls fail
+// fast if the model is missing.
+int command_index_create(const std::string & db_path,
+                         const std::string & name,
+                         const std::string & embedding_model,
+                         int                 ctx_size,
+                         int                 threads,
+                         int                 gpu_layers,
+                         const std::string & pooling) {
+    if (embedding_model.empty()) {
+        fail(ExitCode::BadInput, "index create requires --embedding-model");
+    }
+
+    chimera_embed::Config cfg;
+    cfg.model      = embedding_model;
+    cfg.pooling    = pooling;
+    cfg.threads    = threads;
+    cfg.gpu_layers = gpu_layers;
+    cfg.n_ctx      = static_cast<uint32_t>(ctx_size);
+    cfg.normalize  = true;
+    chimera_embed::Embedder embedder(cfg);
+    const int dim = embedder.n_embd();
+
+    auto conn = chimera_db::open_and_migrate(
+        db_path.empty() ? chimera_db::default_path() : db_path);
+    auto col = chimera_vector_store::create(conn.get(), name, embedding_model, dim);
+
+    std::cout << "created collection '" << col.name << "'\n"
+              << "  embedding model: " << col.embedding_model << "\n"
+              << "  dim:             " << col.dim << "\n";
+    return 0;
+}
+
+// `chimera index ingest` — chunk + embed + insert. Optionally accepts a
+// glob pattern, in which case the same Embedder is reused across files
+// (the costly part is model load, not per-chunk inference).
+int command_index_ingest(const std::string &              db_path,
+                         const std::string &              name,
+                         const std::vector<std::string> & files,
+                         const std::string &              glob_pattern,
+                         int                              ctx_size,
+                         int                              threads,
+                         int                              gpu_layers,
+                         const std::string &              pooling,
+                         size_t                           window_chars,
+                         size_t                           overlap_chars) {
+    auto conn = chimera_db::open_and_migrate(
+        db_path.empty() ? chimera_db::default_path() : db_path);
+    auto col = chimera_vector_store::find(conn.get(), name);
+    if (!col) {
+        fail(ExitCode::BadInput,
+             "no such collection: '" + name + "'. Create it with `chimera index create`.");
+    }
+
+    // Resolve the input set: explicit `--file` args + any glob matches.
+    std::vector<std::string> sources = files;
+    if (!glob_pattern.empty()) {
+        namespace fs = std::filesystem;
+        const auto last_sep = glob_pattern.find_last_of('/');
+        const fs::path root = (last_sep == std::string::npos)
+            ? fs::path(".") : fs::path(glob_pattern.substr(0, last_sep));
+        const std::string pat = (last_sep == std::string::npos)
+            ? glob_pattern : glob_pattern.substr(last_sep + 1);
+        // Tiny shell-glob: '*' matches anything but '/', '?' matches one char.
+        auto match = [](const std::string & p, const std::string & s) {
+            size_t pi = 0, si = 0, star = std::string::npos, ssi = 0;
+            while (si < s.size()) {
+                if (pi < p.size() && (p[pi] == '?' || p[pi] == s[si])) { ++pi; ++si; }
+                else if (pi < p.size() && p[pi] == '*')   { star = pi++; ssi = si; }
+                else if (star != std::string::npos)        { pi = star + 1; si = ++ssi; }
+                else return false;
+            }
+            while (pi < p.size() && p[pi] == '*') ++pi;
+            return pi == p.size();
+        };
+        std::error_code ec;
+        if (fs::exists(root, ec)) {
+            for (const auto & e : fs::recursive_directory_iterator(
+                     root, fs::directory_options::skip_permission_denied, ec)) {
+                if (!e.is_regular_file()) continue;
+                if (match(pat, e.path().filename().string())) {
+                    sources.push_back(e.path().string());
+                }
+            }
+        }
+        std::sort(sources.begin(), sources.end());
+        sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
+    }
+    if (sources.empty()) {
+        fail(ExitCode::BadInput, "no input files (pass -f or -g)");
+    }
+
+    chimera_embed::Config cfg;
+    cfg.model      = col->embedding_model;
+    cfg.pooling    = pooling;
+    cfg.threads    = threads;
+    cfg.gpu_layers = gpu_layers;
+    cfg.n_ctx      = static_cast<uint32_t>(ctx_size);
+    cfg.normalize  = true;
+    chimera_embed::Embedder embedder(cfg);
+
+    size_t total_chunks = 0;
+    for (const auto & path : sources) {
+        const std::string text = read_file(path);
+        const auto chunks = chunk_text(text, window_chars, overlap_chars);
+        for (const auto & c : chunks) {
+            auto vec = embedder.embed(c.text);
+            if (static_cast<int>(vec.size()) != col->dim) {
+                fail(ExitCode::Runtime,
+                     "embedding dim drift: collection expects " +
+                     std::to_string(col->dim) + ", model produced " +
+                     std::to_string(vec.size()));
+            }
+            chimera_vector_store::DocumentInput doc;
+            doc.source_uri  = path;
+            doc.chunk_index = c.index;
+            doc.text        = c.text;
+            doc.embedding   = std::move(vec);
+            chimera_vector_store::insert_document(conn.get(), *col, doc);
+            ++total_chunks;
+        }
+        std::cout << "  ingested " << chunks.size() << " chunk(s) from " << path << "\n";
+    }
+    std::cout << "done: " << total_chunks << " chunk(s) into '" << name << "'\n";
+    return 0;
+}
+
+int command_index_list(const std::string & db_path) {
+    auto conn = chimera_db::open_and_migrate(
+        db_path.empty() ? chimera_db::default_path() : db_path);
+    const auto cols = chimera_vector_store::list(conn.get());
+    if (cols.empty()) {
+        std::cout << "(no collections)\n";
+        return 0;
+    }
+    std::cout << "collections:\n";
+    for (const auto & c : cols) {
+        std::cout << "  " << c.name
+                  << "  (dim=" << c.dim
+                  << ", model=" << c.embedding_model
+                  << ", docs=" << c.doc_count << ")\n";
+    }
+    return 0;
+}
+
+int command_index_stats(const std::string & db_path, const std::string & name) {
+    auto conn = chimera_db::open_and_migrate(
+        db_path.empty() ? chimera_db::default_path() : db_path);
+    auto col = chimera_vector_store::find(conn.get(), name);
+    if (!col) {
+        fail(ExitCode::BadInput, "no such collection: '" + name + "'");
+    }
+    const auto cols_with_counts = chimera_vector_store::list(conn.get());
+    int64_t docs = 0;
+    for (const auto & c : cols_with_counts) {
+        if (c.id == col->id) { docs = c.doc_count; break; }
+    }
+    std::cout << "collection: " << col->name << "\n"
+              << "  id:              " << col->id << "\n"
+              << "  embedding model: " << col->embedding_model << "\n"
+              << "  dim:             " << col->dim << "\n"
+              << "  created_at:      " << col->created_at << "\n"
+              << "  documents:       " << docs << "\n";
+    return 0;
+}
+
+int command_index_drop(const std::string & db_path, const std::string & name) {
+    auto conn = chimera_db::open_and_migrate(
+        db_path.empty() ? chimera_db::default_path() : db_path);
+    chimera_vector_store::drop(conn.get(), name);
+    std::cout << "dropped collection '" << name << "'\n";
+    return 0;
+}
+
+// `chimera search` — KNN over one collection. Loads the embedding model
+// recorded on the collection, embeds the query, runs the vec0 query.
+int command_search(const std::string & db_path,
+                   const std::string & name,
+                   const std::string & query,
+                   int                 k,
+                   int                 ctx_size,
+                   int                 threads,
+                   int                 gpu_layers,
+                   const std::string & pooling) {
+    if (query.empty()) {
+        fail(ExitCode::BadInput, "search requires -q/--query");
+    }
+    auto conn = chimera_db::open_and_migrate(
+        db_path.empty() ? chimera_db::default_path() : db_path);
+    auto col = chimera_vector_store::find(conn.get(), name);
+    if (!col) {
+        fail(ExitCode::BadInput, "no such collection: '" + name + "'");
+    }
+
+    chimera_embed::Config cfg;
+    cfg.model      = col->embedding_model;
+    cfg.pooling    = pooling;
+    cfg.threads    = threads;
+    cfg.gpu_layers = gpu_layers;
+    cfg.n_ctx      = static_cast<uint32_t>(ctx_size);
+    cfg.normalize  = true;
+    chimera_embed::Embedder embedder(cfg);
+    auto qvec = embedder.embed(query);
+    if (static_cast<int>(qvec.size()) != col->dim) {
+        fail(ExitCode::Runtime,
+             "query embedding dim mismatch: collection expects " +
+             std::to_string(col->dim) + ", model produced " +
+             std::to_string(qvec.size()));
+    }
+    const auto hits = chimera_vector_store::search(conn.get(), *col, qvec, k);
+    if (hits.empty()) {
+        std::cout << "(no hits)\n";
+        return 0;
+    }
+    for (size_t i = 0; i < hits.size(); ++i) {
+        const auto & h = hits[i];
+        std::cout << "#" << (i + 1)
+                  << "  distance=" << h.distance
+                  << "  " << h.source_uri
+                  << "  chunk=" << h.chunk_index
+                  << "\n----\n" << h.text << "\n----\n\n";
+    }
+    return 0;
+}
+
+// `chimera chat --list` — short, recently-active-first index of stored
+// chats. Print-and-exit; no model load.
+int command_chat_list(const std::string & db_path, int limit) {
+    auto conn = chimera_db::open_and_migrate(
+        db_path.empty() ? chimera_db::default_path() : db_path);
+    const auto chats = chimera_chat_store::list_chats(conn.get(), limit);
+    if (chats.empty()) {
+        std::cout << "(no saved chats)\n";
+        return 0;
+    }
+    std::cout << "saved chats:\n";
+    for (const auto & c : chats) {
+        std::cout << "  #" << c.id
+                  << "  " << c.message_count << " msgs"
+                  << "  model=" << c.model_alias
+                  << "  updated_at=" << c.updated_at;
+        if (!c.title.empty()) std::cout << "  title=\"" << c.title << "\"";
+        std::cout << "\n";
+    }
+    return 0;
+}
+
+// `chimera chat --search QUERY` — FTS5 query over messages_fts. Prints
+// top hits with `[word]`-style snippet highlights. Print-and-exit.
+int command_chat_search(const std::string & db_path,
+                         const std::string & query,
+                         int                 limit) {
+    auto conn = chimera_db::open_and_migrate(
+        db_path.empty() ? chimera_db::default_path() : db_path);
+    const auto hits = chimera_chat_store::search_messages(conn.get(), query, limit);
+    if (hits.empty()) {
+        std::cout << "(no hits)\n";
+        return 0;
+    }
+    for (const auto & h : hits) {
+        std::cout << "#" << h.chat_id
+                  << " seq=" << h.seq
+                  << " role=" << h.role
+                  << "\n  " << h.snippet << "\n";
+    }
+    return 0;
+}
+
+// ---- `chimera info` --------------------------------------------------
+//
+// Print a structured summary of every component baked into the binary:
+// chimera version, platform, the three bundled inference libraries
+// (llama, whisper, sd) with their ggml views, registered ggml backends
+// + enumerated devices, and the embedded SQLite stack. Mirrors cyllama's
+// `info` subcommand so users switching between native and Python sides
+// see the same shape.
+
+namespace {
+
+// `whisper_print_system_info()` and `sd_get_system_info()` produce a
+// stream of `NAME = 0|1` pairs separated by ` | `. We split into the
+// backend names we recognize vs. everything else (CPU feature flags).
+const std::vector<std::string> & known_backend_names() {
+    static const std::vector<std::string> v = {
+        "COREML",  "OPENVINO", "METAL",     "MTL",     "BLAS",
+        "SYCL",    "VULKAN",   "KOMPUTE",   "OPENCL",  "CUDA",
+        "CANN",    "MUSA",     "ROCBLAS",   "RPC",     "BLIS",
+        "ACCELERATE", "HIP",   "WEBGPU",    "ZENDNN",  "VIRTGPU",
+    };
+    return v;
+}
+
+struct ParsedSysInfo {
+    std::vector<std::string> backends;
+    std::vector<std::string> cpu_features;
+};
+
+bool is_backend(const std::string & name) {
+    for (const auto & b : known_backend_names()) {
+        if (b == name) return true;
+    }
+    return false;
+}
+
+ParsedSysInfo parse_sys_info(const std::string & info) {
+    ParsedSysInfo out;
+    size_t pos = 0;
+    while (pos < info.size()) {
+        const size_t eq = info.find("= ", pos);
+        if (eq == std::string::npos) break;
+        size_t name_end = eq;
+        while (name_end > 0 && info[name_end - 1] == ' ') --name_end;
+        size_t name_start = name_end;
+        while (name_start > 0) {
+            const char c = info[name_start - 1];
+            if (c == ' ' || c == '|' || c == ':') break;
+            --name_start;
+        }
+        const std::string name(info.data() + name_start, name_end - name_start);
+        const size_t val_pos = eq + 2;
+        const bool enabled = (val_pos < info.size() && info[val_pos] == '1');
+        pos = val_pos + 1;
+        if (!enabled) continue;
+        if (name.empty() || name == "WHISPER") continue;
+        if (is_backend(name)) out.backends.push_back(name);
+        else                  out.cpu_features.push_back(name);
+    }
+    return out;
+}
+
+std::string join_csv(const std::vector<std::string> & items) {
+    std::string out;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (i > 0) out += ", ";
+        out += items[i];
+    }
+    return out;
+}
+
+const char * ggml_dev_type_label(enum ggml_backend_dev_type t) {
+    switch (t) {
+        case GGML_BACKEND_DEVICE_TYPE_CPU:   return "CPU  ";
+        case GGML_BACKEND_DEVICE_TYPE_GPU:   return "GPU  ";
+        case GGML_BACKEND_DEVICE_TYPE_ACCEL: return "ACCEL";
+        case GGML_BACKEND_DEVICE_TYPE_IGPU:  return "IGPU ";
+    }
+    return "?    ";
+}
+
+std::string platform_label() {
+#if defined(__APPLE__)
+    const char * os = "macOS";
+#elif defined(__linux__)
+    const char * os = "Linux";
+#elif defined(_WIN32)
+    const char * os = "Windows";
+#else
+    const char * os = "unknown";
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+    const char * arch = "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+    const char * arch = "x86_64";
+#elif defined(__riscv)
+    const char * arch = "riscv";
+#else
+    const char * arch = "unknown";
+#endif
+    return std::string(os) + "-" + arch;
+}
+
+// Render a `key=value` line in the build-flags block, but only if the
+// value is non-empty. The macros come through as empty strings when the
+// corresponding CMake/env var wasn't set.
+void emit_build_flag(std::ostream & out, const char * key, const char * value) {
+    if (value && *value) {
+        out << "  " << std::left << std::setw(14) << key << " " << value << "\n";
+    }
+}
+
+// ggml registry names are short ("MTL", "CUDA", "HIP", ...). Map them to
+// the friendly labels users expect to see (and that cyllama prints).
+std::string friendly_backend_name(const std::string & s) {
+    if (s == "MTL")     return "Metal";
+    if (s == "BLAS")    return "BLAS";
+    if (s == "CUDA")    return "CUDA";
+    if (s == "VULKAN")  return "Vulkan";
+    if (s == "HIP")     return "HIP";
+    if (s == "SYCL")    return "SYCL";
+    if (s == "OPENCL")  return "OpenCL";
+    if (s == "KOMPUTE") return "Kompute";
+    return s;
+}
+
+// First non-CPU, non-Accelerate backend registry is the "primary" GPU/
+// accelerator backend chimera was built with. Matches cyllama's
+// `built:` line.
+std::string primary_backend_label() {
+    const size_t n = ggml_backend_reg_count();
+    for (size_t i = 0; i < n; ++i) {
+        const char * name = ggml_backend_reg_name(ggml_backend_reg_get(i));
+        if (!name) continue;
+        const std::string s(name);
+        if (s == "CPU" || s == "BLAS" || s == "Accelerate") continue;
+        return friendly_backend_name(s);
+    }
+    return "CPU";
+}
+
+std::vector<std::string> backend_registry_names() {
+    std::vector<std::string> out;
+    const size_t n = ggml_backend_reg_count();
+    out.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        if (const char * name = ggml_backend_reg_name(ggml_backend_reg_get(i))) {
+            out.emplace_back(name);
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+int command_info() {
+    std::cout << "chimera " << CHIMERA_VERSION << "\n"
+              << platform_label() << "\n\n";
+
+    // ---- llama.cpp --------------------------------------------------
+    //
+    // `built:`  comes from CHIMERA_BUILT_BACKENDS — the GGML_* flags that
+    //           were ON when chimera was compiled. Stable across runs of
+    //           the same binary.
+    // `loaded:` comes from the ggml backend registry at runtime. Reflects
+    //           what actually initialized successfully on this host (e.g.
+    //           a CUDA-built binary on a box with no CUDA driver would
+    //           print `built: CUDA` but `loaded: CPU`).
+    std::cout << "llama.cpp:\n"
+              << "  version:       " << CHIMERA_LLAMACPP_VERSION   << "\n"
+              << "  ggml version:  " << ggml_version()             << "\n"
+              << "  ggml commit:   " << ggml_commit()              << "\n"
+              << "  built:         " << CHIMERA_BUILT_BACKENDS     << "\n"
+              << "  loaded:        " << primary_backend_label()    << "\n"
+              << "  registries:    " << join_csv(backend_registry_names()) << "\n"
+              << "  devices:\n";
+    const size_t n_dev = ggml_backend_dev_count();
+    for (size_t i = 0; i < n_dev; ++i) {
+        auto * d = ggml_backend_dev_get(i);
+        const char * dn = ggml_backend_dev_name(d);
+        const char * dd = ggml_backend_dev_description(d);
+        std::cout << "    " << std::left << std::setw(20) << (dn ? dn : "?")
+                  << " [" << ggml_dev_type_label(ggml_backend_dev_type(d)) << "]  "
+                  << (dd ? dd : "")
+                  << "\n";
+    }
+    std::cout << "  GPU offload:   " << (llama_supports_gpu_offload() ? "True" : "False") << "\n"
+              << "  MMAP support:  " << (llama_supports_mmap()         ? "True" : "False") << "\n"
+              << "  MLOCK support: " << (llama_supports_mlock()        ? "True" : "False") << "\n"
+              << "  RPC support:   " << (llama_supports_rpc()          ? "True" : "False") << "\n";
+
+    // ---- whisper.cpp ------------------------------------------------
+    // For backends, chimera shares one ggml registry set across llama,
+    // whisper, and sd, so the backends line mirrors the registry list
+    // above (minus the duplicate-printing-as-CPU). The CPU features
+    // come from each library's own probe of its (linked) ggml.
+    const auto whisper_parsed = parse_sys_info(chimera_whisper::whisper_system_info_raw());
+    std::cout << "\nwhisper.cpp:\n"
+              << "  version:       " << CHIMERA_WHISPERCPP_VERSION                  << "\n"
+              << "  ggml version:  " << chimera_whisper::whisper_ggml_version()     << "\n"
+              << "  built:         " << CHIMERA_BUILT_BACKENDS                      << "\n"
+              << "  loaded:        " << primary_backend_label()                     << "\n"
+              << "  backends:      " << join_csv(backend_registry_names())          << "\n"
+              << "  CPU features:  " << join_csv(whisper_parsed.cpu_features)       << "\n";
+
+    // ---- stable-diffusion.cpp ---------------------------------------
+    const auto sd_parsed = parse_sys_info(chimera_sd::sd_system_info_raw());
+    std::cout << "\nstable-diffusion.cpp:\n"
+              << "  version:       " << CHIMERA_SDCPP_VERSION                  << "\n"
+              << "  ggml version:  " << chimera_sd::sd_ggml_version()          << "\n"
+              << "  built:         " << CHIMERA_BUILT_BACKENDS                 << "\n"
+              << "  loaded:        " << primary_backend_label()                << "\n"
+              << "  backends:      " << join_csv(backend_registry_names())     << "\n"
+              << "  CPU features:  " << join_csv(sd_parsed.cpu_features)       << "\n";
+
+    // ---- SQLite + sqlite-vec ----------------------------------------
+    std::cout << "\nsqlite:\n"
+              << "  version:       " << chimera_db::sqlite_version()     << "\n"
+              << "  sqlite-vec:    " << chimera_db::sqlite_vec_version() << "\n";
+
+    // ---- build flags (only knobs that were actually set) ------------
+    //
+    // We surface the tuning knobs that affect runtime behavior so bug
+    // reports can include them. Each macro is an empty string when its
+    // GGML_*/CMAKE_* source wasn't set, so the helper skips it silently.
+    std::ostringstream flags_block;
+    emit_build_flag(flags_block, "CUDA_ARCH",      CHIMERA_CUDA_ARCHITECTURES);
+    emit_build_flag(flags_block, "HIP_ARCH",       CHIMERA_HIP_ARCHITECTURES);
+    emit_build_flag(flags_block, "BLAS_VENDOR",    CHIMERA_BLAS_VENDOR);
+    emit_build_flag(flags_block, "CUDA_FORCE_MMQ",     CHIMERA_CUDA_FORCE_MMQ);
+    emit_build_flag(flags_block, "CUDA_FORCE_CUBLAS",  CHIMERA_CUDA_FORCE_CUBLAS);
+    emit_build_flag(flags_block, "HIP_ROCWMMA_FATTN",  CHIMERA_HIP_ROCWMMA_FATTN);
+    const std::string flags_str = flags_block.str();
+    if (!flags_str.empty()) {
+        std::cout << "\nbuild flags:\n" << flags_str;
+    }
+
+    return 0;
+}
+
+// `chimera db status` — open (or create) the configured DB, run any
+// pending migrations, and print a human-readable summary. The smallest
+// smoke-testable surface for the phase-1 SQLite vendoring: confirms
+// that sqlite3.c + sqlite-vec.c linked, the file path resolves, the
+// migration runner works end-to-end, and the schema lands.
+int command_db_status(const std::string & path_override) {
+    const std::string path = path_override.empty()
+        ? chimera_db::default_path()
+        : path_override;
+
+    auto conn = chimera_db::open_and_migrate(path);
+    const int v = chimera_db::current_schema_version(conn.get());
+    const auto tables = chimera_db::list_tables(conn.get());
+
+    std::cout << "chimera db status\n"
+              << "  path:           " << path << "\n"
+              << "  sqlite:         " << chimera_db::sqlite_version()     << "\n"
+              << "  sqlite-vec:     " << chimera_db::sqlite_vec_version()
+              << " (runtime: "        << chimera_db::sqlite_vec_loaded_version(conn.get())
+              << ")\n"
+              << "  schema version: " << v << " / "
+                                       << chimera_db::latest_schema_version() << "\n"
+              << "  tables (" << tables.size() << "):\n";
+    for (const auto & t : tables) {
+        std::cout << "    - " << t << "\n";
+    }
+    return 0;
+}
+
 std::string version_string() {
     return std::string("chimera ") + CHIMERA_VERSION + "\n"
         + "  llama.cpp:            " + CHIMERA_LLAMACPP_VERSION + "\n"
         + "  whisper.cpp:          " + CHIMERA_WHISPERCPP_VERSION + "\n"
-        + "  stable-diffusion.cpp: " + CHIMERA_SDCPP_VERSION;
+        + "  stable-diffusion.cpp: " + CHIMERA_SDCPP_VERSION + "\n"
+        + "  sqlite:               " + chimera_db::sqlite_version() + "\n"
+        + "  sqlite-vec:           " + chimera_db::sqlite_vec_version();
 }
 
 } // namespace
@@ -1313,7 +1975,12 @@ int main(int argc, char ** argv) {
         std::string template_override;
         std::string color_arg = "auto";
         auto * chat_cmd = app.add_subcommand("chat", "Minimal interactive llama chat");
-        chat_cmd->add_option("-m,--model", chat_opts.model, "GGUF model")->required();
+        // --model is required for an interactive session but NOT for
+        // --list / --search / --resume (which can read the model name
+        // from the saved chat row). We enforce it after parse instead
+        // of via CLI11's ->required() so the print-and-exit paths work
+        // without a model argument.
+        chat_cmd->add_option("-m,--model", chat_opts.model, "GGUF model");
         chat_cmd->add_option("-n,--n-predict", chat_opts.n_predict, "Tokens to generate per turn");
         chat_cmd->add_option("-c,--ctx-size", chat_opts.n_ctx, "Context size");
         chat_cmd->add_option("-b,--batch-size", chat_opts.n_batch, "Prompt batch size");
@@ -1329,6 +1996,29 @@ int main(int argc, char ** argv) {
         chat_cmd->add_option("--system-prompt-file", system_prompt_file,
             "Read system prompt from file");
         chat_cmd->add_option("--chat-template", template_override, "Chat template override");
+
+        // Phase-3 chat persistence flags. `--list` and `--search` are
+        // print-and-exit; they don't load a model. `--persist` opts a
+        // live session into per-turn DB writes; `--resume <id|last>`
+        // loads a saved conversation and continues from where it ended.
+        bool        chat_persist  = false;
+        bool        chat_list     = false;
+        std::string chat_search;
+        std::string chat_resume;
+        std::string chat_db_path;
+        int         chat_list_limit = 20;
+        chat_cmd->add_flag("--persist",  chat_persist,
+            "Save this chat to the embedded SQLite DB (off by default)");
+        chat_cmd->add_option("--resume",  chat_resume,
+            "Resume a saved chat by id, or 'last' for the most recent");
+        chat_cmd->add_flag("--list",     chat_list,
+            "List saved chats and exit (no model load)");
+        chat_cmd->add_option("--search",  chat_search,
+            "Full-text-search saved messages and exit (no model load)");
+        chat_cmd->add_option("--list-limit", chat_list_limit,
+            "Cap for --list / --search results");
+        chat_cmd->add_option("--db",      chat_db_path,
+            "Path to the DB file (default: $CHIMERA_DB or platform default)");
         chat_cmd->add_option("--mmproj", chat_opts.mmproj,
             "Multimodal projector (mmproj GGUF) enabling /image and /audio");
         chat_cmd->add_option("--color", color_arg,
@@ -1400,6 +2090,135 @@ int main(int argc, char ** argv) {
         sd_cmd->add_option("--strength", sd_opts.strength,
             "img2img denoising strength (0=preserve init, 1=full noise)");
 
+        ServeOptions serve_opts;
+        auto * serve_cmd = app.add_subcommand("serve",
+            "OpenAI-compatible HTTP server (LLM only for now)");
+        serve_cmd->add_option("-m,--model", serve_opts.model, "GGUF model")->required();
+        serve_cmd->add_option("--mmproj", serve_opts.mmproj,
+            "Multimodal projector for vision/audio inputs in chat completions");
+        serve_cmd->add_option("--host", serve_opts.host, "Bind address");
+        serve_cmd->add_option("--port", serve_opts.port, "Bind port");
+        serve_cmd->add_option("-c,--ctx-size", serve_opts.n_ctx,
+            "Context size (0 = model's training context)");
+        serve_cmd->add_option("-b,--batch-size", serve_opts.n_batch,
+            "Logical batch size for prompt processing");
+        serve_cmd->add_option("--ubatch-size", serve_opts.n_ubatch,
+            "Physical batch size (auto-clamped to batch when --embeddings)");
+        serve_cmd->add_option("-t,--threads", serve_opts.threads, "CPU threads");
+        serve_cmd->add_option("--gpu-layers", serve_opts.gpu_layers, "Layers to offload");
+        serve_cmd->add_option("--parallel", serve_opts.parallel,
+            "Number of concurrent request slots");
+        serve_cmd->add_option("--api-key", serve_opts.api_key,
+            "Bearer token required on /v1/* requests (empty = no auth)");
+        serve_cmd->add_flag("--embeddings", serve_opts.embedding,
+            "Load the model in embedding mode (enables /v1/embeddings)");
+        serve_cmd->add_option("--enable-audio", serve_opts.audio_model,
+            "Whisper GGUF to load alongside the LLM (enables /v1/audio/transcriptions)");
+        serve_cmd->add_option("--enable-image", serve_opts.sd_model,
+            "Stable-diffusion GGUF to load alongside the LLM (enables /v1/images/*)");
+        serve_cmd->add_option("--enable-rag", serve_opts.rag_embedding_model,
+            "Embedding GGUF to load alongside the LLM (enables /v1/vector_stores/*)");
+        serve_cmd->add_option("--rag-db", serve_opts.rag_db_path,
+            "Path to the SQLite DB used by /v1/vector_stores/* "
+            "(default: $CHIMERA_DB or platform default)");
+        serve_cmd->add_flag("--persist-chats", serve_opts.persist_chats,
+            "Save every /v1/chat/completions exchange to the chats table");
+        serve_cmd->add_option("--chat-db", serve_opts.chat_db_path,
+            "Path to the SQLite DB used by --persist-chats "
+            "(default: $CHIMERA_DB or platform default)");
+
+        // `chimera db <subcommand>` — embedded SQLite (+ sqlite-vec)
+        // management. Phase 1 ships just `status`; future subcommands
+        // (backup, vacuum, prune) land here.
+        std::string db_path_override;
+        auto * db_cmd = app.add_subcommand("db", "Embedded SQLite database management");
+        auto * db_status_cmd = db_cmd->add_subcommand("status",
+            "Open the DB, run pending migrations, print path + version + schema info");
+        db_cmd->add_option("--db", db_path_override,
+            "Path to the DB file (default: $CHIMERA_DB or platform default)");
+        db_cmd->require_subcommand(1);
+
+        auto * info_cmd = app.add_subcommand("info",
+            "Print versions of bundled component");
+
+        // `chimera index <subcommand>` — vector-store (RAG) management.
+        std::string idx_db_path;
+        std::string idx_name;
+        std::string idx_embedding_model;
+        int         idx_ctx_size   = 0;
+        int         idx_threads    = -1;
+        int         idx_gpu_layers = 0;
+        std::string idx_pooling    = "mean";
+        std::vector<std::string> idx_files;
+        std::string idx_glob;
+        int idx_window_chars  = 2048;
+        int idx_overlap_chars = 256;
+
+        auto * index_cmd = app.add_subcommand("index",
+            "Vector store management");
+        index_cmd->require_subcommand(1);
+        index_cmd->add_option("--db", idx_db_path,
+            "Path to the DB file (default: $CHIMERA_DB or platform default)");
+
+        auto * index_create_cmd = index_cmd->add_subcommand("create",
+            "Create a collection (sized to the embedding model's dim)");
+        index_create_cmd->add_option("-n,--name", idx_name, "Collection name")->required();
+        index_create_cmd->add_option("-e,--embedding-model", idx_embedding_model,
+            "GGUF embedding model (recorded on the collection)")->required();
+        index_create_cmd->add_option("-c,--ctx-size", idx_ctx_size, "Context size");
+        index_create_cmd->add_option("-t,--threads", idx_threads, "CPU threads");
+        index_create_cmd->add_option("--gpu-layers", idx_gpu_layers, "Layers to offload");
+        index_create_cmd->add_option("--pooling", idx_pooling,
+            "Pooling: mean | cls | last | none");
+
+        auto * index_ingest_cmd = index_cmd->add_subcommand("ingest",
+            "Chunk + embed + insert one or more text files into a collection");
+        index_ingest_cmd->add_option("-n,--name", idx_name, "Collection name")->required();
+        index_ingest_cmd->add_option("-f,--file", idx_files,
+            "File to ingest (repeatable)");
+        index_ingest_cmd->add_option("-g,--glob", idx_glob,
+            "Glob pattern relative to cwd (e.g. 'docs/**/*.md')");
+        index_ingest_cmd->add_option("-c,--ctx-size", idx_ctx_size, "Context size");
+        index_ingest_cmd->add_option("-t,--threads", idx_threads, "CPU threads");
+        index_ingest_cmd->add_option("--gpu-layers", idx_gpu_layers, "Layers to offload");
+        index_ingest_cmd->add_option("--pooling", idx_pooling,
+            "Pooling: mean | cls | last | none");
+        index_ingest_cmd->add_option("--chunk-chars", idx_window_chars,
+            "Chars per chunk (default 2048)");
+        index_ingest_cmd->add_option("--chunk-overlap", idx_overlap_chars,
+            "Char overlap between chunks (default 256)");
+
+        auto * index_list_cmd  = index_cmd->add_subcommand("list",
+            "List collections and their document counts");
+        auto * index_stats_cmd = index_cmd->add_subcommand("stats",
+            "Show details for one collection");
+        index_stats_cmd->add_option("-n,--name", idx_name, "Collection name")->required();
+        auto * index_drop_cmd  = index_cmd->add_subcommand("drop",
+            "Drop a collection and all its documents");
+        index_drop_cmd->add_option("-n,--name", idx_name, "Collection name")->required();
+
+        // `chimera search` — KNN against one collection.
+        std::string srch_db_path;
+        std::string srch_name;
+        std::string srch_query;
+        int         srch_k          = 5;
+        int         srch_ctx_size   = 0;
+        int         srch_threads    = -1;
+        int         srch_gpu_layers = 0;
+        std::string srch_pooling    = "mean";
+        auto * search_cmd = app.add_subcommand("search",
+            "Search a vector-store collection by similarity");
+        search_cmd->add_option("--db", srch_db_path,
+            "Path to the DB file (default: $CHIMERA_DB or platform default)");
+        search_cmd->add_option("-n,--name", srch_name, "Collection name")->required();
+        search_cmd->add_option("-q,--query", srch_query, "Search query text")->required();
+        search_cmd->add_option("-k,--top-k", srch_k, "Number of hits to return");
+        search_cmd->add_option("-c,--ctx-size", srch_ctx_size, "Context size");
+        search_cmd->add_option("-t,--threads", srch_threads, "CPU threads");
+        search_cmd->add_option("--gpu-layers", srch_gpu_layers, "Layers to offload");
+        search_cmd->add_option("--pooling", srch_pooling,
+            "Pooling: mean | cls | last | none");
+
         app.parse(argc, argv);
 
         if (verbose) {
@@ -1414,16 +2233,57 @@ int main(int argc, char ** argv) {
             const std::string resolved = resolve_prompt(prompt_text, prompt_file);
             rc = command_prompt(prompt_opts, resolved);
         } else if (*chat_cmd) {
-            std::string resolved_system = system_prompt;
-            if (!system_prompt_file.empty()) {
-                if (!system_prompt.empty()) {
+            // Print-and-exit branches first: --list and --search never
+            // load the model and don't need --model on the command line.
+            if (chat_list) {
+                rc = command_chat_list(chat_db_path, chat_list_limit);
+            } else if (!chat_search.empty()) {
+                rc = command_chat_search(chat_db_path, chat_search, chat_list_limit);
+            } else {
+                if (chat_opts.model.empty() && chat_resume.empty()) {
                     fail(ExitCode::BadInput,
-                        "use only one of --system / --system-prompt-file");
+                         "chat: -m/--model is required (or --resume <id|last>)");
                 }
-                resolved_system = read_file(system_prompt_file);
+                // --resume without --model: pick up the model path
+                // recorded on the saved chat. The user can override by
+                // passing -m explicitly.
+                if (!chat_resume.empty() && chat_opts.model.empty()) {
+                    auto conn = chimera_db::open_and_migrate(
+                        chat_db_path.empty()
+                            ? chimera_db::default_path() : chat_db_path);
+                    std::optional<chimera_chat_store::Chat> existing;
+                    if (chat_resume == "last" || chat_resume == "latest") {
+                        existing = chimera_chat_store::latest_chat(conn.get());
+                    } else {
+                        try {
+                            existing = chimera_chat_store::load_chat(
+                                conn.get(), std::stoll(chat_resume));
+                        } catch (const std::exception &) {
+                            fail(ExitCode::BadInput,
+                                 "invalid --resume value: '" + chat_resume + "'");
+                        }
+                    }
+                    if (!existing) {
+                        fail(ExitCode::BadInput,
+                             "no such chat: '" + chat_resume + "'");
+                    }
+                    chat_opts.model = existing->model_path;
+                }
+                std::string resolved_system = system_prompt;
+                if (!system_prompt_file.empty()) {
+                    if (!system_prompt.empty()) {
+                        fail(ExitCode::BadInput,
+                            "use only one of --system / --system-prompt-file");
+                    }
+                    resolved_system = read_file(system_prompt_file);
+                }
+                ChatPersistence persist_cfg;
+                persist_cfg.persist  = chat_persist;
+                persist_cfg.resume   = chat_resume;
+                persist_cfg.db_path  = chat_db_path;
+                rc = command_chat(chat_opts, resolved_system, template_override,
+                                  parse_color_mode(color_arg), persist_cfg);
             }
-            rc = command_chat(chat_opts, resolved_system, template_override,
-                              parse_color_mode(color_arg));
         } else if (*tokenize_cmd) {
             rc = command_tokenize(tokenize_opts);
         } else if (*embed_cmd) {
@@ -1432,6 +2292,32 @@ int main(int argc, char ** argv) {
             rc = command_whisper(whisper_opts);
         } else if (*sd_cmd) {
             rc = command_sd(sd_opts);
+        } else if (*serve_cmd) {
+            rc = command_serve(serve_opts);
+        } else if (*db_status_cmd) {
+            rc = command_db_status(db_path_override);
+        } else if (*info_cmd) {
+            rc = command_info();
+        } else if (*index_create_cmd) {
+            rc = command_index_create(idx_db_path, idx_name, idx_embedding_model,
+                                       idx_ctx_size, idx_threads, idx_gpu_layers,
+                                       idx_pooling);
+        } else if (*index_ingest_cmd) {
+            rc = command_index_ingest(idx_db_path, idx_name, idx_files, idx_glob,
+                                       idx_ctx_size, idx_threads, idx_gpu_layers,
+                                       idx_pooling,
+                                       static_cast<size_t>(idx_window_chars),
+                                       static_cast<size_t>(idx_overlap_chars));
+        } else if (*index_list_cmd) {
+            rc = command_index_list(idx_db_path);
+        } else if (*index_stats_cmd) {
+            rc = command_index_stats(idx_db_path, idx_name);
+        } else if (*index_drop_cmd) {
+            rc = command_index_drop(idx_db_path, idx_name);
+        } else if (*search_cmd) {
+            rc = command_search(srch_db_path, srch_name, srch_query, srch_k,
+                                 srch_ctx_size, srch_threads, srch_gpu_layers,
+                                 srch_pooling);
         }
 
         llama_backend_free();
