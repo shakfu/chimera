@@ -1,9 +1,12 @@
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -12,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #ifndef _WIN32
@@ -20,9 +24,12 @@
 #include <io.h>
 #define isatty _isatty
 #define STDIN_FILENO _fileno(stdin)
+#define STDOUT_FILENO _fileno(stdout)
+#define STDERR_FILENO _fileno(stderr)
 #endif
 
 #include "CLI11.hpp"
+#include "rang.hpp"
 
 #include "chat.h"
 #include "chimera.h"
@@ -58,6 +65,32 @@ struct LlamaContextDeleter {
 
 using LlamaModelPtr = std::unique_ptr<llama_model, LlamaModelDeleter>;
 using LlamaContextPtr = std::unique_ptr<llama_context, LlamaContextDeleter>;
+
+// Semantic color tags. Stream a Sem value to wash subsequent output in the
+// color rang assigns to that role. All concrete color choices live in the
+// one switch below, so re-skinning chat is a single-site edit.
+enum class Sem {
+    Reset,   // clear any active SGR
+    User,    // the '> ' prompt + user-typed input
+    Cmd,     // slash-command names in banner / help
+    Think,   // model reasoning_content (between <think>...</think>)
+    Stats,   // per-turn 'Prompt: X t/s | Generation: Y t/s' line
+    Info,    // dim info notices ("attached text from ...", "history cleared")
+    Err,     // errors
+};
+
+inline std::ostream & operator<<(std::ostream & os, Sem s) {
+    switch (s) {
+        case Sem::Reset: return os << rang::style::reset;
+        case Sem::User:  return os << rang::fg::green;
+        case Sem::Cmd:   return os << rang::fg::cyan;
+        case Sem::Think: return os << rang::fg::gray;
+        case Sem::Stats: return os << rang::fg::magenta;
+        case Sem::Info:  return os << rang::style::dim;
+        case Sem::Err:   return os << rang::fgB::red;
+    }
+    return os;
+}
 
 std::string read_file(const std::string & path) {
     std::ifstream in(path, std::ios::binary);
@@ -208,6 +241,60 @@ void decode_tokens(llama_context * ctx, const std::vector<llama_token> & tokens,
             fail(ExitCode::Generate, "failed to decode prompt");
         }
     }
+}
+
+// Sample a chat reply, routing reasoning content (e.g. text inside
+// <think>...</think>) through Sem::Think. Each new token is appended to
+// the raw accumulator and the running text is re-parsed with
+// common_chat_parse (is_partial=true); the resulting message is diffed
+// against the previous parse to produce streaming content / reasoning
+// deltas. Returns the *content* portion of the reply (without reasoning),
+// which is what we want to store in chat history — the next turn's
+// templating shouldn't reinject the model's prior thinking.
+std::string chat_sample_loop(
+    llama_context * ctx,
+    common_sampler * sampler,
+    const llama_vocab * vocab,
+    int n_predict,
+    const common_chat_parser_params & parser_params,
+    std::vector<llama_token> * out_tokens) {
+
+    std::string raw;
+    std::string content;
+    common_chat_msg prev;
+
+    for (int i = 0; i < n_predict; ++i) {
+        const llama_token token = common_sampler_sample(sampler, ctx, -1, false);
+        if (token == LLAMA_TOKEN_NULL || llama_vocab_is_eog(vocab, token)) {
+            break;
+        }
+        common_sampler_accept(sampler, token, true);
+        if (out_tokens) {
+            out_tokens->push_back(token);
+        }
+
+        raw += token_to_piece(vocab, token);
+
+        common_chat_msg cur = common_chat_parse(raw, /*is_partial=*/true, parser_params);
+        for (const auto & d : common_chat_msg_diff::compute_diffs(prev, cur)) {
+            if (!d.reasoning_content_delta.empty()) {
+                std::cout << Sem::Think << d.reasoning_content_delta
+                          << Sem::Reset << std::flush;
+            }
+            if (!d.content_delta.empty()) {
+                std::cout << d.content_delta << std::flush;
+                content += d.content_delta;
+            }
+        }
+        prev = std::move(cur);
+
+        llama_token token_copy = token;
+        if (llama_decode(ctx, llama_batch_get_one(&token_copy, 1)) != 0) {
+            fail(ExitCode::Generate, "failed to decode generated token");
+        }
+    }
+    std::cout << '\n';
+    return content;
 }
 
 // Sample up to n_predict tokens from a pre-filled context. Returns the
@@ -442,42 +529,309 @@ size_t common_prefix(const std::vector<llama_token> & a, const std::vector<llama
     return i;
 }
 
-int command_chat(const LlamaCommonOptions & opts, const std::string & system_prompt, const std::string & template_override) {
+// ---- chat-mode helpers --------------------------------------------------
+
+enum class ColorMode { Auto, Always, Never };
+
+ColorMode parse_color_mode(const std::string & s) {
+    if (s == "auto")   return ColorMode::Auto;
+    if (s == "always") return ColorMode::Always;
+    if (s == "never")  return ColorMode::Never;
+    fail(ExitCode::BadInput, "--color must be one of: auto, always, never");
+}
+
+// Apply --color {auto|always|never} to rang's global control mode. Auto is
+// rang's default and uses isatty() on the relevant stream; Always forces
+// codes even when piped (useful for `less -R`); Never suppresses them.
+// Sem manipulators no-op when control is Off, so we can stream them
+// unconditionally throughout command_chat.
+//
+// Returns whether color will actually render on stdout (computed here
+// rather than queried from rang because rang only exposes its mode via an
+// internal namespace; mirroring the decision keeps us off the private API).
+bool apply_color_mode(ColorMode m) {
+    using rang::control;
+    switch (m) {
+        case ColorMode::Auto:
+            rang::setControlMode(control::Auto);
+            return isatty(STDOUT_FILENO) != 0;
+        case ColorMode::Always:
+            rang::setControlMode(control::Force);
+            return true;
+        case ColorMode::Never:
+            rang::setControlMode(control::Off);
+            return false;
+    }
+    return false;
+}
+
+// Background spinner on stderr while a slow op runs (model / mmproj load).
+// Auto-disables when stderr is not a TTY so piped logs stay clean.
+class Spinner {
+    std::atomic<bool> running_{false};
+    std::thread       thread_;
+    std::string       label_;
+    bool              tty_;
+
+public:
+    Spinner() : tty_(isatty(STDERR_FILENO) != 0) {}
+    ~Spinner() { stop(); }
+
+    void start(std::string label) {
+        if (!tty_ || running_.load()) return;
+        label_ = std::move(label);
+        running_.store(true);
+        thread_ = std::thread([this]() {
+            static const char frames[] = "|/-\\";
+            size_t i = 0;
+            while (running_.load()) {
+                std::fprintf(stderr, "\r\x1b[2m%c %s\x1b[0m",
+                             frames[i++ % 4], label_.c_str());
+                std::fflush(stderr);
+                std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            }
+            std::fprintf(stderr, "\r\x1b[2K");
+            std::fflush(stderr);
+        });
+    }
+
+    void stop() {
+        if (!running_.exchange(false)) return;
+        if (thread_.joinable()) thread_.join();
+    }
+};
+
+bool starts_with_sv(std::string_view s, std::string_view p) {
+    return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+}
+
+#ifdef CHIMERA_HAS_LINENOISE
+// Linenoise's completion callback is a plain C function pointer with no
+// user-data slot, so we pass the per-session command list via a thread_local.
+struct ChatCompletionState {
+    std::vector<std::string> cmds;
+};
+thread_local ChatCompletionState * tls_completion_state = nullptr;
+
+void chat_completion_cb(const char * buf, linenoise_completions_t * lc) {
+    if (!buf || !tls_completion_state) return;
+    std::string_view line(buf);
+    if (line.empty() || line.front() != '/') return;
+
+    const size_t sp = line.find(' ');
+    if (sp == std::string_view::npos) {
+        for (const std::string & cmd : tls_completion_state->cmds) {
+            if (starts_with_sv(cmd, line)) {
+                linenoise_add_completion(lc, cmd.c_str());
+            }
+        }
+        return;
+    }
+
+    // Path-completion for /read, /glob, /image, /audio arguments.
+    std::string head_str(line.substr(0, sp + 1));
+    std::string_view head = head_str;
+    const bool path_cmd =
+        starts_with_sv(head, "/read ")  ||
+        starts_with_sv(head, "/glob ")  ||
+        starts_with_sv(head, "/image ") ||
+        starts_with_sv(head, "/audio ");
+    if (!path_cmd) return;
+
+    namespace fs = std::filesystem;
+    std::string arg(line.substr(sp + 1));
+    fs::path arg_path(arg);
+    fs::path dir = arg_path.has_parent_path() ? arg_path.parent_path() : fs::path(".");
+    const std::string stem = arg_path.filename().string();
+    std::error_code ec;
+    if (!fs::exists(dir, ec)) return;
+    for (const auto & e : fs::directory_iterator(dir, ec)) {
+        const std::string name = e.path().filename().string();
+        if (!stem.empty() && !starts_with_sv(name, stem)) continue;
+        std::string suggestion = head_str;
+        if (arg_path.has_parent_path()) {
+            suggestion += arg_path.parent_path().string();
+            suggestion += '/';
+        }
+        suggestion += name;
+        if (e.is_directory(ec)) suggestion += '/';
+        linenoise_add_completion(lc, suggestion.c_str());
+    }
+}
+#endif  // CHIMERA_HAS_LINENOISE
+
+// Minimal recursive-glob: supports '*' and '?'. Anchored at the path prefix
+// up to the first wildcard ('foo/bar/*.txt' -> root='foo/bar', pattern='*.txt').
+// Caps output at 256 matches as a runaway-safety.
+std::vector<std::string> expand_glob(const std::string & pattern_in) {
+    namespace fs = std::filesystem;
+    std::string pattern = pattern_in;
+    if (!pattern.empty() && pattern.front() == '~') {
+        if (const char * home = std::getenv("HOME")) {
+            pattern = home + pattern.substr(1);
+        }
+    }
+    const size_t wild  = pattern.find_first_of("*?");
+    const size_t slash = (wild == std::string::npos) ? std::string::npos
+                                                     : pattern.find_last_of('/', wild);
+    fs::path    root;
+    std::string pat;
+    if (wild == std::string::npos) {
+        std::vector<std::string> out;
+        if (fs::exists(pattern)) out.push_back(pattern);
+        return out;
+    }
+    if (slash == std::string::npos) {
+        root = ".";
+        pat  = pattern;
+    } else {
+        root = pattern.substr(0, slash);
+        pat  = pattern.substr(slash + 1);
+    }
+
+    auto match = [](const std::string & p, const std::string & s) {
+        size_t pi = 0, si = 0, star = std::string::npos, ssi = 0;
+        while (si < s.size()) {
+            if (pi < p.size() && (p[pi] == '?' || p[pi] == s[si])) { ++pi; ++si; }
+            else if (pi < p.size() && p[pi] == '*') { star = pi++; ssi = si; }
+            else if (star != std::string::npos) { pi = star + 1; si = ++ssi; }
+            else return false;
+        }
+        while (pi < p.size() && p[pi] == '*') ++pi;
+        return pi == p.size();
+    };
+
+    std::vector<std::string> out;
+    std::error_code ec;
+    if (!fs::exists(root, ec)) return out;
+    for (const auto & e : fs::recursive_directory_iterator(root,
+            fs::directory_options::skip_permission_denied, ec)) {
+        if (!e.is_regular_file()) continue;
+        const std::string rel = fs::relative(e.path(), root, ec).string();
+        if (ec) { ec.clear(); continue; }
+        if (match(pat, rel) || match(pat, fs::path(rel).filename().string())) {
+            out.push_back((root / rel).string());
+        }
+        if (out.size() >= 256) break;
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+// Best-effort identification of the "modalities" line on the banner.
+std::string describe_modalities(mtmd_context * mctx) {
+    std::string s = "text";
+    if (mctx && mtmd_support_vision(mctx)) s += ", vision";
+    if (mctx && mtmd_support_audio(mctx))  s += ", audio";
+    return s;
+}
+
+int command_chat(const LlamaCommonOptions & opts,
+                 const std::string & system_prompt,
+                 const std::string & template_override,
+                 ColorMode color_mode) {
+    const bool color_on = apply_color_mode(color_mode);
+
+    Spinner spinner;
+    spinner.start("loading model...");
     auto model = load_llama_model(opts);
+    spinner.stop();
+
     const llama_vocab * vocab = llama_model_get_vocab(model.get());
-    common_chat_templates_ptr templates = common_chat_templates_init(model.get(), template_override, "", "");
+    common_chat_templates_ptr templates =
+        common_chat_templates_init(model.get(), template_override, "", "");
     if (!templates) {
         fail(ExitCode::Load, "failed to initialize chat template");
     }
 
-    // Build one context big enough for the whole session. min_prompt_tokens
-    // is a starting hint; we let the user grow it via -c.
-    auto ctx = new_llama_context(model.get(), opts, /*min_prompt_tokens=*/0);
+    // Optional multimodal projector. When loaded, /image and /audio become
+    // available; once the user attaches any media, the chat switches to a
+    // "rebuild every turn" decode path because mtmd image/audio tokens are
+    // not comparable to llama text tokens for prefix reuse.
+    MtmdContextPtr mctx;
+    if (!opts.mmproj.empty()) {
+        spinner.start("loading mmproj...");
+        mtmd_context_params mparams = mtmd_context_params_default();
+        mparams.n_threads = opts.threads;
+        mparams.print_timings = false;
+        mctx.reset(mtmd_init_from_file(opts.mmproj.c_str(), model.get(), mparams));
+        spinner.stop();
+        if (!mctx) {
+            fail(ExitCode::Load, "failed to load mmproj: " + opts.mmproj);
+        }
+    }
+
+    auto ctx     = new_llama_context(model.get(), opts, /*min_prompt_tokens=*/0);
     auto sampler = make_sampler(model.get(), opts);
     llama_memory_t mem = llama_get_memory(ctx.get());
+
+    struct Media {
+        std::string   path;
+        MtmdBitmapPtr bitmap;
+    };
 
     std::vector<common_chat_msg> history;
     if (!system_prompt.empty()) {
         history.push_back(make_chat_msg("system", system_prompt));
     }
 
-    // Tokens already resident in the KV cache (prompt + generated assistant
-    // tokens). On each turn we re-tokenize the templated prompt, find the
-    // longest common prefix with this, rewind the KV to that boundary, and
-    // decode only the tail. This keeps the bulk of prior context warm.
+    std::string         cur_text_prefix;   // /read /glob accumulator
+    std::vector<Media>  pending_media;     // /image /audio for the next turn
+    std::vector<Media>  conv_media;        // all media attached so far, in order
+
     std::vector<llama_token> kv_tokens;
     constexpr llama_seq_id seq_id = 0;
+    bool multimodal_active = false;        // sticky: set on first attach
 
-    // Optional readline-style input via linenoise. Engaged only on a TTY;
-    // piped / redirected stdin (e.g. `make test`) falls back to getline.
-    // History persists at $CHIMERA_HISTORY, else $HOME/.chimera_chat_history.
+    const bool can_image = mctx && mtmd_support_vision(mctx.get());
+    const bool can_audio = mctx && mtmd_support_audio(mctx.get());
+
+    // ---- banner / startup help -----------------------------------------
+    const std::string modalities = describe_modalities(mctx.get());
+    const std::string model_name = std::filesystem::path(opts.model).filename().string();
+    std::cout << "build      : " << CHIMERA_LLAMACPP_VERSION << "\n"
+              << "model      : " << model_name << "\n"
+              << "modalities : " << modalities << "\n";
+    if (!system_prompt.empty()) {
+        std::cout << "using custom system prompt\n";
+    }
+    std::cout << "\ntype " << Sem::Cmd << "/help" << Sem::Reset
+              << " for commands; " << Sem::Cmd << "/exit" << Sem::Reset
+              << " or Ctrl-D to quit.\n\n";
+
+    auto cmd_line = [](const char * name, const char * desc) {
+        std::cout << "  " << Sem::Cmd << name << Sem::Reset << desc << "\n";
+    };
+    auto print_help = [&]() {
+        std::cout << "available commands:\n";
+        cmd_line("/help               ", "list commands");
+        cmd_line("/exit, /quit        ", "exit");
+        cmd_line("/regen              ", "regenerate the last response");
+        cmd_line("/clear              ", "clear chat history");
+        cmd_line("/read <file>        ", "attach a text file to the next message");
+        cmd_line("/glob <pattern>     ", "attach text files matching a glob");
+        if (can_image) cmd_line("/image <file>       ", "attach an image to the next message");
+        if (can_audio) cmd_line("/audio <file>       ", "attach an audio file to the next message");
+    };
+
+    // ---- linenoise wiring ----------------------------------------------
 #ifdef CHIMERA_HAS_LINENOISE
     const bool use_linenoise = isatty(STDIN_FILENO);
     std::unique_ptr<linenoise_context_t, void(*)(linenoise_context_t *)> ln_ctx(
         use_linenoise ? linenoise_context_create() : nullptr,
         [](linenoise_context_t * c) { if (c) linenoise_context_destroy(c); });
+
+    ChatCompletionState completion_state;
+    completion_state.cmds = {"/clear", "/exit", "/glob", "/help",
+                             "/quit", "/read", "/regen"};
+    if (can_image) completion_state.cmds.push_back("/image");
+    if (can_audio) completion_state.cmds.push_back("/audio");
+    std::sort(completion_state.cmds.begin(), completion_state.cmds.end());
+
     std::string history_path;
     if (use_linenoise && ln_ctx) {
+        tls_completion_state = &completion_state;
+        linenoise_set_completion_callback(ln_ctx.get(), chat_completion_cb);
         if (const char * env = std::getenv("CHIMERA_HISTORY")) {
             history_path = env;
         } else if (const char * home = std::getenv("HOME")) {
@@ -489,96 +843,286 @@ int command_chat(const LlamaCommonOptions & opts, const std::string & system_pro
     }
 #endif
 
-    std::string line;
+    // Plain prompt for linenoise: ANSI escapes inside the prompt string
+    // confuse linenoise's width math (it uses utf8_str_width, which counts
+    // ESC bytes as visible columns). Instead we emit the green SGR escape
+    // to stdout right before calling linenoise_read; the SGR state persists
+    // across linenoise's cursor moves so both the prompt characters and the
+    // user's typed input render green. We reset the SGR after the call.
+    const char * const prompt_str = "> ";
+
+    auto attach_text_file = [&](const std::string & path) -> bool {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            std::cerr << Sem::Err << "cannot open file: " << path
+                      << Sem::Reset << "\n";
+            return false;
+        }
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        cur_text_prefix += "--- File: ";
+        cur_text_prefix += path;
+        cur_text_prefix += " ---\n";
+        cur_text_prefix += ss.str();
+        if (cur_text_prefix.empty() || cur_text_prefix.back() != '\n') {
+            cur_text_prefix += '\n';
+        }
+        std::cout << Sem::Info << "attached text from '" << path << "'"
+                  << Sem::Reset << "\n";
+        return true;
+    };
+
+    auto attach_media = [&](const std::string & path, bool need_vision, bool need_audio) -> bool {
+        if (!mctx) {
+            std::cerr << Sem::Err << "multimodal not loaded: pass --mmproj <gguf>"
+                      << Sem::Reset << "\n";
+            return false;
+        }
+        if (need_vision && !can_image) {
+            std::cerr << Sem::Err << "this mmproj does not support vision"
+                      << Sem::Reset << "\n";
+            return false;
+        }
+        if (need_audio && !can_audio) {
+            std::cerr << Sem::Err << "this mmproj does not support audio"
+                      << Sem::Reset << "\n";
+            return false;
+        }
+        MtmdBitmapPtr bmp(mtmd_helper_bitmap_init_from_file(mctx.get(), path.c_str()));
+        if (!bmp) {
+            std::cerr << Sem::Err << "failed to load media: " << path
+                      << Sem::Reset << "\n";
+            return false;
+        }
+        pending_media.push_back({path, std::move(bmp)});
+        std::cout << Sem::Info << "attached " << (need_vision ? "image" : "audio")
+                  << " from '" << path << "'" << Sem::Reset << "\n";
+        return true;
+    };
+
     while (true) {
+        bool should_generate = false;
+
+        std::string line;
         bool got_line = false;
+        // Emit the green SGR raw (rang would emit the same bytes; we use the
+        // string form so it's identical to what we reset with below, and so
+        // we can flush without a manipulator dance).
+        if (color_on) std::cout << "\x1b[32m" << std::flush;
 #ifdef CHIMERA_HAS_LINENOISE
         if (use_linenoise && ln_ctx) {
-            char * raw = linenoise_read(ln_ctx.get(), "> ");
-            if (raw == nullptr) {
-                // EOF (Ctrl-D), interrupt (Ctrl-C), or unsupported terminal.
-                break;
-            }
+            char * raw = linenoise_read(ln_ctx.get(), prompt_str);
+            if (raw == nullptr) { if (color_on) std::cout << "\x1b[0m"; break; }
             line.assign(raw);
             linenoise_free(raw);
             got_line = true;
         }
 #endif
         if (!got_line) {
-            std::cout << "> " << std::flush;
-            if (!std::getline(std::cin, line)) {
-                break;
-            }
+            std::cout << prompt_str << std::flush;
+            if (!std::getline(std::cin, line)) { if (color_on) std::cout << "\x1b[0m"; break; }
         }
+        if (color_on) std::cout << "\x1b[0m" << std::flush;
         line = trim(line);
-        if (line.empty()) {
-            continue;
-        }
+        if (line.empty()) continue;
+
+        // ---- slash commands -----------------------------------------------
         if (line == "/exit" || line == "/quit") {
             break;
-        }
+        } else if (line == "/help") {
+            print_help();
+            continue;
+        } else if (line == "/clear") {
+            history.clear();
+            if (!system_prompt.empty()) history.push_back(make_chat_msg("system", system_prompt));
+            llama_memory_seq_rm(mem, seq_id, 0, -1);
+            kv_tokens.clear();
+            pending_media.clear();
+            conv_media.clear();
+            cur_text_prefix.clear();
+            multimodal_active = false;
+            std::cout << Sem::Info << "chat history cleared."
+                      << Sem::Reset << "\n";
+            continue;
+        } else if (line == "/regen") {
+            bool dropped = false;
+            while (!history.empty() && history.back().role == "assistant") {
+                history.pop_back();
+                dropped = true;
+            }
+            if (!dropped) {
+                std::cerr << Sem::Err << "nothing to regenerate."
+                          << Sem::Reset << "\n";
+                continue;
+            }
+            should_generate = true;
+        } else if (starts_with_sv(line, "/read ")) {
+            attach_text_file(trim(line.substr(6)));
+            continue;
+        } else if (starts_with_sv(line, "/glob ")) {
+            const std::string pat = trim(line.substr(6));
+            const auto matches = expand_glob(pat);
+            if (matches.empty()) {
+                std::cerr << Sem::Err << "no files match '" << pat << "'"
+                          << Sem::Reset << "\n";
+                continue;
+            }
+            for (const auto & p : matches) attach_text_file(p);
+            continue;
+        } else if (starts_with_sv(line, "/image ")) {
+            if (attach_media(trim(line.substr(7)), true, false)) {
+                multimodal_active = true;
+            }
+            continue;
+        } else if (starts_with_sv(line, "/audio ")) {
+            if (attach_media(trim(line.substr(7)), false, true)) {
+                multimodal_active = true;
+            }
+            continue;
+        } else {
+            // Plain user message: assemble content from any buffered /read text
+            // and pending media markers, then commit to history.
+            std::string content;
+            content += cur_text_prefix;
+            cur_text_prefix.clear();
+            const char * marker = mtmd_default_marker();
+            for (size_t i = 0; i < pending_media.size(); ++i) {
+                content += marker;
+                content += '\n';
+            }
+            content += line;
+            history.push_back(make_chat_msg("user", content));
+            for (auto & m : pending_media) conv_media.push_back(std::move(m));
+            pending_media.clear();
+            should_generate = true;
 
 #ifdef CHIMERA_HAS_LINENOISE
-        if (use_linenoise && ln_ctx) {
-            linenoise_history_add(ln_ctx.get(), line.c_str());
-            if (!history_path.empty()) {
-                linenoise_history_save(ln_ctx.get(), history_path.c_str());
+            if (use_linenoise && ln_ctx) {
+                linenoise_history_add(ln_ctx.get(), line.c_str());
+                if (!history_path.empty()) {
+                    linenoise_history_save(ln_ctx.get(), history_path.c_str());
+                }
             }
-        }
 #endif
+        }
 
-        history.push_back(make_chat_msg("user", line));
+        if (!should_generate) continue;
 
+        // ---- generate -----------------------------------------------------
         common_chat_templates_inputs inputs;
         inputs.messages = history;
         inputs.add_generation_prompt = true;
         inputs.use_jinja = true;
         common_chat_params params = common_chat_templates_apply(templates.get(), inputs);
 
-        // First turn: tokenize with BOS / model-special tokens. Subsequent
-        // turns: skip BOS so it doesn't reappear mid-stream (the template's
-        // own delimiters fence the new turn).
-        const bool add_special = kv_tokens.empty();
-        const auto full_tokens = tokenize(vocab, params.prompt, add_special, true);
+        // Parser config for streaming chat output. DEEPSEEK reasoning
+        // format covers <think>...</think> spans (the de-facto standard
+        // across DeepSeek, Qwen3-thinking, and most open reasoning models).
+        common_chat_parser_params parser_params(params);
+        parser_params.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
 
-        // Find the boundary at which the new templated prompt diverges
-        // from what the KV already holds, and roll the KV back to it.
-        const size_t shared = common_prefix(kv_tokens, full_tokens);
-        if (shared < kv_tokens.size()) {
-            llama_memory_seq_rm(mem, seq_id,
-                                static_cast<llama_pos>(shared),
-                                static_cast<llama_pos>(kv_tokens.size()));
-        }
-        // Decode only the new tail. Always at least one token: even with
-        // an unchanged prompt, the generation prompt suffix differs.
-        std::vector<llama_token> tail(full_tokens.begin() + static_cast<ptrdiff_t>(shared),
-                                      full_tokens.end());
-        if (tail.empty()) {
-            // Same prompt as last turn somehow; force re-decoding the last
-            // token so the model has fresh logits to sample from.
-            tail.push_back(full_tokens.back());
-            llama_memory_seq_rm(mem, seq_id,
-                                static_cast<llama_pos>(full_tokens.size() - 1),
-                                static_cast<llama_pos>(full_tokens.size()));
-        }
-        decode_tokens(ctx.get(), tail, static_cast<int32_t>(opts.n_batch));
-        for (llama_token tok : tail) {
-            common_sampler_accept(sampler.get(), tok, false);
-        }
-
-        // Sample the assistant turn. Each generated token is decoded as
-        // it arrives (inside sample_loop), so it lives in the KV cache by
-        // the time we record it in kv_tokens.
         std::vector<llama_token> generated;
-        std::string reply = sample_loop(ctx.get(), sampler.get(), vocab,
-                                        opts.n_predict, true, &generated);
+        std::string reply;
+        size_t n_prompt = 0;
+        double t_prompt = 0.0;
+        double t_gen    = 0.0;
+        using clock = std::chrono::steady_clock;
+        const auto secs = [](clock::duration d) {
+            return std::chrono::duration<double>(d).count();
+        };
 
-        // Update bookkeeping for the next turn.
-        kv_tokens = std::move(full_tokens);
-        kv_tokens.insert(kv_tokens.end(), generated.begin(), generated.end());
+        if (multimodal_active) {
+            // Re-evaluate the entire templated prompt as mtmd chunks each
+            // turn. Correct but O(history) per turn.
+            llama_memory_seq_rm(mem, seq_id, 0, -1);
+            kv_tokens.clear();
+
+            std::vector<const mtmd_bitmap *> bitmaps_c;
+            bitmaps_c.reserve(conv_media.size());
+            for (const auto & m : conv_media) bitmaps_c.push_back(m.bitmap.get());
+
+            mtmd_input_text input_text;
+            input_text.text = params.prompt.c_str();
+            input_text.add_special  = true;
+            input_text.parse_special = true;
+            MtmdInputChunksPtr chunks(mtmd_input_chunks_init());
+            if (!chunks) {
+                std::cerr << Sem::Err << "failed to init mtmd input chunks"
+                          << Sem::Reset << "\n";
+                continue;
+            }
+            const int32_t tok_rc = mtmd_tokenize(mctx.get(), chunks.get(), &input_text,
+                                                 bitmaps_c.data(), bitmaps_c.size());
+            if (tok_rc != 0) {
+                std::cerr << Sem::Err << "mtmd_tokenize failed (rc=" << tok_rc << ")"
+                          << Sem::Reset << "\n";
+                continue;
+            }
+            llama_pos new_n_past = 0;
+            const auto t0 = clock::now();
+            const int32_t eval_rc = mtmd_helper_eval_chunks(
+                mctx.get(), ctx.get(), chunks.get(),
+                /*n_past=*/0, seq_id,
+                static_cast<int32_t>(opts.n_batch),
+                /*logits_last=*/true, &new_n_past);
+            t_prompt = secs(clock::now() - t0);
+            n_prompt = static_cast<size_t>(new_n_past);
+            if (eval_rc != 0) {
+                std::cerr << Sem::Err << "mtmd_helper_eval_chunks failed (rc=" << eval_rc << ")"
+                          << Sem::Reset << "\n";
+                continue;
+            }
+            const auto t1 = clock::now();
+            reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
+                                     opts.n_predict, parser_params, &generated);
+            t_gen = secs(clock::now() - t1);
+        } else {
+            // Text-only fast path: KV-prefix reuse via token comparison.
+            const bool add_special = kv_tokens.empty();
+            const auto full_tokens = tokenize(vocab, params.prompt, add_special, true);
+
+            const size_t shared = common_prefix(kv_tokens, full_tokens);
+            if (shared < kv_tokens.size()) {
+                llama_memory_seq_rm(mem, seq_id,
+                                    static_cast<llama_pos>(shared),
+                                    static_cast<llama_pos>(kv_tokens.size()));
+            }
+            std::vector<llama_token> tail(full_tokens.begin() + static_cast<ptrdiff_t>(shared),
+                                          full_tokens.end());
+            if (tail.empty()) {
+                tail.push_back(full_tokens.back());
+                llama_memory_seq_rm(mem, seq_id,
+                                    static_cast<llama_pos>(full_tokens.size() - 1),
+                                    static_cast<llama_pos>(full_tokens.size()));
+            }
+            const auto t0 = clock::now();
+            decode_tokens(ctx.get(), tail, static_cast<int32_t>(opts.n_batch));
+            t_prompt = secs(clock::now() - t0);
+            n_prompt = tail.size();
+            for (llama_token tok : tail) common_sampler_accept(sampler.get(), tok, false);
+            const auto t1 = clock::now();
+            reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
+                                     opts.n_predict, parser_params, &generated);
+            t_gen = secs(clock::now() - t1);
+            kv_tokens = full_tokens;
+            kv_tokens.insert(kv_tokens.end(), generated.begin(), generated.end());
+        }
+
+        if (n_prompt > 0 && t_prompt > 0.0 && !generated.empty() && t_gen > 0.0) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf),
+                          "[ Prompt: %.1f t/s | Generation: %.1f t/s ]",
+                          static_cast<double>(n_prompt) / t_prompt,
+                          static_cast<double>(generated.size()) / t_gen);
+            std::cout << Sem::Stats << buf << Sem::Reset << "\n";
+        }
+
         history.push_back(make_chat_msg("assistant", reply));
     }
 
+#ifdef CHIMERA_HAS_LINENOISE
+    tls_completion_state = nullptr;
+#endif
     return 0;
 }
 
@@ -767,6 +1311,7 @@ int main(int argc, char ** argv) {
         std::string system_prompt;
         std::string system_prompt_file;
         std::string template_override;
+        std::string color_arg = "auto";
         auto * chat_cmd = app.add_subcommand("chat", "Minimal interactive llama chat");
         chat_cmd->add_option("-m,--model", chat_opts.model, "GGUF model")->required();
         chat_cmd->add_option("-n,--n-predict", chat_opts.n_predict, "Tokens to generate per turn");
@@ -784,6 +1329,11 @@ int main(int argc, char ** argv) {
         chat_cmd->add_option("--system-prompt-file", system_prompt_file,
             "Read system prompt from file");
         chat_cmd->add_option("--chat-template", template_override, "Chat template override");
+        chat_cmd->add_option("--mmproj", chat_opts.mmproj,
+            "Multimodal projector (mmproj GGUF) enabling /image and /audio");
+        chat_cmd->add_option("--color", color_arg,
+            "Colorize input/output: auto | always | never")
+            ->check(CLI::IsMember({"auto", "always", "never"}));
 
         TokenizeOptions tokenize_opts;
         auto * tokenize_cmd = app.add_subcommand("tokenize", "Tokenize text via a GGUF vocab");
@@ -872,7 +1422,8 @@ int main(int argc, char ** argv) {
                 }
                 resolved_system = read_file(system_prompt_file);
             }
-            rc = command_chat(chat_opts, resolved_system, template_override);
+            rc = command_chat(chat_opts, resolved_system, template_override,
+                              parse_color_mode(color_arg));
         } else if (*tokenize_cmd) {
             rc = command_tokenize(tokenize_opts);
         } else if (*embed_cmd) {

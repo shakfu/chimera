@@ -7,6 +7,52 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `chat`: slash commands, multimodal input, tab completion, color, and a
+  background spinner during model load. New commands: `/help` (lists
+  available commands), `/regen` (drops trailing assistant turns and
+  re-samples), `/clear` (resets history + KV + attached media),
+  `/read <file>` and `/glob <pattern>` (attach text to the next user
+  message), and `/image <file>` / `/audio <file>` (attach media when
+  `--mmproj` is provided). `/exit` and `/quit` remain. Banner at startup
+  prints `build`, `model`, and `modalities`, then a hint pointing at
+  `/help`.
+- `chat`: tab completion via linenoise's completion callback. Completes
+  the slash-command word; for `/read`, `/glob`, `/image`, `/audio` it
+  falls through to filesystem completion against the partial path.
+  `/image` and `/audio` are only listed and completed when the loaded
+  mmproj advertises the corresponding modality
+  (`mtmd_support_vision` / `mtmd_support_audio`).
+- `chat`: multimodal turns. `--mmproj <gguf>` enables `/image` and
+  `/audio`; pending media markers (one `mtmd_default_marker()` per
+  attachment) are inserted before the next user line. Once any media is
+  attached, the loop switches from the text-only KV-prefix-reuse path to
+  a "rebuild every turn" mtmd path (the entire templated conversation is
+  re-tokenized as `mtmd_input_chunks` and re-evaluated via
+  `mtmd_helper_eval_chunks` on each turn — correct but O(history)).
+- `chat`: ANSI color via the new [rang](https://github.com/agauniyal/rang)
+  single-header dep at `thirdparty/rang.hpp`. Controlled by
+  `--color {auto,always,never}` (default `auto`, falls through to
+  `rang::setControlMode`). Concrete colors are routed through a
+  semantic-tag layer (`enum class Sem { Reset, User, Cmd, Think, Stats,
+  Info, Err }` plus one `operator<<` switch), so re-skinning chat is a
+  single-site edit. The `>` prompt and user-typed input render green
+  (SGR emitted around `linenoise_read`, not inside the prompt string —
+  ANSI bytes in the prompt break linenoise's `utf8_str_width` math and
+  corrupt the cursor under multi-line edits), `/help` references are
+  cyan, info notices dim, errors bold red. Per-turn `[ Prompt: X t/s |
+  Generation: Y t/s ]` line in magenta, timed with `std::chrono::steady_clock`
+  around the prompt decode and the sample loop.
+- `chat`: thinking-text rendered grey. Replies stream through
+  `common_chat_parse` with `reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK`;
+  after each sampled token the running text is re-parsed and diffed via
+  `common_chat_msg_diff::compute_diffs`, so `reasoning_content_delta`
+  (text inside `<think>...</think>`) prints grey while
+  `content_delta` prints in the default color. Only the content portion
+  is stored in chat history — the next turn's templating does not
+  reinject the model's prior thinking. Matches llama-cli's behavior.
+- `chat`: background spinner on stderr during `load_llama_model` and
+  optional `mtmd_init_from_file`. Auto-disables when stderr is not a TTY
+  so piped logs stay clean.
 - Optional [linenoise](https://github.com/shakfu/linenoise) integration
   for `chat`. When `liblinenoise.a` is present under `thirdparty/`,
   interactive sessions get readline-style line editing, history (↑/↓,
