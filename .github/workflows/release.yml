@@ -103,6 +103,20 @@ jobs:
             ls -la build/ build/Release/ 2>&1 || true
             exit 1
           fi
+
+          # Strip debug symbols + local symbol table before hashing so the
+          # sha256 covers the bytes users actually download. MSVC release
+          # builds on Windows don't embed debug info in the .exe (the PDB
+          # lives in a sibling file we never copy), so strip(1) — which
+          # isn't shipped with the Windows runner anyway — is a no-op for
+          # us; skip it.
+          size_before=$(wc -c < "dist/${ARTIFACT}")
+          if [[ "${RUNNER_OS}" != "Windows" ]]; then
+            strip "dist/${ARTIFACT}"
+          fi
+          size_after=$(wc -c < "dist/${ARTIFACT}")
+          echo "stripped ${ARTIFACT}: ${size_before} -> ${size_after} bytes"
+
           (cd dist && \
             (sha256sum "${ARTIFACT}" 2>/dev/null || shasum -a 256 "${ARTIFACT}") \
             > "${ARTIFACT}.sha256")
@@ -140,46 +154,22 @@ jobs:
         run: ls -la dist/
 
       - name: extract release notes from CHANGELOG
-        # Pulls the section under `## [<version>]` out of CHANGELOG.md and
-        # writes it to release-notes.md, prefixed with a "Changes since
-        # the last Release" header. Falls back to `## [Unreleased]` if the
-        # version-named section doesn't exist (handy if the tag was made
-        # before CHANGELOG was renamed).
+        # Pulls the section under `## [<version>]` out of CHANGELOG.md
+        # into release-notes.md, prefixed with a "Changes since the last
+        # Release" header. The script falls back to `## [Unreleased]` if
+        # the version-named section is missing or empty. Exit 0 = found
+        # (release body comes from release-notes.md); exit 2 = nothing
+        # to use (release body falls back to GitHub's auto-generated
+        # commit-list notes).
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
-
-          extract_section() {
-            local header="$1"
-            # Exact string compare (not regex) so dots in "0.1.2" don't
-            # match "0.1.1" via `.`-as-any-char.
-            awk -v hdr="## [$header]" '
-              $0 == hdr               { in_section = 1; next }
-              in_section && /^## \[/  { exit }
-              in_section               { print }
-            ' CHANGELOG.md
-          }
-
-          SECTION="$(extract_section "$VERSION")"
-          if [ -z "${SECTION// }" ]; then
-            echo "no '## [$VERSION]' section in CHANGELOG.md; falling back to '## [Unreleased]'" >&2
-            SECTION="$(extract_section Unreleased)"
-          fi
-
-          if [ -z "${SECTION// }" ]; then
-            echo "no CHANGELOG section found; release will fall back to auto-generated notes" >&2
-            echo "FOUND=0" >> "$GITHUB_ENV"
-          else
-            {
-              echo "## Changes since the last Release"
-              echo
-              # Strip leading/trailing blank lines from the extracted block.
-              printf '%s\n' "$SECTION" | awk '/[^[:space:]]/ {found=1} found {print}' \
-                | awk 'BEGIN{n=0} {a[n++]=$0} END{while(n>0 && a[n-1] ~ /^[[:space:]]*$/) n--; for(i=0;i<n;i++) print a[i]}'
-            } > release-notes.md
+          if python3 scripts/release_notes.py "${VERSION}"; then
             echo "FOUND=1" >> "$GITHUB_ENV"
             echo "--- release-notes.md ---"
             cat release-notes.md
+          else
+            echo "FOUND=0" >> "$GITHUB_ENV"
           fi
 
       - name: create / update GitHub release

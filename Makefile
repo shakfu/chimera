@@ -1,4 +1,4 @@
-.PHONY: deps build rebuild clean reset test smoke install uninstall
+.PHONY: deps build rebuild clean reset test smoke install uninstall release-notes
 
 # Python interpreter, picked at make-invocation time by probing the host.
 # Order: `python3` (Linux / macOS / Conda / venv), `python` (Windows
@@ -51,3 +51,14 @@ clean:
 
 reset: clean
 	@rm -rf thirdparty/llama.cpp thirdparty/whisper.cpp thirdparty/stable-diffusion.cpp thirdparty/linenoise
+
+# release-notes: write release-notes.md by extracting the current
+# CHIMERA_VERSION's section from CHANGELOG.md. Same script the release
+# workflow runs; pulls the version straight from scripts/manage.py so
+# the file always matches what the binary will report at runtime.
+# Override the version with `make release-notes VERSION=X.Y.Z`.
+VERSION ?= $(shell $(PYTHON) -c "import re; \
+    print(re.search(r'^CHIMERA_VERSION = \"([^\"]+)\"', open('scripts/manage.py').read(), re.M).group(1))")
+
+release-notes:
+	@$(PYTHON) scripts/release_notes.py $(VERSION)
