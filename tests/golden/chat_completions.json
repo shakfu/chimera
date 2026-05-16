@@ -1,0 +1,47 @@
+{
+  "first_finish_reason_type": "str",
+  "n_choices": 1,
+  "object": "chat.completion",
+  "shape": {
+    "choices": [
+      {
+        "finish_reason": "str",
+        "index": "int",
+        "message": {
+          "content": "str",
+          "role": "str"
+        }
+      }
+    ],
+    "created": "str",
+    "id": "str",
+    "model": "str",
+    "object": "str",
+    "system_fingerprint": "str",
+    "timings": {
+      "cache_n": "int",
+      "predicted_ms": "float",
+      "predicted_n": "int",
+      "predicted_per_second": "float",
+      "predicted_per_token_ms": "float",
+      "prompt_ms": "float",
+      "prompt_n": "int",
+      "prompt_per_second": "float",
+      "prompt_per_token_ms": "float"
+    },
+    "usage": {
+      "completion_tokens": "int",
+      "prompt_tokens": "int",
+      "prompt_tokens_details": {
+        "cached_tokens": "int"
+      },
+      "total_tokens": "int"
+    }
+  },
+  "usage_keys": [
+    "completion_tokens",
+    "prompt_tokens",
+    "prompt_tokens_details",
+    "total_tokens"
+  ]
+}

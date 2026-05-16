@@ -1423,7 +1423,23 @@ class Application(ShellCmd, metaclass=MetaCommander):
         from urllib.error import HTTPError, URLError
 
         ref = args.llama_version
-        files = ["tools/server/server-context.h", "tools/server/server-http.h"]
+        # All vendored upstream-internal headers chimera links against
+        # or compiles against. The server-* pair were the only entries
+        # historically; widening to common.h / arg.h / chat.h / mtmd.h /
+        # llama.h surfaces drift in the larger public + common surface
+        # chimera also pokes (common_params fields, llama_tokenize
+        # signature, mtmd helper protos, etc.) without any extra
+        # plumbing — same script, same vendored copies under
+        # thirdparty/llama.cpp/include/, just more files compared.
+        files = [
+            "include/llama.h",
+            "common/common.h",
+            "common/arg.h",
+            "common/chat.h",
+            "tools/mtmd/mtmd.h",
+            "tools/server/server-context.h",
+            "tools/server/server-http.h",
+        ]
         repo = "ggml-org/llama.cpp"
         vendored_dir = self.project.cwd / "thirdparty" / "llama.cpp" / "include"
 

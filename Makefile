@@ -1,4 +1,4 @@
-.PHONY: deps build rebuild clean reset test smoke install uninstall release-notes bump-check test-db-migrate
+.PHONY: deps build rebuild clean reset test smoke install uninstall release-notes bump-check test-db-migrate test-golden
 
 # Python interpreter, picked at make-invocation time by probing the host.
 # Order: `python3` (Linux / macOS / Conda / venv), `python` (Windows
@@ -83,3 +83,14 @@ bump-check:
 # upgrading old user DBs cleanly. Requires the chimera binary built.
 test-db-migrate: $(BUILD_DIR)/chimera
 	@$(PYTHON) scripts/test_db_migrate.py
+
+# test-golden: HTTP response-shape regression tests against fixed
+# models. Spawns `chimera serve` on a free port, hits each route with a
+# fixed payload, normalizes the response (redacting volatile fields),
+# and diffs against checked-in goldens under tests/golden/. Catches the
+# class of bug where a llama.cpp bump changes the JSON shape of a route
+# we expose -- something `make test`'s did-it-work smoke can't see.
+# Pass UPDATE_GOLDEN=1 to refresh the goldens (use when you legitimately
+# changed a response shape and the new shape is correct).
+test-golden: $(BUILD_DIR)/chimera
+	@$(PYTHON) scripts/test_golden.py

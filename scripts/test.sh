@@ -23,6 +23,20 @@ MODELS="$REPO_ROOT/models"
 SMOKE_ONLY=0
 [[ "${1:-}" == "--smoke" ]] && SMOKE_ONLY=1
 
+# Colorized result tags. Disabled when stdout isn't a tty (so logs
+# captured via `make test 2>&1 | tee` stay plain text) and when the
+# user sets NO_COLOR=1 (de-facto standard, see no-color.org). ANSI
+# escapes are folded directly into the format string of each printf
+# below; they contain no `%` so they don't interact with arg counts.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    _GREEN=$'\033[32m'; _RED=$'\033[31m'; _YELLOW=$'\033[33m'; _BOLD=$'\033[1m'; _RESET=$'\033[0m'
+else
+    _GREEN=""; _RED=""; _YELLOW=""; _BOLD=""; _RESET=""
+fi
+PASS_TAG="${_GREEN}${_BOLD}PASS${_RESET}"
+FAIL_TAG="${_RED}${_BOLD}FAIL${_RESET}"
+SKIP_TAG="${_YELLOW}${_BOLD}SKIP${_RESET}"
+
 # Locate the built binary. Single-config generators (Unix Makefiles,
 # Ninja) put it directly at build/chimera; multi-config generators
 # (MSBuild, Xcode) put it under build/<Config>/chimera[.exe].
@@ -47,9 +61,9 @@ locate_chimera() {
 CHIMERA="${CHIMERA:-$(locate_chimera || true)}"
 
 if [[ -z "$CHIMERA" || ! -f "$CHIMERA" ]]; then
-    echo "FAIL: chimera binary not found under $REPO_ROOT/build/" >&2
-    echo "      searched: build/chimera, build/chimera.exe, build/{Release,Debug}/chimera[.exe]" >&2
-    echo "      (run 'make build' first, or set CHIMERA=...)" >&2
+    printf "${FAIL_TAG}: chimera binary not found under %s/build/\n" "$REPO_ROOT" >&2
+    echo  "       searched: build/chimera, build/chimera.exe, build/{Release,Debug}/chimera[.exe]" >&2
+    echo  "       (run 'make build' first, or set CHIMERA=...)" >&2
     exit 1
 fi
 
@@ -61,17 +75,17 @@ failed_names=()
 run() {
     local name="$1"; shift
     if "$@" >/dev/null 2>&1; then
-        printf "  PASS  %s\n" "$name"
+        printf "  ${PASS_TAG}  %s\n" "$name"
         pass=$((pass + 1))
     else
-        printf "  FAIL  %s\n" "$name"
+        printf "  ${FAIL_TAG}  %s\n" "$name"
         fail=$((fail + 1))
         failed_names+=("$name")
     fi
 }
 
 skip_test() {
-    printf "  SKIP  %s (%s)\n" "$1" "$2"
+    printf "  ${SKIP_TAG}  %s (%s)\n" "$1" "$2"
     skip=$((skip + 1))
 }
 
@@ -87,11 +101,11 @@ run "sd --help"                  "$CHIMERA" sd --help
 
 # CLI parse error must exit non-zero (missing required --model).
 if "$CHIMERA" gen -p hi >/dev/null 2>&1; then
-    printf "  FAIL  %s\n" "gen without -m must exit non-zero"
+    printf "  ${FAIL_TAG}  %s\n" "gen without -m must exit non-zero"
     fail=$((fail + 1))
     failed_names+=("gen-missing-model")
 else
-    printf "  PASS  %s\n" "gen without -m exits non-zero"
+    printf "  ${PASS_TAG}  %s\n" "gen without -m exits non-zero"
     pass=$((pass + 1))
 fi
 
@@ -101,10 +115,10 @@ if [[ -f "$GEN_MODEL_CHECK" ]]; then
     "$CHIMERA" gen -m "$GEN_MODEL_CHECK" >/dev/null 2>&1
     code=$?
     if [[ $code -eq 2 ]]; then
-        printf "  PASS  %s\n" "gen without prompt exits 2 (BadInput)"
+        printf "  ${PASS_TAG}  %s\n" "gen without prompt exits 2 (BadInput)"
         pass=$((pass + 1))
     else
-        printf "  FAIL  %s (got %d, want 2)\n" "gen without prompt exits 2" "$code"
+        printf "  ${FAIL_TAG}  %s (got %d, want 2)\n" "gen without prompt exits 2" "$code"
         fail=$((fail + 1))
         failed_names+=("gen-bad-input-exit")
     fi
@@ -113,17 +127,18 @@ fi
 "$CHIMERA" gen -m /no/such/model.gguf -p hi >/dev/null 2>&1
 code=$?
 if [[ $code -eq 3 ]]; then
-    printf "  PASS  %s\n" "gen with missing model exits 3 (Load)"
+    printf "  ${PASS_TAG}  %s\n" "gen with missing model exits 3 (Load)"
     pass=$((pass + 1))
 else
-    printf "  FAIL  %s (got %d, want 3)\n" "gen missing-model exit" "$code"
+    printf "  ${FAIL_TAG}  %s (got %d, want 3)\n" "gen missing-model exit" "$code"
     fail=$((fail + 1))
     failed_names+=("gen-load-exit")
 fi
 
 if [[ $SMOKE_ONLY -eq 1 ]]; then
     echo
-    echo "smoke-only: pass=$pass fail=$fail"
+    fail_color="$_GREEN"; [[ $fail -gt 0 ]] && fail_color="$_RED"
+    printf "smoke-only: ${_GREEN}pass=%d${_RESET} ${fail_color}fail=%d${_RESET}\n" "$pass" "$fail"
     exit $fail
 fi
 
@@ -138,10 +153,10 @@ if [[ -f "$GEN_MODEL" ]]; then
     run "tokenize Llama-3.2-1B"   "$CHIMERA" tokenize -m "$GEN_MODEL" -p "hello world"
     # prompt-file (stdin)
     if echo "Hi" | "$CHIMERA" gen -m "$GEN_MODEL" -f - -n 4 >/dev/null 2>&1; then
-        printf "  PASS  %s\n" "gen --prompt-file - (stdin)"
+        printf "  ${PASS_TAG}  %s\n" "gen --prompt-file - (stdin)"
         pass=$((pass + 1))
     else
-        printf "  FAIL  %s\n" "gen --prompt-file - (stdin)"
+        printf "  ${FAIL_TAG}  %s\n" "gen --prompt-file - (stdin)"
         fail=$((fail + 1))
         failed_names+=("gen-prompt-file-stdin")
     fi
@@ -173,10 +188,10 @@ if [[ -n "$EMBED_MODEL" ]]; then
        && "$CHIMERA" embed -m "$EMBED_MODEL" -p "cache me" \
             --cache-embeddings --cache-db "$EMB_CACHE_DB" > "$EMB_OUT2" 2>/dev/null \
        && diff -q "$EMB_OUT1" "$EMB_OUT2" >/dev/null; then
-        printf "  PASS  embedding cache (bit-identical round trip)\n"
+        printf "  ${PASS_TAG}  embedding cache (bit-identical round trip)\n"
         pass=$((pass + 1))
     else
-        printf "  FAIL  embedding cache (output differs or call failed)\n"
+        printf "  ${FAIL_TAG}  embedding cache (output differs or call failed)\n"
         fail=$((fail + 1))
         failed_names+=("embedding-cache")
     fi
@@ -202,16 +217,16 @@ EOF
         VEC_HIT="$(CHIMERA_DB="$VEC_DB" "$CHIMERA" search -n rag_test \
             -q "audio file formats" -k 1 2>/dev/null)"
         if printf '%s' "$VEC_HIT" | grep -qi 'wav audio files'; then
-            printf "  PASS  %s\n" "vector store (rag_test top hit on 'audio file formats')"
+            printf "  ${PASS_TAG}  %s\n" "vector store (rag_test top hit on 'audio file formats')"
             pass=$((pass + 1))
         else
-            printf "  FAIL  %s\n" "vector store top hit"
+            printf "  ${FAIL_TAG}  %s\n" "vector store top hit"
             printf "        got: %s\n" "$VEC_HIT"
             fail=$((fail + 1))
             failed_names+=("vector-store")
         fi
     else
-        printf "  FAIL  %s\n" "vector store create/ingest"
+        printf "  ${FAIL_TAG}  %s\n" "vector store create/ingest"
         fail=$((fail + 1))
         failed_names+=("vector-store-setup")
     fi
@@ -247,10 +262,10 @@ if [[ -n "$SD_MODEL" ]]; then
     # Minimal step count + small image to keep the test fast.
     if "$CHIMERA" sd -m "$SD_MODEL" -p "a red cube" -o "$SD_OUT" \
         -W 256 -H 256 -s 2 >/dev/null 2>&1 && [[ -s "$SD_OUT" ]]; then
-        printf "  PASS  %s\n" "sd $(basename "$SD_MODEL")"
+        printf "  ${PASS_TAG}  %s\n" "sd $(basename "$SD_MODEL")"
         pass=$((pass + 1))
     else
-        printf "  FAIL  %s\n" "sd $(basename "$SD_MODEL")"
+        printf "  ${FAIL_TAG}  %s\n" "sd $(basename "$SD_MODEL")"
         fail=$((fail + 1))
         failed_names+=("sd")
     fi
@@ -262,10 +277,10 @@ if [[ -n "$SD_MODEL" ]]; then
             --init-image "$SD_OUT" --strength 0.6 \
             -o "$SD_OUT2" -W 256 -H 256 -s 2 >/dev/null 2>&1 \
             && [[ -s "$SD_OUT2" ]]; then
-            printf "  PASS  %s\n" "sd img2img round-trip"
+            printf "  ${PASS_TAG}  %s\n" "sd img2img round-trip"
             pass=$((pass + 1))
         else
-            printf "  FAIL  %s\n" "sd img2img round-trip"
+            printf "  ${FAIL_TAG}  %s\n" "sd img2img round-trip"
             fail=$((fail + 1))
             failed_names+=("sd-img2img")
         fi
@@ -293,10 +308,10 @@ if [[ -f "$MTMD_TEXT_MODEL" && -f "$MTMD_MMPROJ" && -n "$SD_MODEL" ]]; then
             -m "$MTMD_TEXT_MODEL" --mmproj "$MTMD_MMPROJ" --image "$MTMD_IMG" \
             -p "Describe this image briefly." -n 32 2>/dev/null || true)"
         if [[ -n "$(printf '%s' "$VL_OUT" | tr -d '[:space:]')" ]]; then
-            printf "  PASS  %s\n" "gen --mmproj --image (vision pipeline)"
+            printf "  ${PASS_TAG}  %s\n" "gen --mmproj --image (vision pipeline)"
             pass=$((pass + 1))
         else
-            printf "  FAIL  %s (empty output)\n" "gen --mmproj --image"
+            printf "  ${FAIL_TAG}  %s (empty output)\n" "gen --mmproj --image"
             fail=$((fail + 1))
             failed_names+=("mtmd")
         fi
@@ -319,10 +334,10 @@ if [[ -f "$GEN_MODEL" ]]; then
     # collapse all whitespace, lowercase
     normalized="$(printf '%s' "$CHAT_REPLY" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
     if printf '%s' "$normalized" | grep -q 'zephyrine'; then
-        printf "  PASS  %s\n" "chat persistent KV cache (recalls 'zephyrine')"
+        printf "  ${PASS_TAG}  %s\n" "chat persistent KV cache (recalls 'zephyrine')"
         pass=$((pass + 1))
     else
-        printf "  FAIL  %s\n" "chat persistent KV cache"
+        printf "  ${FAIL_TAG}  %s\n" "chat persistent KV cache"
         printf "        reply: %s\n" "$CHAT_REPLY"
         fail=$((fail + 1))
         failed_names+=("chat-kv-cache")
@@ -340,10 +355,10 @@ if [[ -f "$GEN_MODEL" ]]; then
     SEARCH_OUT="$("$CHIMERA" chat --db "$CHAT_DB" --search xyzzy42   2>/dev/null || true)"
     if printf '%s' "$LIST_OUT"   | grep -q '#1' \
         && printf '%s' "$SEARCH_OUT" | grep -q '\[xyzzy42\]'; then
-        printf "  PASS  %s\n" "chat --persist + --list + --search round-trip"
+        printf "  ${PASS_TAG}  %s\n" "chat --persist + --list + --search round-trip"
         pass=$((pass + 1))
     else
-        printf "  FAIL  %s\n" "chat persistence round-trip"
+        printf "  ${FAIL_TAG}  %s\n" "chat persistence round-trip"
         printf "        list:   %s\n" "$LIST_OUT"
         printf "        search: %s\n" "$SEARCH_OUT"
         fail=$((fail + 1))
@@ -353,8 +368,13 @@ if [[ -f "$GEN_MODEL" ]]; then
 fi
 
 echo
-echo "summary: pass=$pass fail=$fail skip=$skip"
+# Color the fail-count green at zero, red otherwise; pass is always
+# green if non-zero. The summary line is what readers scan first, so
+# the at-a-glance signal lives here.
+fail_color="$_GREEN"; [[ $fail -gt 0 ]] && fail_color="$_RED"
+printf "summary: ${_GREEN}pass=%d${_RESET} ${fail_color}fail=%d${_RESET} ${_YELLOW}skip=%d${_RESET}\n" \
+    "$pass" "$fail" "$skip"
 if [[ $fail -gt 0 ]]; then
-    printf "failed: %s\n" "${failed_names[*]}"
+    printf "${_RED}failed:${_RESET} %s\n" "${failed_names[*]}"
 fi
 exit $fail

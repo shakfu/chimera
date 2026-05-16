@@ -30,6 +30,25 @@ void WhisperContextDeleter::operator()(whisper_context * ctx) const {
     }
 }
 
+// Pin-asserts: upstream signatures we depend on. If whisper.cpp
+// renames any of these or changes the prototype, this TU fails to
+// compile with a pointer at the broken contract -- before the failure
+// cascades into the rest of chimera_whisper.cpp's call sites. See
+// doc/dev/maintenance.md and src/chimera/chimera_pin_check.cpp for the
+// cross-cutting llama.cpp version.
+namespace {
+[[maybe_unused]] void chimera_whisper_pin_check() {
+    [[maybe_unused]] whisper_token (*p_token_beg)(struct whisper_context *) =
+        &whisper_token_beg;
+    [[maybe_unused]] int (*p_full_n_tokens)(struct whisper_context *, int) =
+        &whisper_full_n_tokens;
+    [[maybe_unused]] const char * (*p_full_get_token_text)(struct whisper_context *, int, int) =
+        &whisper_full_get_token_text;
+    [[maybe_unused]] whisper_token_data (*p_full_get_token_data)(struct whisper_context *, int, int) =
+        &whisper_full_get_token_data;
+}
+}  // namespace
+
 static void chimera_silent_whisper_log(enum ggml_log_level, const char *, void *) {}
 
 void chimera_silence_whisper_log() {

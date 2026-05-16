@@ -1,0 +1,12 @@
+{
+  "data_0_index": 0,
+  "data_0_object": "embedding",
+  "data_len": 1,
+  "embedding_dim": 384,
+  "model_present": true,
+  "object": "list",
+  "usage_keys": [
+    "prompt_tokens",
+    "total_tokens"
+  ]
+}

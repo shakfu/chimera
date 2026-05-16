@@ -1,0 +1,50 @@
+{
+  "data": [
+    {
+      "aliases": [],
+      "created": "<redacted>",
+      "id": "Llama-3.2-1B-Instruct-Q8_0.gguf",
+      "meta": {
+        "n_ctx": 131072,
+        "n_ctx_train": 131072,
+        "n_embd": 2048,
+        "n_params": 1235814432,
+        "n_vocab": 128256,
+        "size": 1313251456,
+        "vocab_type": 2
+      },
+      "object": "model",
+      "owned_by": "llamacpp",
+      "tags": []
+    }
+  ],
+  "models": [
+    {
+      "capabilities": [
+        "completion"
+      ],
+      "description": "",
+      "details": {
+        "families": [
+          ""
+        ],
+        "family": "",
+        "format": "gguf",
+        "parameter_size": "",
+        "parent_model": "",
+        "quantization_level": ""
+      },
+      "digest": "",
+      "model": "Llama-3.2-1B-Instruct-Q8_0.gguf",
+      "modified_at": "",
+      "name": "Llama-3.2-1B-Instruct-Q8_0.gguf",
+      "parameters": "",
+      "size": "",
+      "tags": [
+        ""
+      ],
+      "type": "model"
+    }
+  ],
+  "object": "list"
+}
