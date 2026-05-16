@@ -41,7 +41,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: install linux deps
         if: runner.os == 'Linux'
@@ -73,7 +73,7 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: cache thirdparty
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: thirdparty
           # Keyed on manage.py (which pins the three dep versions) + CMake
