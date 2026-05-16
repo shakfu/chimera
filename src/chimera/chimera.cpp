@@ -36,6 +36,7 @@
 #include "chimera_chat_store.h"
 #include "chimera_db.h"
 #include "chimera_embed.h"
+#include "chimera_embed_cache.h"
 #include "chimera_sd.h"
 #include "chimera_vector_store.h"
 #include "chimera_whisper.h"
@@ -1307,6 +1308,18 @@ int command_embed(const EmbedOptions & opts) {
     cfg.normalize  = opts.normalize;
     cfg.use_mmap   = opts.use_mmap;
     chimera_embed::Embedder embedder(cfg);
+    std::unique_ptr<chimera_embed_cache::Cache> ecache;
+    if (opts.cache_embeddings) {
+        const std::string mid = chimera_embed_cache::compute_model_id(opts.model);
+        if (mid.empty()) {
+            fail(ExitCode::BadInput,
+                 "--cache-embeddings: cannot fingerprint embedding model "
+                 "(unreadable file: " + opts.model + ")");
+        }
+        ecache = std::make_unique<chimera_embed_cache::Cache>(
+            opts.cache_db.empty() ? chimera_db::default_path() : opts.cache_db, mid);
+        embedder.set_cache(ecache.get());
+    }
     const auto vec = embedder.embed(text);
 
     std::ofstream out_file;
@@ -1329,46 +1342,12 @@ int command_embed(const EmbedOptions & opts) {
 
 // ---- chunking ----------------------------------------------------------
 
-// Character-window fixed-overlap chunker with a sentence-boundary nudge.
-// Phase-2 first cut; token-based chunking is doc/dev/sqlite.md §11.4. ~2048
-// chars maps to roughly ~500 tokens of English (4 chars/tok rule of thumb).
-struct TextChunk {
-    std::string text;
-    int         index;
-};
-
-std::vector<TextChunk> chunk_text(const std::string & text,
-                                  size_t window_chars  = 2048,
-                                  size_t overlap_chars = 256) {
-    std::vector<TextChunk> chunks;
-    if (text.empty()) return chunks;
-    size_t pos = 0;
-    int idx = 0;
-    while (pos < text.size()) {
-        size_t end = std::min(pos + window_chars, text.size());
-        if (end < text.size()) {
-            // Within the last 5 % of the window, prefer a paragraph or
-            // sentence boundary so chunks don't sever mid-sentence.
-            const size_t backstop = pos + (window_chars * 95) / 100;
-            for (const char * pat : {"\n\n", ". ", "! ", "? ", "\n"}) {
-                const auto p = text.rfind(pat, end);
-                if (p != std::string::npos && p > backstop) {
-                    end = p + std::strlen(pat);
-                    break;
-                }
-            }
-        }
-        std::string slice = text.substr(pos, end - pos);
-        // Trim leading/trailing whitespace from each chunk.
-        slice = trim(std::move(slice));
-        if (!slice.empty()) {
-            chunks.push_back({std::move(slice), idx++});
-        }
-        if (end >= text.size()) break;
-        pos = (end > overlap_chars) ? end - overlap_chars : 0;
-    }
-    return chunks;
-}
+// Token-based chunking lives in chimera_embed::chunk_by_tokens — it
+// uses the loaded embedding model's vocab, so chunks are sized in the
+// tokens the model will actually see at embed time. The previous
+// character-window+sentence-nudge chunker is gone; ingest and the
+// /v1/vector_stores ingest route both call chunk_by_tokens with the
+// collection's recorded chunk_tokens / chunk_overlap.
 
 // ---- index / search subcommand implementations ------------------------
 
@@ -1383,7 +1362,10 @@ int command_index_create(const std::string & db_path,
                          int                 ctx_size,
                          int                 threads,
                          int                 gpu_layers,
-                         const std::string & pooling) {
+                         const std::string & pooling,
+                         const std::string & distance,
+                         int                 chunk_tokens,
+                         int                 chunk_overlap) {
     if (embedding_model.empty()) {
         fail(ExitCode::BadInput, "index create requires --embedding-model");
     }
@@ -1400,11 +1382,18 @@ int command_index_create(const std::string & db_path,
 
     auto conn = chimera_db::open_and_migrate(
         db_path.empty() ? chimera_db::default_path() : db_path);
-    auto col = chimera_vector_store::create(conn.get(), name, embedding_model, dim);
+    chimera_vector_store::CreateOptions cop;
+    cop.distance      = distance;
+    cop.chunk_tokens  = chunk_tokens;
+    cop.chunk_overlap = chunk_overlap;
+    auto col = chimera_vector_store::create(conn.get(), name, embedding_model, dim, cop);
 
     std::cout << "created collection '" << col.name << "'\n"
               << "  embedding model: " << col.embedding_model << "\n"
-              << "  dim:             " << col.dim << "\n";
+              << "  dim:             " << col.dim << "\n"
+              << "  distance:        " << col.distance << "\n"
+              << "  chunk_tokens:    " << col.chunk_tokens << "\n"
+              << "  chunk_overlap:   " << col.chunk_overlap << "\n";
     return 0;
 }
 
@@ -1419,8 +1408,9 @@ int command_index_ingest(const std::string &              db_path,
                          int                              threads,
                          int                              gpu_layers,
                          const std::string &              pooling,
-                         size_t                           window_chars,
-                         size_t                           overlap_chars) {
+                         int                              chunk_tokens_override,
+                         int                              chunk_overlap_override,
+                         bool                             cache_embeddings) {
     auto conn = chimera_db::open_and_migrate(
         db_path.empty() ? chimera_db::default_path() : db_path);
     auto col = chimera_vector_store::find(conn.get(), name);
@@ -1476,10 +1466,39 @@ int command_index_ingest(const std::string &              db_path,
     cfg.normalize  = true;
     chimera_embed::Embedder embedder(cfg);
 
+    // Optional embedding cache: reuses --db (where the collection
+    // already lives). Cache key is the model fingerprint of the
+    // collection's recorded embedding_model file, so a rename or
+    // re-quantization invalidates the cache automatically.
+    std::unique_ptr<chimera_embed_cache::Cache> ecache;
+    if (cache_embeddings) {
+        const std::string mid = chimera_embed_cache::compute_model_id(col->embedding_model);
+        if (mid.empty()) {
+            fail(ExitCode::BadInput,
+                 "--cache-embeddings: cannot fingerprint embedding model "
+                 "(unreadable file: " + col->embedding_model + ")");
+        }
+        ecache = std::make_unique<chimera_embed_cache::Cache>(
+            db_path.empty() ? chimera_db::default_path() : db_path, mid);
+        embedder.set_cache(ecache.get());
+    }
+
+    // Per-collection chunk defaults; CLI overrides win when > 0. Token-
+    // based, not character-based: a chunk is `chunk_tokens` tokens of
+    // the collection's embedding-model vocab with `chunk_overlap`
+    // tokens of overlap between neighbors. This makes per-chunk sizes
+    // accurate against the embedding model's input limit, eliminating
+    // the character-window proxy and its 400-800-token variance.
+    const int eff_chunk_tokens   = chunk_tokens_override   > 0
+        ? chunk_tokens_override   : col->chunk_tokens;
+    const int eff_chunk_overlap  = chunk_overlap_override  >= 0
+        ? chunk_overlap_override  : col->chunk_overlap;
+
     size_t total_chunks = 0;
     for (const auto & path : sources) {
         const std::string text = read_file(path);
-        const auto chunks = chunk_text(text, window_chars, overlap_chars);
+        const auto chunks = chimera_embed::chunk_by_tokens(
+            text, embedder, eff_chunk_tokens, eff_chunk_overlap);
         for (const auto & c : chunks) {
             auto vec = embedder.embed(c.text);
             if (static_cast<int>(vec.size()) != col->dim) {
@@ -1492,6 +1511,7 @@ int command_index_ingest(const std::string &              db_path,
             doc.source_uri  = path;
             doc.chunk_index = c.index;
             doc.text        = c.text;
+            doc.token_count = c.token_count;
             doc.embedding   = std::move(vec);
             chimera_vector_store::insert_document(conn.get(), *col, doc);
             ++total_chunks;
@@ -1536,6 +1556,9 @@ int command_index_stats(const std::string & db_path, const std::string & name) {
               << "  id:              " << col->id << "\n"
               << "  embedding model: " << col->embedding_model << "\n"
               << "  dim:             " << col->dim << "\n"
+              << "  distance:        " << col->distance << "\n"
+              << "  chunk_tokens:    " << col->chunk_tokens << "\n"
+              << "  chunk_overlap:   " << col->chunk_overlap << "\n"
               << "  created_at:      " << col->created_at << "\n"
               << "  documents:       " << docs << "\n";
     return 0;
@@ -1558,7 +1581,8 @@ int command_search(const std::string & db_path,
                    int                 ctx_size,
                    int                 threads,
                    int                 gpu_layers,
-                   const std::string & pooling) {
+                   const std::string & pooling,
+                   bool                cache_embeddings) {
     if (query.empty()) {
         fail(ExitCode::BadInput, "search requires -q/--query");
     }
@@ -1577,6 +1601,18 @@ int command_search(const std::string & db_path,
     cfg.n_ctx      = static_cast<uint32_t>(ctx_size);
     cfg.normalize  = true;
     chimera_embed::Embedder embedder(cfg);
+    std::unique_ptr<chimera_embed_cache::Cache> ecache;
+    if (cache_embeddings) {
+        const std::string mid = chimera_embed_cache::compute_model_id(col->embedding_model);
+        if (mid.empty()) {
+            fail(ExitCode::BadInput,
+                 "--cache-embeddings: cannot fingerprint embedding model "
+                 "(unreadable file: " + col->embedding_model + ")");
+        }
+        ecache = std::make_unique<chimera_embed_cache::Cache>(
+            db_path.empty() ? chimera_db::default_path() : db_path, mid);
+        embedder.set_cache(ecache.get());
+    }
     auto qvec = embedder.embed(query);
     if (static_cast<int>(qvec.size()) != col->dim) {
         fail(ExitCode::Runtime,
@@ -2053,6 +2089,11 @@ int main(int argc, char ** argv) {
         embed_cmd->add_option("-b,--batch-size", embed_opts.n_batch, "Batch size");
         embed_cmd->add_option("-t,--threads", embed_opts.threads, "CPU threads");
         embed_cmd->add_option("--gpu-layers", embed_opts.gpu_layers, "Layers to offload");
+        embed_cmd->add_flag("--cache-embeddings", embed_opts.cache_embeddings,
+            "Memoize embed(text) -> vector in SQLite so repeats skip the model");
+        embed_cmd->add_option("--cache-db", embed_opts.cache_db,
+            "Path to the SQLite DB used by --cache-embeddings "
+            "(default: $CHIMERA_DB or platform default)");
         embed_cmd->add_flag("!--no-normalize", embed_opts.normalize,
             "Do not L2-normalize the output vector");
 
@@ -2122,6 +2163,8 @@ int main(int argc, char ** argv) {
             "Embedding GGUF to load alongside the LLM (routes /v1/embeddings to it)");
         serve_cmd->add_option("--reranking", serve_opts.rerank_model,
             "Cross-encoder reranker GGUF to load alongside the LLM (enables /v1/rerank)");
+        serve_cmd->add_flag("--cache-embeddings", serve_opts.cache_embeddings,
+            "Memoize RAG embeddings in --rag-db (no-op unless --enable-rag is set)");
         serve_cmd->add_option("--rag-db", serve_opts.rag_db_path,
             "Path to the SQLite DB used by /v1/vector_stores/* "
             "(default: $CHIMERA_DB or platform default)");
@@ -2155,8 +2198,18 @@ int main(int argc, char ** argv) {
         std::string idx_pooling    = "mean";
         std::vector<std::string> idx_files;
         std::string idx_glob;
-        int idx_window_chars  = 2048;
-        int idx_overlap_chars = 256;
+        // Defaults baked into the collection at create-time. The ingest
+        // CLI accepts overrides; 0 / -1 means "use whatever the
+        // collection row recorded". Chunking is token-based: 512-token
+        // window with 64-token overlap is a reasonable starting point
+        // for bge-small / gte-small (max input = 512).
+        std::string idx_distance       = "cosine";
+        int         idx_chunk_tokens   = 512;
+        int         idx_chunk_overlap  = 64;
+        // Per-ingest-call overrides; default 0/-1 = use the collection's
+        // recorded values.
+        int         idx_chunk_tokens_override   = 0;
+        int         idx_chunk_overlap_override  = -1;
 
         auto * index_cmd = app.add_subcommand("index",
             "Vector store management");
@@ -2174,6 +2227,14 @@ int main(int argc, char ** argv) {
         index_create_cmd->add_option("--gpu-layers", idx_gpu_layers, "Layers to offload");
         index_create_cmd->add_option("--pooling", idx_pooling,
             "Pooling: mean | cls | last | none");
+        index_create_cmd->add_option("--distance", idx_distance,
+            "Distance metric on the vec0 table: cosine | l2 | l1 "
+            "(default cosine; right for L2-normalized embeddings)");
+        index_create_cmd->add_option("--chunk-tokens", idx_chunk_tokens,
+            "Default tokens per chunk for this collection (default 512). "
+            "Token units of the embedding model's vocab; not characters.");
+        index_create_cmd->add_option("--chunk-overlap", idx_chunk_overlap,
+            "Default token overlap between chunks (default 64)");
 
         auto * index_ingest_cmd = index_cmd->add_subcommand("ingest",
             "Chunk + embed + insert one or more text files into a collection");
@@ -2187,10 +2248,16 @@ int main(int argc, char ** argv) {
         index_ingest_cmd->add_option("--gpu-layers", idx_gpu_layers, "Layers to offload");
         index_ingest_cmd->add_option("--pooling", idx_pooling,
             "Pooling: mean | cls | last | none");
-        index_ingest_cmd->add_option("--chunk-chars", idx_window_chars,
-            "Chars per chunk (default 2048)");
-        index_ingest_cmd->add_option("--chunk-overlap", idx_overlap_chars,
-            "Char overlap between chunks (default 256)");
+        index_ingest_cmd->add_option("--chunk-tokens", idx_chunk_tokens_override,
+            "Tokens per chunk for this ingest call (overrides the collection's "
+            "recorded chunk_tokens; 0 = use the collection default)");
+        index_ingest_cmd->add_option("--chunk-overlap", idx_chunk_overlap_override,
+            "Token overlap between chunks for this ingest call (overrides the "
+            "collection's recorded chunk_overlap; -1 = use the collection default)");
+        bool idx_cache_embeddings = false;
+        index_ingest_cmd->add_flag("--cache-embeddings", idx_cache_embeddings,
+            "Memoize per-chunk embed(text) -> vector in --db so re-ingesting "
+            "the same content skips the model");
 
         auto * index_list_cmd  = index_cmd->add_subcommand("list",
             "List collections and their document counts");
@@ -2222,6 +2289,10 @@ int main(int argc, char ** argv) {
         search_cmd->add_option("--gpu-layers", srch_gpu_layers, "Layers to offload");
         search_cmd->add_option("--pooling", srch_pooling,
             "Pooling: mean | cls | last | none");
+        bool srch_cache_embeddings = false;
+        search_cmd->add_flag("--cache-embeddings", srch_cache_embeddings,
+            "Memoize embed(query) -> vector in --db so repeated searches "
+            "with the same query skip the model");
 
         app.parse(argc, argv);
 
@@ -2305,13 +2376,15 @@ int main(int argc, char ** argv) {
         } else if (*index_create_cmd) {
             rc = command_index_create(idx_db_path, idx_name, idx_embedding_model,
                                        idx_ctx_size, idx_threads, idx_gpu_layers,
-                                       idx_pooling);
+                                       idx_pooling, idx_distance,
+                                       idx_chunk_tokens, idx_chunk_overlap);
         } else if (*index_ingest_cmd) {
             rc = command_index_ingest(idx_db_path, idx_name, idx_files, idx_glob,
                                        idx_ctx_size, idx_threads, idx_gpu_layers,
                                        idx_pooling,
-                                       static_cast<size_t>(idx_window_chars),
-                                       static_cast<size_t>(idx_overlap_chars));
+                                       idx_chunk_tokens_override,
+                                       idx_chunk_overlap_override,
+                                       idx_cache_embeddings);
         } else if (*index_list_cmd) {
             rc = command_index_list(idx_db_path);
         } else if (*index_stats_cmd) {
@@ -2321,7 +2394,7 @@ int main(int argc, char ** argv) {
         } else if (*search_cmd) {
             rc = command_search(srch_db_path, srch_name, srch_query, srch_k,
                                  srch_ctx_size, srch_threads, srch_gpu_layers,
-                                 srch_pooling);
+                                 srch_pooling, srch_cache_embeddings);
         }
 
         llama_backend_free();

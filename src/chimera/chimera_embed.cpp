@@ -3,6 +3,7 @@
 
 #include "chimera_embed.h"
 #include "chimera.h"   // ChimeraError, ExitCode
+#include "chimera_embed_cache.h"
 
 #include "llama.h"
 
@@ -52,7 +53,9 @@ struct Embedder::Impl {
     LlamaContextPtr      ctx;
     enum llama_pooling_type ptype;
     int                  n_embd_ = 0;
+    int                  n_ctx_  = 0;
     bool                 normalize = true;
+    chimera_embed_cache::Cache * cache = nullptr;  // not owned
 };
 
 Embedder::Embedder(const Config & cfg) : impl_(std::make_unique<Impl>()) {
@@ -82,6 +85,7 @@ Embedder::Embedder(const Config & cfg) : impl_(std::make_unique<Impl>()) {
     }
     impl_->ptype     = cparams.pooling_type;
     impl_->n_embd_   = llama_model_n_embd(impl_->model.get());
+    impl_->n_ctx_    = static_cast<int>(cparams.n_ctx);
     impl_->normalize = cfg.normalize;
 }
 
@@ -90,12 +94,54 @@ Embedder & Embedder::operator=(Embedder &&) noexcept = default;
 Embedder::~Embedder() = default;
 
 int Embedder::n_embd() const { return impl_->n_embd_; }
+int Embedder::n_ctx () const { return impl_->n_ctx_;  }
+
+std::vector<int> Embedder::tokenize(const std::string & text,
+                                    bool add_special, bool parse_special) const {
+    const llama_vocab * vocab = llama_model_get_vocab(impl_->model.get());
+    auto toks = ::chimera_embed::tokenize(vocab, text, add_special, parse_special);
+    return std::vector<int>(toks.begin(), toks.end());
+}
+
+std::string Embedder::detokenize(const std::vector<int> & tokens) const {
+    if (tokens.empty()) return {};
+    const llama_vocab * vocab = llama_model_get_vocab(impl_->model.get());
+
+    // Two-call pattern: ask once for the required length, allocate,
+    // then materialize. The negative return is the buffer size needed.
+    std::string out(tokens.size() * 4 + 32, '\0');
+    while (true) {
+        const int32_t n = llama_detokenize(
+            vocab, tokens.data(), static_cast<int32_t>(tokens.size()),
+            out.data(), static_cast<int32_t>(out.size()),
+            /*remove_special=*/true, /*unparse_special=*/false);
+        if (n >= 0) {
+            out.resize(static_cast<size_t>(n));
+            return out;
+        }
+        // n is the negative of the required buffer length.
+        out.resize(static_cast<size_t>(-n));
+    }
+}
+
+void Embedder::set_cache(chimera_embed_cache::Cache * cache) {
+    impl_->cache = cache;
+}
 
 std::vector<float> Embedder::embed(const std::string & text) {
     if (text.empty()) return {};
 
+    if (impl_->cache) {
+        std::vector<float> hit;
+        if (impl_->cache->lookup(text, impl_->n_embd_, hit)) {
+            return hit;
+        }
+    }
+
     const llama_vocab * vocab = llama_model_get_vocab(impl_->model.get());
-    auto tokens = tokenize(vocab, text, /*add_special=*/true, /*parse_special=*/true);
+    // Disambiguate from the public Embedder::tokenize member (3 args).
+    auto tokens = ::chimera_embed::tokenize(
+        vocab, text, /*add_special=*/true, /*parse_special=*/true);
     if (tokens.empty()) {
         fail(ExitCode::BadInput, "input tokenized to zero tokens");
     }
@@ -133,7 +179,68 @@ std::vector<float> Embedder::embed(const std::string & text) {
             for (float & v : vec) v /= norm;
         }
     }
+    if (impl_->cache) {
+        // Cache the final (normalized, if enabled) vector — that's what
+        // future callers will receive on hit, so we want bit-identical
+        // round-trips.
+        impl_->cache->put(text, vec);
+    }
     return vec;
+}
+
+std::vector<TokenChunk> chunk_by_tokens(const std::string & text,
+                                        const Embedder &    embedder,
+                                        int                 chunk_tokens,
+                                        int                 overlap_tokens) {
+    std::vector<TokenChunk> out;
+    if (text.empty() || chunk_tokens <= 0) return out;
+    if (overlap_tokens < 0 || overlap_tokens >= chunk_tokens) {
+        fail(ExitCode::BadInput,
+             "chunk overlap must be in [0, chunk_tokens) (got " +
+             std::to_string(overlap_tokens) + " vs chunk_tokens=" +
+             std::to_string(chunk_tokens) + ")");
+    }
+
+    // Clamp to what the embedding context can actually decode. Setting
+    // chunk_tokens > n_ctx would silently truncate at embed time, so
+    // refuse it here with a clear message.
+    const int max_tokens = embedder.n_ctx();
+    if (max_tokens > 0 && chunk_tokens > max_tokens) {
+        chunk_tokens = max_tokens;
+        if (overlap_tokens >= chunk_tokens) {
+            overlap_tokens = chunk_tokens / 8;  // 12.5% overlap as a sane fallback
+        }
+    }
+
+    // Tokenize the whole source once. add_special=false because we slice
+    // mid-token-stream; BOS/EOS are model-dependent and the embed()
+    // method re-adds them as needed when it tokenizes the chunk text
+    // again. parse_special=false treats every byte as content.
+    auto tokens = embedder.tokenize(text, /*add_special=*/false,
+                                          /*parse_special=*/false);
+    if (tokens.empty()) return out;
+
+    const int n_total = static_cast<int>(tokens.size());
+    const int step    = chunk_tokens - overlap_tokens;
+    int idx           = 0;
+    for (int start = 0; start < n_total; start += step) {
+        const int end = std::min(start + chunk_tokens, n_total);
+        std::vector<int> slice(tokens.begin() + start, tokens.begin() + end);
+
+        std::string chunk_text = embedder.detokenize(slice);
+        // Trim leading/trailing whitespace so KNN highlights don't show
+        // ragged edges from a mid-token cut.
+        auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
+        chunk_text.erase(chunk_text.begin(),
+                         std::find_if(chunk_text.begin(), chunk_text.end(), not_space));
+        chunk_text.erase(std::find_if(chunk_text.rbegin(), chunk_text.rend(), not_space).base(),
+                         chunk_text.end());
+        if (!chunk_text.empty()) {
+            out.push_back({std::move(chunk_text), idx++, end - start});
+        }
+        if (end >= n_total) break;
+    }
+    return out;
 }
 
 }  // namespace chimera_embed

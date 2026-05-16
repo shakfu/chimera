@@ -64,8 +64,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "version",
         help='Release version, e.g. "0.1.2". The script first looks for '
-             '`## [<version>]`; if missing or empty, falls back to '
-             '`## [Unreleased]`.',
+        "`## [<version>]`; if missing or empty, falls back to "
+        "`## [Unreleased]`.",
     )
     parser.add_argument(
         "--changelog",
@@ -73,7 +73,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Path to CHANGELOG.md (default: %(default)s).",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         default="release-notes.md",
         help="Where to write the extracted notes (default: %(default)s).",
     )
@@ -81,7 +82,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--header",
         default="Changes since the last Release",
         help='Text after the leading "## " on line 1 of the output '
-             '(default: "%(default)s").',
+        '(default: "%(default)s").',
     )
     args = parser.parse_args(argv)
 

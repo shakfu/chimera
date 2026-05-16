@@ -161,6 +161,27 @@ if [[ -n "$EMBED_MODEL" ]]; then
     run "embed $(basename "$EMBED_MODEL")" \
         "$CHIMERA" embed -m "$EMBED_MODEL" -p "a quick brown fox"
 
+    # Embedding cache: two calls with the same input should produce
+    # bit-identical output, and the second should not require the
+    # embed model to recompute (we can't time-assert that here, but
+    # the diff catches any cache-write-then-read corruption).
+    EMB_CACHE_DB="$(mktemp -t chimera-embcache-XXXXXX).db"
+    EMB_OUT1="$(mktemp -t chimera-emb1-XXXXXX)"
+    EMB_OUT2="$(mktemp -t chimera-emb2-XXXXXX)"
+    if "$CHIMERA" embed -m "$EMBED_MODEL" -p "cache me" \
+            --cache-embeddings --cache-db "$EMB_CACHE_DB" > "$EMB_OUT1" 2>/dev/null \
+       && "$CHIMERA" embed -m "$EMBED_MODEL" -p "cache me" \
+            --cache-embeddings --cache-db "$EMB_CACHE_DB" > "$EMB_OUT2" 2>/dev/null \
+       && diff -q "$EMB_OUT1" "$EMB_OUT2" >/dev/null; then
+        printf "  PASS  embedding cache (bit-identical round trip)\n"
+        pass=$((pass + 1))
+    else
+        printf "  FAIL  embedding cache (output differs or call failed)\n"
+        fail=$((fail + 1))
+        failed_names+=("embedding-cache")
+    fi
+    rm -f "$EMB_CACHE_DB" "$EMB_CACHE_DB-wal" "$EMB_CACHE_DB-shm" "$EMB_OUT1" "$EMB_OUT2"
+
     # Vector-store smoke: create a collection, ingest a small corpus
     # with one passage that should clearly win on a targeted query, and
     # check the top hit. Uses CHIMERA_DB so the test never touches the
@@ -174,12 +195,13 @@ The whisper.cpp wrapper accepts WAV audio files only in the first cut.
 
 SQLite plus sqlite-vec is embedded for RAG and persistent chat history.
 EOF
-    if CHIMERA_DB="$VEC_DB" "$CHIMERA" index create -n rag_test -e "$EMBED_MODEL" >/dev/null 2>&1 \
+    if CHIMERA_DB="$VEC_DB" "$CHIMERA" index create -n rag_test -e "$EMBED_MODEL" \
+            --chunk-tokens 128 --chunk-overlap 16 >/dev/null 2>&1 \
         && CHIMERA_DB="$VEC_DB" "$CHIMERA" index ingest -n rag_test -f "$VEC_DOC" \
-            --chunk-chars 128 --chunk-overlap 16 >/dev/null 2>&1; then
+            >/dev/null 2>&1; then
         VEC_HIT="$(CHIMERA_DB="$VEC_DB" "$CHIMERA" search -n rag_test \
             -q "audio file formats" -k 1 2>/dev/null)"
-        if printf '%s' "$VEC_HIT" | grep -q 'WAV audio files'; then
+        if printf '%s' "$VEC_HIT" | grep -qi 'wav audio files'; then
             printf "  PASS  %s\n" "vector store (rag_test top hit on 'audio file formats')"
             pass=$((pass + 1))
         else

@@ -418,15 +418,38 @@ felt fragile; we removed it from `command_serve` and kept only
 commit via `LLAMACPP_VERSION` in `scripts/manage.py`. The
 `server_context`, `server_routes`, and `server_http_context` types are
 **not** part of upstream's public API; they shift with llama.cpp's
-internal refactors. Every llama.cpp version bump should look at:
+internal refactors.
 
-```
-build/llama.cpp/tools/server/server-context.h
-build/llama.cpp/tools/server/server-http.h
+The `make bump-check` target automates the diff. It fetches
+`tools/server/server-context.h` and `tools/server/server-http.h` from
+the upstream tag (defaults to the currently pinned version; override
+with `make bump-check LLAMA_VERSION=bXXXX`) and compares them against
+the headers currently vendored under
+`thirdparty/llama.cpp/include/`. The output lists added/removed
+top-level symbols (struct/class/enum names, `handler_t` fields,
+function signatures) and a unified diff capped at 120 lines. Exit
+code is 0 when clean, 2 when any header changed.
+
+Recommended bump workflow:
+
+```sh
+# 1. See what's changing before touching anything.
+make bump-check LLAMA_VERSION=<new_ref>
+
+# 2. If anything came back, audit the call sites — chimera_serve.cpp
+#    route bindings (especially `handler_t` fields on `server_routes`),
+#    src/chimera/CMakeLists.txt link order / archive groups, and the
+#    server-http.cpp source copy under thirdparty/llama.cpp/src-aux/.
+
+# 3. Edit LLAMACPP_VERSION in scripts/manage.py, rebuild deps + chimera:
+python scripts/manage.py build --llama-cpp --llama-version <new_ref>
+make build
+make test
 ```
 
-If their declarations changed, expect to update `chimera_serve.cpp` and
-possibly the manage.py header globs.
+Once `LLAMACPP_VERSION` is bumped and `make build` re-vendors the
+headers, `make bump-check` will report "clean" again — the check is
+**a pre-bump audit step**, not a CI guard.
 
 **Sleeping / hibernation.** `server_context::on_sleeping_changed` exists
 upstream for the router-server protocol; we don't wire it up. If we
@@ -460,50 +483,18 @@ it, we'd need a small registry of preloaded whisper contexts.
 Ordered roughly by ROI per implementation effort. None of these is
 blocking.
 
-### Near-term
+### Deliberately not supported
 
-1. **`POST /v1/audio/translations`.** Trivial follow-up: set
-   `translate=true` in the `TranscribeRequest`. ~30 LOC.
-
-2. **Non-WAV audio in `/v1/audio/transcriptions`.** Currently only
-   RIFF/WAVE is accepted; mp3, m4a, mp4, mpeg, webm all return 415. The
-   options:
-   - Single-header drop-ins (`dr_mp3.h`, `dr_flac.h`) for the common
-     consumer formats. Fast to add; doesn't cover m4a/AAC/Opus.
-   - libsndfile + libavcodec / FFmpeg for the full set. Heavyweight
-     dependency; full coverage. The right choice for a serious
-     deployment.
-
-3. **Word-level timestamps in `verbose_json`.** OpenAI's spec includes
-   `timestamp_granularities=["word"]`. Whisper supports this via
-   `params.token_timestamps = true`; we'd need to thread it through
-   `chimera_whisper::transcribe`, read the per-token timing, and emit
-   them in the response.
-
-4. **Better SD error messages.** Pipe `ggml_log` errors back into the
-   HTTP response body when generation fails. Today the user sees a
-   generic 500 even when the underlying assertion is descriptive
-   ("buft failed", "tensor size mismatch", etc.).
-
-### Medium-term
-
-5. **`GET /metrics`** — bind `routes.get_metrics`. Prometheus-friendly
-   format. A few minutes of work.
-
-6. **`POST /v1/responses`** — bind `routes.post_responses_oai`. Newer
-   OpenAI API; some clients prefer it over chat-completions. Also a
-   few minutes of work.
-
-7. **`POST /v1/messages`** (Anthropic Messages) — bind
-   `routes.post_anthropic_messages`. Useful for testing chimera serve
-   with Anthropic SDK clients.
-
-8. **`POST /v1/embeddings` without `--embeddings`.** Today the embeddings
-   route returns 501 unless the model was loaded in embedding mode.
-   A model can only do one or the other in a single load. The cleanest
-   answer is `--enable-embeddings <bge.gguf>` that loads a second
-   model (small embedding model) alongside the LLM — same pattern as
-   `--enable-audio` and `--enable-image`. ~80 LOC.
+**Non-WAV audio in `/v1/audio/transcriptions`.** Currently only
+RIFF/WAVE is accepted; mp3, m4a, mp4, mpeg, webm all return 415 with a
+message telling the caller to transcode. Every viable path adds
+dependencies that don't pull their weight: single-header decoders
+(`dr_mp3.h` + `dr_flac.h`) only cover two of the formats users actually
+send, and a complete solution drags in libavcodec / FFmpeg, which is
+multi-megabyte and brings its own license + CVE surface. Clients
+already have `ffmpeg` available far more often than they have an
+in-process audio codec library, so we punt the decode to them. **Do
+not revisit without a concrete user request.**
 
 ### Longer-term
 

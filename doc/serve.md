@@ -251,7 +251,7 @@ authoritative list. Common fields:
 
 For audio (`/v1/audio/transcriptions`):
 
-- `file` — required, the audio (WAV only for now).
+- `file` — required, the audio. **WAV / RIFF only by design** — chimera deliberately doesn't bundle audio codecs. Transcode other formats client-side: `ffmpeg -i in.mp3 -ar 16000 -ac 1 out.wav`.
 - `language` — ISO-639-1 code like `en`, or `auto` for autodetect.
 - `prompt` — priming text (whisper's `initial_prompt`).
 - `response_format` — `json` (default), `text`, `verbose_json`, `srt`, `vtt`.
@@ -318,9 +318,10 @@ You called `/v1/audio/transcriptions` or `/v1/images/{edits,variations}`
 without uploading the audio/image field. Use `-F file=@path.wav` or
 `-F image=@path.png` with curl.
 
-**`{"error":{"message":"unsupported audio: ... (Phase 2 currently accepts WAV / RIFF only; mp3, m4a, webm are not yet implemented)"}}`**
-Convert your input to WAV. `ffmpeg -i input.mp3 -ar 16000 -ac 1
-input.wav` produces what whisper wants.
+**`{"error":{"message":"unsupported audio: ... (chimera accepts WAV / RIFF only by design; ...)"}}`**
+chimera deliberately doesn't bundle audio codecs; transcode client-side.
+`ffmpeg -i input.mp3 -ar 16000 -ac 1 input.wav` produces what whisper
+wants.
 
 **`{"error":{"message":"response_format=url is not supported (chimera serve has no static-file backend); use 'b64_json'"}}`**
 Use `"response_format": "b64_json"` (which is also the default) and
@@ -376,15 +377,15 @@ second `Ctrl-C` force-exits — useful if a request is hung.
 
 ---
 
-## What's not supported (yet)
+## What's not supported
 
-- Non-WAV audio formats (mp3, m4a, mp4, webm). Convert with `ffmpeg`
-  for now.
-- `POST /v1/audio/translations` (whisper translate mode).
-- Document reranking (`POST /v1/rerank`).
-- Word-level timestamps in transcription `verbose_json`.
-- KV-cache slot save/load (`/slots`).
-- LoRA hot-swap (`/lora-adapters`).
+- Non-WAV audio formats (mp3, m4a, mp4, webm). **By design** — chimera
+  deliberately doesn't bundle audio codecs (every viable option drags
+  in either a multi-megabyte FFmpeg dep or a partial set of single-
+  header decoders that still wouldn't cover m4a/webm). Transcode
+  client-side with `ffmpeg -i in.<ext> -ar 16000 -ac 1 out.wav`.
+- KV-cache slot save/load (`/slots`). Planned.
+- LoRA hot-swap (`/lora-adapters`). Planned.
 - HTTPS direct serving (use a reverse proxy).
 - The web chat UI shipped with llama-server.
 - Multi-model routing — chimera serve loads one LLM (plus optionally

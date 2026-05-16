@@ -52,6 +52,13 @@ struct EmbedOptions {
     uint32_t n_batch = 512;
     bool normalize = true;
     bool use_mmap = true;
+
+    // Opt-in persistent embedding cache. When true, embed(text) -> vector
+    // is memoized in `cache_db` (or the platform default if empty) so
+    // repeats skip the model. See doc/dev/sqlite.md and
+    // chimera_embed_cache.h.
+    bool        cache_embeddings = false;
+    std::string cache_db;
 };
 
 struct TokenizeOptions {
@@ -149,6 +156,13 @@ struct ServeOptions {
     // bound. Natural follow-up to the RAG vector search: feed the top-N
     // hits + the user query through this to get a refined ordering.
     std::string rerank_model;         // --reranking <model.gguf>
+
+    // Opt-in persistent embedding cache for the RAG path. Reuses the
+    // same SQLite DB as --enable-rag (and --rag-db override). No effect
+    // unless --enable-rag is also set (the cache attaches to the RAG
+    // Embedder; the dedicated --enable-embeddings model goes through
+    // server-context and isn't cacheable from here).
+    bool cache_embeddings = false;    // --cache-embeddings
 
     // Phase 5 (chat persistence): when true, every /v1/chat/completions
     // exchange is saved to the chats + messages tables (one new chat row

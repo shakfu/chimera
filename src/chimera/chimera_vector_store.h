@@ -25,7 +25,20 @@ struct Collection {
     int         dim;
     int64_t     created_at;
     int64_t     doc_count;          // populated by list()/stats()
+
+    // v3 columns. `distance` is the sqlite-vec metric (`cosine | l2 |
+    // l1`) used by this collection's vec0 table; pre-v3 rows backfill to
+    // 'cosine'. `chunk_tokens` and `chunk_overlap` are the defaults
+    // `chimera index ingest` uses when the user doesn't override on the
+    // command line.
+    std::string distance      = "cosine";
+    int         chunk_tokens  = 512;
+    int         chunk_overlap = 64;
 };
+
+// Allowed values for Collection::distance. Validated at create-time;
+// rejection is the caller's responsibility.
+bool is_valid_distance(const std::string & d);
 
 struct Hit {
     int64_t     document_id;
@@ -40,10 +53,17 @@ struct Hit {
 // Create a collection, including the per-collection `vec_<id>` virtual
 // table sized to `dim`. Throws ChimeraError(BadInput) if a collection
 // with this name already exists.
-Collection create(sqlite3 * db,
+struct CreateOptions {
+    std::string distance      = "cosine";  // 'cosine' | 'l2' | 'l1'
+    int         chunk_tokens  = 512;
+    int         chunk_overlap = 64;
+};
+
+Collection create(sqlite3 *           db,
                   const std::string & name,
                   const std::string & embedding_model,
-                  int                 dim);
+                  int                 dim,
+                  const CreateOptions & opts = {});
 
 // Drop a collection, its documents, and its per-collection vec0 table.
 // Throws if no such collection exists.

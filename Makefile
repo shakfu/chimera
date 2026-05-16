@@ -1,4 +1,4 @@
-.PHONY: deps build rebuild clean reset test smoke install uninstall release-notes
+.PHONY: deps build rebuild clean reset test smoke install uninstall release-notes bump-check test-db-migrate
 
 # Python interpreter, picked at make-invocation time by probing the host.
 # Order: `python3` (Linux / macOS / Conda / venv), `python` (Windows
@@ -62,3 +62,24 @@ VERSION ?= $(shell $(PYTHON) -c "import re; \
 
 release-notes:
 	@$(PYTHON) scripts/release_notes.py $(VERSION)
+
+# bump-check: diff the currently-vendored upstream-server headers against
+# llama.cpp at $(LLAMA_VERSION) (default: whatever scripts/manage.py has
+# pinned). server-context.h / server-http.h aren't part of upstream's
+# stable API and shift with internal refactors, so a chimera bump that
+# bypasses this check can silently break the build or the runtime.
+# Run before changing LLAMACPP_VERSION; the script exits non-zero when
+# any of the headers changed.
+LLAMA_VERSION ?=
+
+bump-check:
+	@$(PYTHON) scripts/manage.py bump_check $(if $(LLAMA_VERSION),--llama-version $(LLAMA_VERSION))
+
+# test-db-migrate: build a v1-schema chimera.db in a temp dir, drive
+# `chimera db status` against it (which calls open_and_migrate), and
+# assert the v1 -> latest migration both advances the schema and
+# preserves pre-existing rows. Pre-empts schema-migration regressions
+# across version bumps — every new migration we land has to keep
+# upgrading old user DBs cleanly. Requires the chimera binary built.
+test-db-migrate: $(BUILD_DIR)/chimera
+	@$(PYTHON) scripts/test_db_migrate.py

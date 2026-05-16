@@ -11,30 +11,14 @@ Detailed rationale and design discussion lives in `doc/dev/server.md`
 - [ ] Validate non-Metal macOS backends (Vulkan, CPU-only).
 - [ ] Promote the Windows MSVC leg out of `experimental: true` once it
       passes consistently across a release or two.
-- [ ] `make test-db-migrate` target that fixtures an older-version
-      SQLite DB and asserts the migration to current succeeds. Pre-empts
-      schema-migration regressions across version bumps.
-- [ ] Bump-process check: every `LLAMACPP_VERSION` change should diff
-      `tools/server/server-context.h` + `tools/server/server-http.h`
-      against the prior pin. Those types are not part of upstream's
-      public API and shift with internal refactors.
 
 ## Build / packaging
 
-- [ ] Trim remaining cyllama-specific code from `scripts/manage.py`
-      (wheel builder, profile/benchmark commands, lingering `cyllama`
-      references in log lines).
 - [ ] Homebrew tap (or formula PR to homebrew-core once the project is
       stable enough).
 
 ## Server — deferred routes / features
 
-Near-term:
-
-- [ ] Non-WAV audio in `/v1/audio/transcriptions`. mp3 / m4a / mp4 /
-      mpeg / webm all return 415 today. Options: single-header
-      decoders (`dr_mp3.h`, `dr_flac.h`) for the common cases, or
-      libsndfile + libavcodec / FFmpeg for full coverage.
 Medium-term:
 
 - [ ] Bind `POST /props` (mutating server props at runtime). Currently
@@ -71,23 +55,8 @@ Longer-term:
 
 ## RAG / SQLite
 
-Near-term:
-
-- [ ] Token-based chunking in `chimera index ingest` (currently
-      character-window with a sentence-boundary nudge). Token-based
-      gives accurate per-chunk sizes; costs a `llama_tokenize` call per
-      chunk.
-- [ ] `--distance` flag on `chimera index create` to pick L2 / cosine /
-      inner-product. Default cosine is right for normalized embeddings;
-      only override needs the flag.
-- [ ] Per-collection chunk-size overrides recorded in the collection
-      row, not just per-CLI-call.
-
 Medium-term:
 
-- [ ] Embedding cache: `embed(text) -> vector` memoized to a small KV
-      table keyed by `sha256(text) || model_id`. Speeds up ingestion
-      of partially-updated corpora and repeated query embedding.
 - [ ] Smarter chunking (sentence-aware, semantic boundaries).
 - [ ] Hybrid search: combine FTS5 + sqlite-vec with reciprocal-rank
       fusion or weighted scoring.

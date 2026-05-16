@@ -18,6 +18,8 @@
 struct llama_model;
 struct llama_context;
 
+namespace chimera_embed_cache { class Cache; }
+
 namespace chimera_embed {
 
 struct Config {
@@ -45,14 +47,64 @@ public:
 
     // Returns a single pooled vector for `text`. Length == n_embd().
     // Empty text returns an empty vector (caller decides whether to fail).
+    //
+    // When a cache is attached (`set_cache(...)`) and `text` is non-
+    // empty, lookup happens before tokenize/decode; misses fall through
+    // to the model and are written back on success.
     std::vector<float> embed(const std::string & text);
+
+    // Attach an optional persistent cache. The Embedder does not own
+    // the cache; the caller is responsible for keeping it alive at
+    // least as long as this Embedder. Pass nullptr to detach.
+    void set_cache(chimera_embed_cache::Cache * cache);
 
     // Embedding dimensionality. Stable for the lifetime of the Embedder.
     int n_embd() const;
+
+    // Tokenize `text` with the model's vocab. `add_special` controls
+    // BOS/EOS injection (whisper-style); `parse_special` controls
+    // whether `<|...|>` strings in the input are interpreted as
+    // special tokens. The default is what BGE / GTE / E5 expect.
+    // Thread-safe: vocab is read-only post-load.
+    std::vector<int> tokenize(const std::string & text,
+                              bool add_special  = true,
+                              bool parse_special = true) const;
+
+    // Detokenize a token sequence back to UTF-8 text. Used by the
+    // token-window chunker to materialize each chunk's text after
+    // splitting in token-space.
+    std::string detokenize(const std::vector<int> & tokens) const;
+
+    // Maximum context size the embedding context was created with.
+    // Token-window chunker uses this as the upper bound on chunk size.
+    int n_ctx() const;
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// One chunk produced by the token-window chunker. `text` is the
+// detokenized slice; `token_count` is what the embedder will see at
+// embed time (constant per chunk, equal to the window size except for
+// the trailing chunk).
+struct TokenChunk {
+    std::string text;
+    int         index;        // 0-based, monotonic per source
+    int         token_count;
+};
+
+// Split `text` into overlapping chunks of approximately `chunk_tokens`
+// tokens with `overlap_tokens` overlap between consecutive chunks.
+// `embedder` provides the vocab used for tokenize/detokenize. Empty
+// inputs return an empty vector; whitespace-only chunks are dropped.
+//
+// `chunk_tokens` is clamped to embedder.n_ctx() so the resulting chunks
+// always fit through `embed(text)` without truncation. `overlap_tokens`
+// must be in [0, chunk_tokens).
+std::vector<TokenChunk> chunk_by_tokens(const std::string & text,
+                                        const Embedder &    embedder,
+                                        int                 chunk_tokens,
+                                        int                 overlap_tokens);
 
 }  // namespace chimera_embed

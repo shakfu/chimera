@@ -37,6 +37,7 @@ add_executable(chimera
     "${CMAKE_CURRENT_LIST_DIR}/chimera_chat_store.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_db.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_embed.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_embed_cache.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_vector_store.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_whisper.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_sd.cpp"

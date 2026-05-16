@@ -16,6 +16,27 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 - `POST /v1/audio/translations`. Trivial bind of the existing transcription handler with `translate=true` in `TranscribeRequest` — whisper does the to-English translation inline, output goes through the same response-format pipeline as transcription (`json` / `text` / `srt` / `vtt` / `verbose_json`).
 
+- Token-based chunking for `chimera index ingest` + `POST /v1/vector_stores/:name/files`. The previous character-window splitter (with sentence-boundary nudge) is gone; chunks are now sized in tokens of the loaded embedding model's vocab via `chimera_embed::chunk_by_tokens`. Default 512 tokens with 64-token overlap — matches the input limit of common encoders (bge-small, gte-small). Tokens are decoded once per source via `llama_tokenize`; each chunk is `detokenize`'d back to text. Eliminates the 400–800-token variance of the old proxy and ensures chunks always fit through `embed()` without truncation.
+
+- Per-collection chunk + distance knobs. `collections` gains three new columns (`distance`, `chunk_tokens`, `chunk_overlap`) in schema v3, set at `chimera index create` time and read by `chimera index ingest` / the equivalent serve route unless the caller overrides on the command line. New flags:
+  - `chimera index create --distance cosine|l2|l1` — picks the sqlite-vec `distance_metric` baked into the per-collection `vec_<id>` virtual table. Default cosine (right for L2-normalized embeddings, which is also the default `chimera embed --normalize=true`). Validated at create time; invalid values get a `BadInput` error.
+  - `chimera index create --chunk-tokens N --chunk-overlap N` — collection-wide defaults.
+  - `chimera index ingest --chunk-tokens N --chunk-overlap N` — per-call overrides; otherwise use whatever the collection row recorded.
+  - `POST /v1/vector_stores` body now accepts `distance`, `chunk_tokens`, `chunk_overlap`; `/v1/vector_stores/:name` and `GET /v1/vector_stores` surface them under `meta`.
+
+  Schema v3 backfills existing rows with cosine/512/64 via `ALTER TABLE … ADD COLUMN … NOT NULL DEFAULT …`, so users upgrading from v1 / v2 DBs get sensible defaults without touching the DB.
+
+  New public API:
+  - `chimera_embed::Embedder::tokenize / detokenize / n_ctx`
+  - `chimera_embed::TokenChunk` + `chunk_by_tokens(text, embedder, chunk_tokens, overlap_tokens)`
+  - `chimera_vector_store::CreateOptions`, `is_valid_distance`
+
+- Persistent embedding cache. New `--cache-embeddings` flag on `chimera embed`, `chimera index ingest`, `chimera search`, and `chimera serve` memoizes `embed(text) -> vector` to SQLite (the `embedding_cache` table added in schema v2) so repeated work skips the model. Key: `(model_id, sha256(text))`. `model_id` is a fast fingerprint of the embedding model file (SHA-256 of `size || first 64 KB || last 64 KB`); GGUFs store metadata in the header, so this catches re-quantization, re-training, and architecture swaps without our code tracking model names. Vectors are stored as raw little-endian float32 blobs and round-trip bit-identical. Default OFF — cache rows take real disk (`dim*4 + 32` per row; 384-dim float32 ≈ 1.5 kB; 100k entries ≈ 150 MB) so users opt in.
+
+  Wiring: new `chimera_embed_cache` module (`Cache`, `compute_model_id`, `sha256_bytes`); `chimera_embed::Embedder` grows a `set_cache(...)` setter and consults the cache before tokenize/decode, writing the final (normalized, if enabled) vector back on miss. `chimera serve --cache-embeddings` reuses `--rag-db` and attaches the cache to the RAG `Embedder`; CLI subcommands take `--cache-db` (`chimera embed`) or reuse `--db` (`chimera index ingest`, `chimera search`). Smoke test added: two embed calls with the same input produce bit-identical output.
+
+- `make bump-check` + `scripts/manage.py bump_check`: fetch the upstream `tools/server/server-context.h` and `tools/server/server-http.h` at a target llama.cpp ref (defaults to the currently pinned `LLAMACPP_VERSION`) and diff them against the headers vendored under `thirdparty/llama.cpp/include/`. Output lists added/removed top-level symbols (struct/class/enum names, `handler_t` fields, function signatures) plus a unified diff capped at 120 lines. Exit code 0 when clean, 2 when any header changed. These headers are NOT part of upstream's stable API — last week's CI failure was caused by a new symbol appearing in `libllama-common` that our `--start-group` fix happened to catch; this script surfaces the surprise at bump time. The check is a pre-bump audit step (run before changing `LLAMACPP_VERSION`), not a CI guard. Documented in `doc/dev/server.md` § 7.
+
 - SD log capture for image-generation error bodies. `chimera_sd.cpp` now mirrors every log line emitted via `sd_set_log_callback` (which sd.cpp uses to forward ggml log lines too) into a 64-entry mutex-protected ring buffer. The HTTP image handler clears the ring before calling `chimera_sd::generate`, and on throw appends up to 8 of the most recent lines under a `recent SD log:` header in the error body. The underlying generic message (`image generation failed`) stays the same; the new tail carries the descriptive line sd.cpp emitted — buft failures, scheduler/sampler-name rejections, ggml backend errors — which previously only reached stderr. New public API: `chimera_sd::recent_log_lines(max)` + `chimera_sd::clear_log_buffer()`. Does not help with cases where sd.cpp aborts the process via `GGML_ASSERT` (e.g. the SDXL-Turbo `cfg_scale=1.0`+`euler` crash); those still terminate the server.
 
 ### Changed
@@ -23,6 +44,16 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - Release workflow (`.github/workflows/release.yml`) packages each platform's binary as a compressed archive instead of uploading the raw executable. Unix targets ship `chimera-<version>-<target>.tar.gz`; Windows ships `chimera-<version>-windows-x86_64.zip`. Inside, the binary keeps its plain name (`chimera` / `chimera.exe`). The `.sha256` sidecar files were dropped — the GitHub release UI already shows a SHA-256 next to every asset.
 
 - Windows release matrix target renamed `windows-x86_64.exe` → `windows-x86_64` so the archive name no longer ends in `…windows-x86_64.exe.zip`. No effect on the unzipped binary, which is still `chimera.exe`.
+
+- Non-WAV audio in `/v1/audio/transcriptions` is now framed as a deliberate non-feature rather than a temporary limitation. Error body on a non-WAV upload points the user at `ffmpeg -i in.<ext> -ar 16000 -ac 1 out.wav`. Bundling audio codecs is out of scope: every viable path (single-header `dr_mp3` + `dr_flac` for partial coverage, or libavcodec / FFmpeg for the full set) adds dependencies that don't pull their weight. Updated `doc/serve.md` § "What's not supported" + `doc/dev/server.md` § 8 with a "do not revisit without a concrete user request" note.
+
+- `scripts/test.sh` end-to-end suite is now 23 tests (was 22): added an embedding-cache round-trip check that asserts two `chimera embed --cache-embeddings` calls with the same input produce bit-identical output.
+
+- `make test-db-migrate` target + `scripts/test_db_migrate.py`: builds a v1-schema chimera.db in a temp dir, seeds it with one row per pre-existing table, drives `chimera db status` against it (which calls `open_and_migrate`), and asserts that (a) `PRAGMA user_version` advances to the current latest, (b) pre-existing rows survive, (c) v2 / v3 additions are in place (`embedding_cache` table; `collections.distance` / `chunk_tokens` / `chunk_overlap` backfilled to `'cosine'` / `512` / `64`). Verified to catch regressions — a deliberate default-value change in the migration SQL produced `FAIL: collections.chunk_tokens default: got 999, want 512`. Pre-empts the class of bug where a new migration silently breaks the v1 → latest upgrade path for users still on the original schema.
+
+### Removed
+
+- `chimera index ingest --chunk-chars` (character-window chunker). Replaced by `--chunk-tokens` (token-window chunker; see "Token-based chunking" above). Pre-existing scripts using `--chunk-chars` need to switch flag names; the unit also changed (chars → tokens), so a literal `--chunk-chars 2048` is closer to `--chunk-tokens 512` for English. `--chunk-overlap` survives but its unit is now tokens, not chars.
 
 ## [0.1.2]
 

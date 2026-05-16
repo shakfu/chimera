@@ -91,6 +91,8 @@ chimera embed -m bge.gguf -p "hello world"
 chimera embed -m bge.gguf -f prompt.txt -o vec.txt
 chimera embed -m bge.gguf -p "..." --pooling mean     # mean|cls|last|none
 chimera embed -m bge.gguf -p "..." --no-normalize
+chimera embed -m bge.gguf -p "..." --cache-embeddings   # memoize to SQLite
+chimera embed -m bge.gguf -p "..." --cache-embeddings --cache-db /tmp/cache.db
 ```
 
 ---
@@ -145,6 +147,7 @@ chimera serve -m model.gguf --enable-audio whisper.gguf        # +/v1/audio/{tra
 chimera serve -m model.gguf --enable-image sd.gguf             # +/v1/images/*
 chimera serve -m model.gguf --enable-rag embed.gguf            # +/v1/vector_stores/*
 chimera serve -m model.gguf --persist-chats                    # log every chat to DB
+chimera serve -m model.gguf --enable-rag embed.gguf --cache-embeddings  # memoize embed(text)
 chimera serve -m model.gguf --enable-rag embed.gguf --rag-db /path/to.db
 chimera serve -m model.gguf --persist-chats     --chat-db /path/to.db
 chimera serve -m model.gguf --host 0.0.0.0 --port 8080
@@ -220,7 +223,8 @@ curl -s http://127.0.0.1:8080/v1/responses \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","input":"Say hi"}'
 
-# Audio transcription (WAV only)
+# Audio transcription (WAV / RIFF only — transcode other formats with
+#   ffmpeg -i in.<ext> -ar 16000 -ac 1 out.wav)
 curl -s http://127.0.0.1:8080/v1/audio/transcriptions \
   -F file=@speech.wav -F response_format=json
 # response_format: json | text | verbose_json | srt | vtt
@@ -274,13 +278,20 @@ client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="not-used")
 
 ```sh
 chimera index create -n notes -e bge-small.gguf       # discover dim, create
+chimera index create -n notes -e bge-small.gguf --distance l2 \
+                     --chunk-tokens 256 --chunk-overlap 32  # custom per-collection defaults
 chimera index ingest -n notes -f path/to/doc.md       # one file
 chimera index ingest -n notes -g 'docs/**/*.md'       # glob, one model load
+chimera index ingest -n notes -f doc.md --chunk-tokens 384 --chunk-overlap 48  # per-call override
 chimera index list                                    # collections + counts
 chimera index stats  -n notes
 chimera index drop   -n notes
 
 chimera search -n notes -q "how does X work" -k 5
+
+# Cache per-chunk + per-query embeddings in --db so re-runs skip the model:
+chimera index ingest -n notes -f doc.md --cache-embeddings
+chimera search       -n notes -q "..." --cache-embeddings
 ```
 
 Override the DB location: `--db <path>` on any subcommand, or set

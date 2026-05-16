@@ -118,6 +118,7 @@
 #include "chimera_chat_store.h"
 #include "chimera_db.h"
 #include "chimera_embed.h"
+#include "chimera_embed_cache.h"
 #include "chimera_sd.h"
 #include "chimera_vector_store.h"
 #include "chimera_whisper.h"
@@ -541,7 +542,7 @@ server_http_context::handler_t make_audio_transcribe_handler(
         } catch (const ChimeraError & e) {
             return err_res(415,
                 std::string("unsupported audio: ") + e.what() +
-                " (Phase 2 currently accepts WAV / RIFF only; mp3, m4a, webm are not yet implemented)");
+                " (chimera accepts WAV / RIFF only by design; transcode mp3/m4a/webm to WAV with `ffmpeg -i in.<ext> -ar 16000 -ac 1 out.wav` before uploading)");
         }
         auto audio = chimera_whisper::resample_linear(
             wav.samples, wav.sample_rate, /*WHISPER_SAMPLE_RATE=*/16000);
@@ -939,47 +940,20 @@ server_http_context::handler_t make_image_variations_handler(
 // State shared by every /v1/vector_stores/* handler. Lifetime is the
 // `command_serve` call; handlers capture this by pointer.
 struct RagContext {
-    std::string                                  db_path;
-    std::unique_ptr<chimera_embed::Embedder>     embedder;
-    std::mutex                                   embedder_mutex;
-    std::string                                  loaded_model;  // basename or full path
+    std::string                                       db_path;
+    std::unique_ptr<chimera_embed::Embedder>          embedder;
+    std::mutex                                        embedder_mutex;
+    std::string                                       loaded_model;  // basename or full path
+    // Optional persistent embedding cache. Bound when serve was
+    // invoked with --cache-embeddings; nullptr otherwise. The cache
+    // lives on the same DB the rest of the RAG plumbing uses, so a
+    // single connection at startup is enough.
+    std::unique_ptr<chimera_embed_cache::Cache>       embed_cache;
 };
 
-// chunk_text() lives in chimera.cpp's anonymous namespace; for the
-// server we re-implement the same simple character-window chunker
-// here. Keeping a copy is cheaper than promoting the helper to a
-// header for one extra caller; mirror tunables with the CLI defaults.
-struct ServeTextChunk { std::string text; int index; };
-std::vector<ServeTextChunk> serve_chunk_text(const std::string & text,
-                                              size_t window_chars  = 2048,
-                                              size_t overlap_chars = 256) {
-    std::vector<ServeTextChunk> chunks;
-    if (text.empty()) return chunks;
-    size_t pos = 0;
-    int idx = 0;
-    while (pos < text.size()) {
-        size_t end = std::min(pos + window_chars, text.size());
-        if (end < text.size()) {
-            const size_t backstop = pos + (window_chars * 95) / 100;
-            for (const char * pat : {"\n\n", ". ", "! ", "? ", "\n"}) {
-                const auto p = text.rfind(pat, end);
-                if (p != std::string::npos && p > backstop) {
-                    end = p + std::strlen(pat);
-                    break;
-                }
-            }
-        }
-        std::string slice = text.substr(pos, end - pos);
-        // Trim leading/trailing whitespace.
-        auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-        slice.erase(slice.begin(), std::find_if(slice.begin(), slice.end(), not_space));
-        slice.erase(std::find_if(slice.rbegin(), slice.rend(), not_space).base(), slice.end());
-        if (!slice.empty()) chunks.push_back({std::move(slice), idx++});
-        if (end >= text.size()) break;
-        pos = (end > overlap_chars) ? end - overlap_chars : 0;
-    }
-    return chunks;
-}
+// Token-based chunking goes through chimera_embed::chunk_by_tokens
+// using the loaded Embedder's vocab; window + overlap come off the
+// collection row.
 
 // Open one DB connection for a single handler call. SQLite open is
 // microseconds in WAL mode; cheaper than running a per-thread pool
@@ -1012,6 +986,9 @@ json collection_to_json(const chimera_vector_store::Collection & c) {
         { "meta", {
             { "embedding_model", c.embedding_model },
             { "dim",             c.dim },
+            { "distance",        c.distance },
+            { "chunk_tokens",    c.chunk_tokens },
+            { "chunk_overlap",   c.chunk_overlap },
         }},
     };
 }
@@ -1052,7 +1029,20 @@ server_http_context::handler_t make_vs_create_handler(RagContext * rag) {
         }
         auto conn = rag_open_db(rag);
         const int dim = rag->embedder->n_embd();
-        auto col = chimera_vector_store::create(conn.get(), name, model, dim);
+        // Optional per-collection knobs. Defaults are the same as CLI's
+        // `chimera index create`. distance is validated server-side
+        // (returning 400 on a bad value); chunk_* are bounds-checked by
+        // chimera_vector_store::create itself.
+        chimera_vector_store::CreateOptions cop;
+        cop.distance      = body.value("distance",      cop.distance);
+        cop.chunk_tokens  = body.value("chunk_tokens",  cop.chunk_tokens);
+        cop.chunk_overlap = body.value("chunk_overlap", cop.chunk_overlap);
+        if (!chimera_vector_store::is_valid_distance(cop.distance)) {
+            return rag_err(400,
+                "invalid distance: '" + cop.distance +
+                "' (expected one of: cosine, l2, l1)");
+        }
+        auto col = chimera_vector_store::create(conn.get(), name, model, dim, cop);
         auto res = std::make_unique<server_http_res>();
         res->status = 201;
         res->data = collection_to_json(col).dump();
@@ -1147,7 +1137,18 @@ server_http_context::handler_t make_vs_ingest_handler(RagContext * rag) {
                 "'; server has '" + rag->loaded_model + "' loaded.");
         }
 
-        const auto chunks = serve_chunk_text(text);
+        // Token-based chunking matching the CLI: window + overlap come
+        // from the collection row. Tokenize / detokenize on the shared
+        // Embedder; serialize behind embedder_mutex for the whole chunk
+        // pass (the vocab is read-only but we also lock for the
+        // subsequent embed() call below, so one lock per chunk loop is
+        // simpler than scoping it tighter).
+        std::vector<chimera_embed::TokenChunk> chunks;
+        {
+            std::lock_guard<std::mutex> lk(rag->embedder_mutex);
+            chunks = chimera_embed::chunk_by_tokens(
+                text, *rag->embedder, col->chunk_tokens, col->chunk_overlap);
+        }
         if (chunks.empty()) return rag_err(400, "no non-empty chunks produced");
 
         int64_t inserted = 0;
@@ -1161,6 +1162,7 @@ server_http_context::handler_t make_vs_ingest_handler(RagContext * rag) {
             doc.source_uri  = source_uri;
             doc.chunk_index = c.index;
             doc.text        = c.text;
+            doc.token_count = c.token_count;
             doc.embedding   = std::move(vec);
             chimera_vector_store::insert_document(conn.get(), *col, doc);
             ++inserted;
@@ -1551,6 +1553,23 @@ int command_serve(const ServeOptions & opts) {
         // doesn't exist yet.
         (void) chimera_db::open_and_migrate(
             rag_ctx.db_path.empty() ? chimera_db::default_path() : rag_ctx.db_path);
+
+        // Optional embedding cache. Attaches to the same RAG Embedder
+        // that powers /v1/vector_stores/:name/{files,search}, so both
+        // ingest and search benefit. The cache owns its own SQLite
+        // connection on the same DB.
+        if (opts.cache_embeddings) {
+            const std::string mid = chimera_embed_cache::compute_model_id(opts.rag_embedding_model);
+            if (mid.empty()) {
+                std::cerr << "chimera serve: --cache-embeddings: cannot fingerprint "
+                          << opts.rag_embedding_model << " (unreadable); cache disabled.\n";
+            } else {
+                rag_ctx.embed_cache = std::make_unique<chimera_embed_cache::Cache>(
+                    rag_ctx.db_path.empty() ? chimera_db::default_path() : rag_ctx.db_path,
+                    mid);
+                rag_ctx.embedder->set_cache(rag_ctx.embed_cache.get());
+            }
+        }
     }
 
     // Route registration. LLM route handlers are pre-built lambdas on

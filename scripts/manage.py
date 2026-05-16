@@ -533,9 +533,7 @@ class GgmlBuilder(Builder):
                 result.append(short)
         return result
 
-    def _forward_env_flags(
-        self, options: dict[str, Any], names: Iterable[str]
-    ) -> None:
+    def _forward_env_flags(self, options: dict[str, Any], names: Iterable[str]) -> None:
         for name in names:
             val = os.environ.get(name)
             if val is not None:
@@ -585,8 +583,13 @@ class LlamaCppBuilder(GgmlBuilder):
     version: str = LLAMACPP_VERSION
     repo_url: str = "https://github.com/ggml-org/llama.cpp.git"
     base_libs: list[str] = ["ggml", "ggml-base", "ggml-cpu"]
-    extra_libs: list[str] = ["llama", "llama-common", "mtmd",
-                             "server-context", "cpp-httplib"]
+    extra_libs: list[str] = [
+        "llama",
+        "llama-common",
+        "mtmd",
+        "server-context",
+        "cpp-httplib",
+    ]
 
     def get_backend_cmake_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {}
@@ -644,7 +647,9 @@ class LlamaCppBuilder(GgmlBuilder):
     def _copy_headers(self) -> None:
         """Copy llama.cpp public headers into the prefix include dir."""
         self.glob_copy(self.src_dir / "common", self.include, patterns=["*.h", "*.hpp"])
-        self.glob_copy(self.src_dir / "ggml" / "include", self.include, patterns=["*.h"])
+        self.glob_copy(
+            self.src_dir / "ggml" / "include", self.include, patterns=["*.h"]
+        )
         self.glob_copy(self.src_dir / "include", self.include, patterns=["*.h"])
         # jinja headers (required by chat.h).
         jinja_include = self.include / "jinja"
@@ -665,8 +670,9 @@ class LlamaCppBuilder(GgmlBuilder):
         # only in llama-server's own source list, so its .cpp is also copied
         # below as an auxiliary source the consumer (chimera) compiles into
         # its own target.
-        self.glob_copy(self.src_dir / "tools" / "server", self.include,
-                       patterns=["server-*.h"])
+        self.glob_copy(
+            self.src_dir / "tools" / "server", self.include, patterns=["server-*.h"]
+        )
         # cpp-httplib (single-header). server-http.cpp includes it as
         # `<cpp-httplib/httplib.h>`, so the header goes under a subdir of
         # the same name, not at the include root.
@@ -681,8 +687,9 @@ class LlamaCppBuilder(GgmlBuilder):
         # CMakeLists can compile it as part of the chimera target.
         src_aux = self.prefix / "src-aux"
         src_aux.mkdir(exist_ok=True)
-        self.glob_copy(self.src_dir / "tools" / "server", src_aux,
-                       patterns=["server-http.cpp"])
+        self.glob_copy(
+            self.src_dir / "tools" / "server", src_aux, patterns=["server-http.cpp"]
+        )
 
     def build(self) -> None:
         if not self.src_dir.exists():
@@ -729,8 +736,7 @@ class LlamaCppBuilder(GgmlBuilder):
         # library and provide our own (smaller) entry point in chimera_serve.
         self.cmake_build_targets(
             build_dir=self.build_dir,
-            targets=["llama", "llama-common", "mtmd",
-                     "server-context", "cpp-httplib"],
+            targets=["llama", "llama-common", "mtmd", "server-context", "cpp-httplib"],
             release=True,
         )
 
@@ -739,9 +745,7 @@ class LlamaCppBuilder(GgmlBuilder):
         # cpp-httplib is now a hard dep (was optional when SERVER=OFF). Drop
         # required=False so a missing artifact becomes a visible build error
         # rather than a silent skip that explodes at chimera link time.
-        self.copy_lib(
-            self.build_dir, "vendor/cpp-httplib", "cpp-httplib", self.lib
-        )
+        self.copy_lib(self.build_dir, "vendor/cpp-httplib", "cpp-httplib", self.lib)
         self.copy_lib(self.build_dir, "src", "llama", self.lib)
         self.copy_lib(self.build_dir, "ggml/src", "ggml", self.lib)
         self.copy_lib(self.build_dir, "ggml/src", "ggml-base", self.lib)
@@ -765,7 +769,8 @@ class WhisperCppBuilder(GgmlBuilder):
         sfx = " for whisper.cpp"
 
         metal = (
-            getenv("GGML_METAL", default=(PLATFORM == "Darwin")) and PLATFORM == "Darwin"
+            getenv("GGML_METAL", default=(PLATFORM == "Darwin"))
+            and PLATFORM == "Darwin"
         )
         cuda = getenv("GGML_CUDA", default=False)
         vulkan = getenv("GGML_VULKAN", default=False)
@@ -847,7 +852,8 @@ class StableDiffusionCppBuilder(GgmlBuilder):
         sfx = " for stable-diffusion.cpp"
 
         metal = (
-            getenv("GGML_METAL", default=(PLATFORM == "Darwin")) and PLATFORM == "Darwin"
+            getenv("GGML_METAL", default=(PLATFORM == "Darwin"))
+            and PLATFORM == "Darwin"
         )
         cuda = getenv("GGML_CUDA", default=False)
         vulkan = getenv("GGML_VULKAN", default=False)
@@ -964,7 +970,9 @@ class LinenoiseBuilder(Builder):
             WITH_TREESITTER=False,
             CMAKE_POSITION_INDEPENDENT_CODE=True,
         )
-        self.cmake_build_targets(build_dir=self.build_dir, targets=["linenoise"], release=True)
+        self.cmake_build_targets(
+            build_dir=self.build_dir, targets=["linenoise"], release=True
+        )
 
         self.lib.mkdir(parents=True, exist_ok=True)
         self.copy_lib(self.build_dir, ".", "linenoise", self.lib)
@@ -983,7 +991,7 @@ class SqliteBuilder(AbstractBuilder):
 
     name: str = "sqlite"
     version: str = SQLITE_VERSION
-    repo_url: str = ""   # not git; we fetch the .zip from sqlite.org
+    repo_url: str = ""  # not git; we fetch the .zip from sqlite.org
     libs: list[str] = []
 
     def setup(self) -> None:
@@ -1015,7 +1023,8 @@ class SqliteBuilder(AbstractBuilder):
         extracted = stage / f"sqlite-amalgamation-{SQLITE_VERSION_URL_DIGITS}"
         if not extracted.exists():
             raise FileNotFoundError(
-                f"expected extracted directory not found: {extracted}")
+                f"expected extracted directory not found: {extracted}"
+            )
 
         # The amalgamation ships sqlite3.c + sqlite3.h (plus shell.c +
         # sqlite3ext.h which we don't need for embedded use).
@@ -1082,12 +1091,12 @@ class SqliteVecBuilder(AbstractBuilder):
         while len(parts) < 3:
             parts.append("0")
         substitutions = {
-            "${VERSION}":       tag,
+            "${VERSION}": tag,
             "${VERSION_MAJOR}": parts[0],
             "${VERSION_MINOR}": parts[1],
             "${VERSION_PATCH}": parts[2],
-            "${DATE}":          "chimera-vendored",
-            "${SOURCE}":        f"asg017/sqlite-vec@{self.version}",
+            "${DATE}": "chimera-vendored",
+            "${SOURCE}": f"asg017/sqlite-vec@{self.version}",
         }
         header = tmpl_path.read_text()
         for k, v in substitutions.items():
@@ -1177,7 +1186,9 @@ class Application(ShellCmd, metaclass=MetaCommander):
 
         for name in sorted(self._argparse_subcmds.keys()):
             subcmd = self._argparse_subcmds[name]
-            subparser = subparsers.add_parser(subcmd["name"], help=subcmd["func"].__doc__)
+            subparser = subparsers.add_parser(
+                subcmd["name"], help=subcmd["func"].__doc__
+            )
             for args, kwds in subcmd["options"]:
                 subparser.add_argument(*args, **kwds)
             subparser.set_defaults(func=subcmd["func"])
@@ -1258,7 +1269,14 @@ class Application(ShellCmd, metaclass=MetaCommander):
     def do_build(self, args: argparse.Namespace) -> None:
         """fetch + build third-party dependencies into thirdparty/<project>/"""
         if args.cpu_only:
-            for k in ("GGML_METAL", "GGML_CUDA", "GGML_VULKAN", "GGML_SYCL", "GGML_HIP", "GGML_OPENCL"):
+            for k in (
+                "GGML_METAL",
+                "GGML_CUDA",
+                "GGML_VULKAN",
+                "GGML_SYCL",
+                "GGML_HIP",
+                "GGML_OPENCL",
+            ):
                 os.environ[k] = "0"
         else:
             if args.metal:
@@ -1292,8 +1310,14 @@ class Application(ShellCmd, metaclass=MetaCommander):
 
         _builders: list[type[AbstractBuilder]] = []
         if args.all:
-            _builders = [LlamaCppBuilder, WhisperCppBuilder, StableDiffusionCppBuilder,
-                         LinenoiseBuilder, SqliteBuilder, SqliteVecBuilder]
+            _builders = [
+                LlamaCppBuilder,
+                WhisperCppBuilder,
+                StableDiffusionCppBuilder,
+                LinenoiseBuilder,
+                SqliteBuilder,
+                SqliteVecBuilder,
+            ]
         else:
             if args.llama_cpp:
                 _builders.append(LlamaCppBuilder)
@@ -1349,19 +1373,170 @@ class Application(ShellCmd, metaclass=MetaCommander):
                     text=True,
                     check=True,
                 ).stdout.strip()
-                tag = subprocess.run(
-                    ["git", "tag", "--points-at", "HEAD"],
-                    cwd=src_dir,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                ).stdout.strip().split("\n")[0]
+                tag = (
+                    subprocess.run(
+                        ["git", "tag", "--points-at", "HEAD"],
+                        cwd=src_dir,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    .stdout.strip()
+                    .split("\n")[0]
+                )
                 if tag:
                     print(f"  checked-out=tag:{tag} ({short})")
                 else:
                     print(f"  checked-out=commit:{short}")
             except (subprocess.CalledProcessError, FileNotFoundError):
                 print("  (unable to read git state)")
+
+    # ------------------------------------------------------------------------
+    # bump-check
+    #
+    # Headers in tools/server/ (server-context.h, server-http.h) are NOT part
+    # of upstream llama.cpp's stable public API; they're internal to the
+    # llama-server build and shift with refactors. chimera links the
+    # libserver-context.a static library + compiles server-http.cpp directly,
+    # so any change to these declarations can silently break our build or
+    # change runtime behavior. This subcommand fetches the upstream copies at
+    # a target ref and diffs them against whatever is currently vendored
+    # under thirdparty/llama.cpp/include/, so the surprise lands on the
+    # developer running the bump rather than on CI after the tag is pushed.
+
+    @option(
+        "--llama-version",
+        default=LLAMACPP_VERSION,
+        help=f"llama.cpp ref to compare against (default: {LLAMACPP_VERSION}).",
+    )
+    @option(
+        "--show-diff-lines",
+        type=int,
+        default=120,
+        help="cap unified-diff output at this many lines (default: 120)",
+    )
+    def do_bump_check(self, args: argparse.Namespace) -> None:
+        """compare vendored server-{context,http}.h against an upstream ref"""
+        import difflib
+        import re
+        from urllib.request import Request, urlopen
+        from urllib.error import HTTPError, URLError
+
+        ref = args.llama_version
+        files = ["tools/server/server-context.h", "tools/server/server-http.h"]
+        repo = "ggml-org/llama.cpp"
+        vendored_dir = self.project.cwd / "thirdparty" / "llama.cpp" / "include"
+
+        # Cheap "interesting symbol" extractor: catches struct/class/enum
+        # declarations, handler_t members (the upstream split that broke
+        # us last week was exactly a new handler_t field), and bare
+        # function declarations. Not a real C++ parser; it surfaces the
+        # surface-area changes a chimera dev needs to inspect.
+        symbol_patterns = [
+            re.compile(r"^\s*(?:struct|class|enum(?:\s+class)?)\s+(\w+)"),
+            re.compile(r"^\s*handler_t\s+(\w+)\s*;"),
+            re.compile(r"^\s*[\w:<>&*\s]+\s+(\w+)\s*\([^)]*\)\s*(?:const)?\s*[;{]"),
+        ]
+
+        def extract_symbols(text: str) -> set[str]:
+            out: set[str] = set()
+            for line in text.splitlines():
+                for pat in symbol_patterns:
+                    m = pat.match(line)
+                    if m:
+                        name = m.group(1)
+                        if name and not name.startswith("_"):
+                            out.add(name)
+            return out
+
+        def fetch_upstream(path: str) -> Optional[str]:
+            url = f"https://raw.githubusercontent.com/{repo}/{ref}/{path}"
+            try:
+                req = Request(url, headers={"User-Agent": "chimera-bump-check"})
+                with urlopen(req, timeout=30) as resp:
+                    return resp.read().decode("utf-8", errors="replace")
+            except HTTPError as e:
+                self.log.error(f"GET {url} -> HTTP {e.code}")
+                return None
+            except URLError as e:
+                self.log.error(f"GET {url} -> {e}")
+                return None
+
+        if not vendored_dir.exists():
+            self.log.error(
+                f"No vendored headers found at {vendored_dir}. "
+                f"Run `make build` (or `python scripts/manage.py build --llama-cpp`) first."
+            )
+            sys.exit(2)
+
+        print(f"chimera bump-check: comparing vendored headers against {repo}@{ref}")
+        print()
+
+        total_changes = 0
+        for upstream_path in files:
+            basename = os.path.basename(upstream_path)
+            vendored_path = vendored_dir / basename
+            print(f"=== {basename} ===")
+            if not vendored_path.exists():
+                print(f"  (no vendored copy at {vendored_path}; skipped)\n")
+                continue
+
+            new_text = fetch_upstream(upstream_path)
+            if new_text is None:
+                print("  (failed to fetch upstream copy; skipped)\n")
+                continue
+
+            old_text = vendored_path.read_text(encoding="utf-8")
+            if old_text == new_text:
+                print("  no changes")
+                print()
+                continue
+
+            old_syms = extract_symbols(old_text)
+            new_syms = extract_symbols(new_text)
+            removed = sorted(old_syms - new_syms)
+            added = sorted(new_syms - old_syms)
+            total_changes += 1
+
+            if removed:
+                print(f"  removed symbols ({len(removed)}):")
+                for s in removed:
+                    print(f"    - {s}")
+            if added:
+                print(f"  added symbols ({len(added)}):")
+                for s in added:
+                    print(f"    + {s}")
+            if not removed and not added:
+                print("  symbol set unchanged; signatures or comments differ")
+
+            diff = list(
+                difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True),
+                    fromfile=f"vendored/{basename}",
+                    tofile=f"upstream@{ref}/{basename}",
+                    n=2,
+                )
+            )
+            cap = max(0, args.show_diff_lines)
+            print(f"  unified diff ({len(diff)} lines, capped at {cap}):")
+            for line in diff[:cap]:
+                sys.stdout.write("    " + line)
+            if len(diff) > cap:
+                print(f"    ... ({len(diff) - cap} more lines elided)")
+            print()
+
+        if total_changes == 0:
+            print("clean: vendored headers match upstream at this ref.")
+            return
+        print(
+            f"{total_changes} header(s) changed. Audit:\n"
+            f"  - chimera_serve.cpp bindings (handler_t fields)\n"
+            f"  - src/chimera/CMakeLists.txt link order / archive groups\n"
+            f"  - server-http.cpp source copy under thirdparty/llama.cpp/src-aux/\n"
+            f"Then rerun `python scripts/manage.py build --llama-cpp --llama-version={ref}`."
+        )
+        sys.exit(2)
 
     # ------------------------------------------------------------------------
     # clean
@@ -1374,7 +1549,12 @@ class Application(ShellCmd, metaclass=MetaCommander):
         self.remove(self.project.cwd / "build", silent=not verbose)
         if args.reset:
             thirdparty = self.project.cwd / "thirdparty"
-            for dep in ["llama.cpp", "whisper.cpp", "stable-diffusion.cpp", "linenoise"]:
+            for dep in [
+                "llama.cpp",
+                "whisper.cpp",
+                "stable-diffusion.cpp",
+                "linenoise",
+            ]:
                 dep_dir = thirdparty / dep
                 for subdir in ["bin", "lib", "include"]:
                     self.remove(dep_dir / subdir, silent=not verbose)
@@ -1419,15 +1599,36 @@ class Application(ShellCmd, metaclass=MetaCommander):
         if args.whisper:
             model_name = args.whisper_model
             valid_models = [
-                "tiny", "tiny.en", "tiny-q5_1", "tiny.en-q5_1", "tiny-q8_0",
-                "base", "base.en", "base-q5_1", "base.en-q5_1", "base-q8_0",
-                "small", "small.en", "small.en-tdrz", "small-q5_1",
-                "small.en-q5_1", "small-q8_0",
-                "medium", "medium.en", "medium-q5_0", "medium.en-q5_0",
+                "tiny",
+                "tiny.en",
+                "tiny-q5_1",
+                "tiny.en-q5_1",
+                "tiny-q8_0",
+                "base",
+                "base.en",
+                "base-q5_1",
+                "base.en-q5_1",
+                "base-q8_0",
+                "small",
+                "small.en",
+                "small.en-tdrz",
+                "small-q5_1",
+                "small.en-q5_1",
+                "small-q8_0",
+                "medium",
+                "medium.en",
+                "medium-q5_0",
+                "medium.en-q5_0",
                 "medium-q8_0",
-                "large-v1", "large-v2", "large-v2-q5_0", "large-v2-q8_0",
-                "large-v3", "large-v3-q5_0", "large-v3-turbo",
-                "large-v3-turbo-q5_0", "large-v3-turbo-q8_0",
+                "large-v1",
+                "large-v2",
+                "large-v2-q5_0",
+                "large-v2-q8_0",
+                "large-v3",
+                "large-v3-q5_0",
+                "large-v3-turbo",
+                "large-v3-turbo-q5_0",
+                "large-v3-turbo-q8_0",
             ]
             if model_name not in valid_models:
                 self.log.error(f"Invalid whisper model: {model_name}")

@@ -210,8 +210,49 @@ struct Migration {
     const char * sql;
 };
 
+// v2: add embedding_cache. Memoizes `embed(text) -> vector` so
+// ingestion of partially-updated corpora and repeated query embedding
+// skip the model. Keyed on (model_id, text_sha): `model_id` is a fast
+// fingerprint of the embedding model file (see chimera_embed_cache.cpp),
+// `text_sha` is the SHA-256 of the input string. Vectors are stored as
+// raw little-endian float32 blobs (no JSON, no scaling) so the on-disk
+// bytes round-trip exactly. The composite PRIMARY KEY doubles as the
+// hot lookup index; the secondary index on created_at is for
+// `db prune --older-than=<duration>` once that lands.
+constexpr const char * MIGRATION_V2 = R"SQL(
+    CREATE TABLE embedding_cache (
+        model_id     TEXT    NOT NULL,
+        text_sha     BLOB    NOT NULL,
+        dim          INTEGER NOT NULL,
+        vec          BLOB    NOT NULL,
+        created_at   INTEGER NOT NULL,
+        PRIMARY KEY (model_id, text_sha)
+    );
+    CREATE INDEX idx_embedding_cache_created ON embedding_cache(created_at);
+)SQL";
+
+// v3: per-collection knobs. `distance` is the sqlite-vec metric used by
+// the per-collection vec0 table (validated at create-time against
+// `cosine | l2 | l1`); `chunk_tokens` + `chunk_overlap` are the defaults
+// that `chimera index ingest` (and the equivalent serve route) use when
+// the caller doesn't override. Tokens, not characters: chunking moved
+// from character-window to token-window so chunk sizes are accurate
+// against the embedding model's vocab.
+//
+// ALTER TABLE ... ADD COLUMN ... NOT NULL DEFAULT <const> backfills
+// existing rows with the default, so users upgrading from a v1 / v2 DB
+// get cosine/512/64 for every collection they created before this
+// migration.
+constexpr const char * MIGRATION_V3 = R"SQL(
+    ALTER TABLE collections ADD COLUMN distance      TEXT    NOT NULL DEFAULT 'cosine';
+    ALTER TABLE collections ADD COLUMN chunk_tokens  INTEGER NOT NULL DEFAULT 512;
+    ALTER TABLE collections ADD COLUMN chunk_overlap INTEGER NOT NULL DEFAULT 64;
+)SQL";
+
 constexpr Migration MIGRATIONS[] = {
-    { 1, "initial chat + collection schema", MIGRATION_V1 },
+    { 1, "initial chat + collection schema",       MIGRATION_V1 },
+    { 2, "add embedding_cache table",              MIGRATION_V2 },
+    { 3, "per-collection distance + chunk knobs",  MIGRATION_V3 },
 };
 
 constexpr int kLatest = sizeof(MIGRATIONS) / sizeof(MIGRATIONS[0]);

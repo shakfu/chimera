@@ -67,6 +67,10 @@ void bind_vector(sqlite3_stmt * stmt, int index, const std::vector<float> & v) {
     }
 }
 
+// Decode a `SELECT id, name, embedding_model, dim, created_at,
+// distance, chunk_tokens, chunk_overlap[, doc_count]` row. The optional
+// doc_count column is filled by the caller (list()) — row_to_collection
+// itself doesn't read it.
 Collection row_to_collection(sqlite3_stmt * stmt) {
     Collection c;
     c.id              = sqlite3_column_int64(stmt, 0);
@@ -75,25 +79,51 @@ Collection row_to_collection(sqlite3_stmt * stmt) {
     c.dim             = sqlite3_column_int(stmt, 3);
     c.created_at      = sqlite3_column_int64(stmt, 4);
     c.doc_count       = 0;
+    if (const auto * d = sqlite3_column_text(stmt, 5)) {
+        c.distance = reinterpret_cast<const char *>(d);
+    }
+    c.chunk_tokens  = sqlite3_column_int(stmt, 6);
+    c.chunk_overlap = sqlite3_column_int(stmt, 7);
     return c;
 }
 
 }  // namespace
 
+bool is_valid_distance(const std::string & d) {
+    return d == "cosine" || d == "l2" || d == "l1";
+}
+
 // =======================================================================
 // create / drop / find / list
 // =======================================================================
 
-Collection create(sqlite3 * db,
+Collection create(sqlite3 *           db,
                   const std::string & name,
                   const std::string & embedding_model,
-                  int                 dim) {
+                  int                 dim,
+                  const CreateOptions & opts) {
     if (name.empty()) {
         fail(ExitCode::BadInput, "collection name must not be empty");
     }
     if (dim <= 0) {
         fail(ExitCode::BadInput, "collection dim must be positive (got " +
                                   std::to_string(dim) + ")");
+    }
+    if (!is_valid_distance(opts.distance)) {
+        fail(ExitCode::BadInput,
+             "invalid distance metric: '" + opts.distance +
+             "' (expected one of: cosine, l2, l1)");
+    }
+    if (opts.chunk_tokens <= 0) {
+        fail(ExitCode::BadInput,
+             "chunk_tokens must be positive (got " +
+             std::to_string(opts.chunk_tokens) + ")");
+    }
+    if (opts.chunk_overlap < 0 || opts.chunk_overlap >= opts.chunk_tokens) {
+        fail(ExitCode::BadInput,
+             "chunk_overlap must be in [0, chunk_tokens) (got " +
+             std::to_string(opts.chunk_overlap) + " vs chunk_tokens=" +
+             std::to_string(opts.chunk_tokens) + ")");
     }
     if (find(db, name)) {
         fail(ExitCode::BadInput, "collection already exists: " + name);
@@ -103,8 +133,10 @@ Collection create(sqlite3 * db,
     try {
         StmtGuard ins;
         const char * sql =
-            "INSERT INTO collections (name, embedding_model, dim, created_at) "
-            "VALUES (?, ?, ?, ?)";
+            "INSERT INTO collections "
+            "  (name, embedding_model, dim, created_at, "
+            "   distance, chunk_tokens, chunk_overlap) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)";
         if (sqlite3_prepare_v2(db, sql, -1, ins.out(), nullptr) != SQLITE_OK) {
             sqlite_throw(db, "prepare(create collection)");
         }
@@ -112,18 +144,23 @@ Collection create(sqlite3 * db,
         sqlite3_bind_text (ins.get(), 2, embedding_model.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int  (ins.get(), 3, dim);
         sqlite3_bind_int64(ins.get(), 4, now_seconds());
+        sqlite3_bind_text (ins.get(), 5, opts.distance.c_str(),   -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int  (ins.get(), 6, opts.chunk_tokens);
+        sqlite3_bind_int  (ins.get(), 7, opts.chunk_overlap);
         if (sqlite3_step(ins.get()) != SQLITE_DONE) {
             sqlite_throw(db, "step(create collection)");
         }
         const int64_t id = sqlite3_last_insert_rowid(db);
 
-        // Per-collection vec0 table. dim is interpolated, not bound,
-        // because CREATE VIRTUAL TABLE doesn't take parameters. Both
-        // values are server-controlled (we validated dim above), so no
-        // injection concern.
+        // Per-collection vec0 table. `dim` and `distance` are
+        // interpolated, not bound, because CREATE VIRTUAL TABLE doesn't
+        // accept parameters. Both are server-controlled (dim validated
+        // above; distance is one of cosine/l2/l1 by is_valid_distance)
+        // so there's no injection concern.
         const std::string create_vec =
             "CREATE VIRTUAL TABLE " + vec_table_name(id) +
-            " USING vec0(embedding FLOAT[" + std::to_string(dim) + "])";
+            " USING vec0(embedding FLOAT[" + std::to_string(dim) +
+            "] distance_metric=" + opts.distance + ")";
         exec(db, create_vec);
 
         exec(db, "COMMIT");
@@ -135,6 +172,9 @@ Collection create(sqlite3 * db,
         c.dim             = dim;
         c.created_at      = now_seconds();
         c.doc_count       = 0;
+        c.distance        = opts.distance;
+        c.chunk_tokens    = opts.chunk_tokens;
+        c.chunk_overlap   = opts.chunk_overlap;
         return c;
     } catch (...) {
         sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
@@ -173,7 +213,8 @@ void drop(sqlite3 * db, const std::string & name) {
 std::optional<Collection> find(sqlite3 * db, const std::string & name) {
     StmtGuard q;
     const char * sql =
-        "SELECT id, name, embedding_model, dim, created_at "
+        "SELECT id, name, embedding_model, dim, created_at, "
+        "       distance, chunk_tokens, chunk_overlap "
         "FROM collections WHERE name = ?";
     if (sqlite3_prepare_v2(db, sql, -1, q.out(), nullptr) != SQLITE_OK) {
         sqlite_throw(db, "prepare(find collection)");
@@ -190,6 +231,7 @@ std::vector<Collection> list(sqlite3 * db) {
     StmtGuard q;
     const char * sql =
         "SELECT c.id, c.name, c.embedding_model, c.dim, c.created_at, "
+        "       c.distance, c.chunk_tokens, c.chunk_overlap, "
         "       COALESCE((SELECT COUNT(*) FROM documents d WHERE d.collection_id = c.id), 0) "
         "FROM collections c ORDER BY c.name";
     if (sqlite3_prepare_v2(db, sql, -1, q.out(), nullptr) != SQLITE_OK) {
@@ -197,7 +239,7 @@ std::vector<Collection> list(sqlite3 * db) {
     }
     while (sqlite3_step(q.get()) == SQLITE_ROW) {
         Collection c = row_to_collection(q.get());
-        c.doc_count  = sqlite3_column_int64(q.get(), 5);
+        c.doc_count  = sqlite3_column_int64(q.get(), 8);
         out.push_back(std::move(c));
     }
     return out;
