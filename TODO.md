@@ -35,21 +35,8 @@ Near-term:
       mpeg / webm all return 415 today. Options: single-header
       decoders (`dr_mp3.h`, `dr_flac.h`) for the common cases, or
       libsndfile + libavcodec / FFmpeg for full coverage.
-- [ ] Better SD error messages: capture `ggml_log` into a small ring
-      buffer and pipe the last few lines into the HTTP response body
-      when generation fails. Today users see a generic 500 even when
-      the underlying assertion was descriptive ("buft failed", etc.).
-      Same idea covers the SDXL-Turbo `cfg_scale=1.0`+`euler` crash.
-
 Medium-term:
 
-- [ ] `POST /v1/embeddings` without `--embeddings`: add
-      `--enable-embeddings <bge.gguf>` to load a small embedding model
-      alongside the LLM, same opt-in pattern as `--enable-audio` and
-      `--enable-image`. ~80 LOC.
-- [ ] `--reranking <model.gguf>` + bind `POST /v1/rerank`. Cross-encoder
-      reranking is the natural follow-up to RAG (top-50 from vec search
-      → rerank → top-5 → LLM).
 - [ ] Bind `POST /props` (mutating server props at runtime). Currently
       only `GET /props` is bound; the write side conflicts with
       "CLI is the config" but real deployments may want it.

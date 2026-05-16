@@ -137,6 +137,19 @@ struct ServeOptions {
     std::string rag_embedding_model;  // --enable-rag <embedding.gguf>
     std::string rag_db_path;          // --rag-db (default: $CHIMERA_DB or platform default)
 
+    // Opt-in dedicated embedding model. When non-empty a second
+    // server_context is spun up with embedding mode enabled and
+    // /v1/embeddings is routed to it (instead of the main LLM). Use this
+    // when the main LLM is a generative model and you also want OpenAI-
+    // compatible embeddings without launching a second process.
+    std::string embed_model;          // --enable-embeddings <embedding.gguf>
+
+    // Opt-in cross-encoder reranker. When non-empty a third server_context
+    // is spun up with embedding=true + pooling=rank and /v1/rerank is
+    // bound. Natural follow-up to the RAG vector search: feed the top-N
+    // hits + the user query through this to get a refined ordering.
+    std::string rerank_model;         // --reranking <model.gguf>
+
     // Phase 5 (chat persistence): when true, every /v1/chat/completions
     // exchange is saved to the chats + messages tables (one new chat row
     // per request — the OpenAI API doesn't carry a chat id). Uses the

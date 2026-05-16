@@ -39,6 +39,16 @@
 //   POST /v1/images/edits               img2img + optional mask
 //   POST /v1/images/variations          img2img with no prompt
 //
+// Dedicated embedding model (only when --enable-embeddings):
+//   POST /v1/embeddings                 (routes here instead of the main LLM's
+//                                       embedding handler when this flag is set)
+//
+// Cross-encoder reranker (only when --reranking):
+//   POST /v1/rerank, /rerank            documents reranked against a query;
+//                                       request shape:
+//                                       {"model": "...", "query": "...",
+//                                        "documents": ["..."], "top_n": N}
+//
 // Vector store / RAG (only when --enable-rag):
 //   GET  /v1/vector_stores              list collections
 //   POST /v1/vector_stores              create a collection
@@ -264,6 +274,80 @@ common_params build_common_params(const ServeOptions & opts) {
     }
 
     return params;
+}
+
+// Holds a secondary server_context — dedicated embedding model or
+// cross-encoder reranker — that lives alongside the primary LLM. Each
+// secondary owns its own task queue / scheduler and runs its
+// `start_loop()` on a worker thread. Routes from the secondary's
+// `server_routes` are bound onto the shared `ctx_http`. `params` must
+// outlive `routes` (server_routes holds it by const reference), so this
+// struct is non-movable and always heap-allocated.
+struct SecondaryServerCtx {
+    common_params                   params;
+    std::unique_ptr<server_context> ctx;
+    std::unique_ptr<server_routes>  routes;
+    std::thread                     loop;
+
+    SecondaryServerCtx() = default;
+    SecondaryServerCtx(const SecondaryServerCtx &)             = delete;
+    SecondaryServerCtx & operator=(const SecondaryServerCtx &) = delete;
+    SecondaryServerCtx(SecondaryServerCtx &&)                  = delete;
+    SecondaryServerCtx & operator=(SecondaryServerCtx &&)      = delete;
+};
+
+// Build a server_context tuned for embeddings (or, when `rank` is true,
+// for cross-encoder reranking — same code path with pooling_type forced
+// to RANK). Returns a heap-allocated instance with the model already
+// loaded; caller spawns the loop thread. Returns nullptr on load failure
+// so the caller can print a model-specific error message.
+//
+// Most settings track the primary ServeOptions so that --threads /
+// --gpu-layers / --batch-size etc. apply uniformly. We deliberately keep
+// `n_parallel = 1` on secondaries: the embed / rerank workloads are
+// short and infrequent compared to LLM generation, and adding a slot
+// pool there only multiplies KV memory for no throughput gain in the
+// common case.
+std::unique_ptr<SecondaryServerCtx> bring_up_secondary(
+        const ServeOptions & opts,
+        const std::string &  model_path,
+        bool                 rank) {
+    auto sec = std::make_unique<SecondaryServerCtx>();
+    common_init();
+
+    common_params & p = sec->params;
+    p.model.path           = model_path;
+    p.n_ctx                = 0;       // model's training default
+    p.n_batch              = opts.n_batch;
+    p.n_ubatch             = opts.n_ubatch;
+    p.n_gpu_layers         = opts.gpu_layers;
+    p.cpuparams.n_threads  = opts.threads;
+    p.n_parallel           = 1;
+    p.embedding            = true;
+    p.endpoint_metrics     = false;   // metrics route is bound off primary
+
+    if (rank) {
+        // Same toggle llama-server uses for --reranking: embedding mode
+        // plus the rank-head pooling type. The model must actually be a
+        // reranker (typically pooling_type encoded in its GGUF metadata);
+        // mismatched models will fail at decode time with a clear message.
+        p.pooling_type = LLAMA_POOLING_TYPE_RANK;
+    }
+
+    // Embedding decode requires a single ubatch covers the full input;
+    // clamp rather than fail. Matches the same guard on the primary.
+    if (p.n_batch > p.n_ubatch) {
+        p.n_batch = p.n_ubatch;
+    }
+
+    sec->ctx    = std::make_unique<server_context>();
+    sec->routes = std::make_unique<server_routes>(sec->params, *sec->ctx);
+
+    if (!sec->ctx->load_model(sec->params)) {
+        return nullptr;
+    }
+    sec->routes->update_meta(*sec->ctx);
+    return sec;
 }
 
 // ---- Phase 2: audio transcription helpers ------------------------------
@@ -662,11 +746,31 @@ std::unique_ptr<server_http_res> run_image_generate(
     std::vector<chimera_sd::PixelImage> images;
     {
         std::lock_guard<std::mutex> lock(ctx_mutex);
+        // Reset the SD log ring so the snapshot we attach to the error
+        // body (if generate throws) is scoped to this request only.
+        chimera_sd::clear_log_buffer();
         try {
             images = chimera_sd::generate(ctx, req);
         } catch (const ChimeraError & e) {
             const int code = (e.code() == ExitCode::BadInput) ? 400 : 500;
-            return err_res(code, std::string("image generation failed: ") + e.what());
+            // Pull the last few SD log lines and append them to the error
+            // body. The throws from chimera_sd::generate are intentionally
+            // generic ("image generation failed") because sd.cpp delivers
+            // the diagnostic detail via the log channel — buft failures,
+            // unsupported sampler/scheduler names, assertion strings, the
+            // SDXL-Turbo cfg_scale crash text, etc. Without this tail
+            // clients only see the generic message.
+            std::string msg = std::string("image generation failed: ") + e.what();
+            auto tail = chimera_sd::recent_log_lines(/*max_lines=*/8);
+            if (!tail.empty()) {
+                msg += "\nrecent SD log:\n";
+                for (const auto & line : tail) {
+                    msg += "  ";
+                    msg += line;
+                    if (msg.empty() || msg.back() != '\n') msg += '\n';
+                }
+            }
+            return err_res(code, msg);
         }
     }
 
@@ -1391,6 +1495,42 @@ int command_serve(const ServeOptions & opts) {
         }
     }
 
+    // Opt-in dedicated embedding model. When --enable-embeddings is set
+    // a second server_context is brought up in embedding mode and bound
+    // to /v1/embeddings, overriding the primary's binding. This lets the
+    // main LLM stay in generative mode while still serving OpenAI-shaped
+    // embedding requests.
+    std::unique_ptr<SecondaryServerCtx> emb_ctx;
+    if (!opts.embed_model.empty()) {
+        std::cout << "chimera serve: loading dedicated embedding model "
+                  << opts.embed_model << "...\n";
+        emb_ctx = bring_up_secondary(opts, opts.embed_model, /*rank=*/false);
+        if (!emb_ctx) {
+            std::cerr << "chimera serve: failed to load embedding model: "
+                      << opts.embed_model << "\n";
+            ctx_http.stop();
+            ctx_server.terminate();
+            return static_cast<int>(ExitCode::Load);
+        }
+    }
+
+    // Opt-in cross-encoder reranker. Same pattern, but the underlying
+    // server_context runs with pooling_type=RANK. Bound on /v1/rerank.
+    std::unique_ptr<SecondaryServerCtx> rrk_ctx;
+    if (!opts.rerank_model.empty()) {
+        std::cout << "chimera serve: loading rerank model "
+                  << opts.rerank_model << "...\n";
+        rrk_ctx = bring_up_secondary(opts, opts.rerank_model, /*rank=*/true);
+        if (!rrk_ctx) {
+            std::cerr << "chimera serve: failed to load rerank model: "
+                      << opts.rerank_model << "\n";
+            if (emb_ctx) { emb_ctx->ctx->terminate(); }
+            ctx_http.stop();
+            ctx_server.terminate();
+            return static_cast<int>(ExitCode::Load);
+        }
+    }
+
     // Phase 4: opt-in vector store / RAG. One embedding model per server
     // in this cut. The chimera SQLite DB is shared with the CLI (same
     // $CHIMERA_DB / platform default); ingest + search hit it via
@@ -1447,7 +1587,15 @@ int command_serve(const ServeOptions & opts) {
     ctx_http.post("/chat/completions",    ex_wrapper(chat_handler));
     ctx_http.post("/v1/chat/completions", ex_wrapper(chat_handler));
     ctx_http.post("/v1/completions",      ex_wrapper(routes.post_completions_oai));
-    ctx_http.post("/v1/embeddings",       ex_wrapper(routes.post_embeddings_oai));
+    // When --enable-embeddings was passed, route /v1/embeddings to the
+    // dedicated embedding context's handler instead of the primary LLM.
+    // The primary's handler stays usable when --embeddings was set on
+    // the LLM itself (single-model embed mode); the two flags are
+    // mutually exclusive in practice — if both are set, the dedicated
+    // model wins.
+    ctx_http.post("/v1/embeddings",
+                  ex_wrapper(emb_ctx ? emb_ctx->routes->post_embeddings_oai
+                                     : routes.post_embeddings_oai));
     // Phase 5: bind /v1/responses (OpenAI Responses API). The upstream
     // handler holds conversation state in-process — it's *stateful within
     // one chimera serve invocation* but does not persist across
@@ -1486,6 +1634,15 @@ int command_serve(const ServeOptions & opts) {
         ctx_http.post("/v1/images/variations",
                       ex_wrapper(make_image_variations_handler(sd_ctx.get(), sd_mutex)));
     }
+    // /v1/rerank takes {"query": "...", "documents": ["..."]} and returns
+    // OpenAI-Cohere-shaped scored results. The handler is implemented by
+    // upstream server_routes; we just bind it. Also bound on the legacy
+    // /rerank for symmetry with other modalities.
+    if (rrk_ctx) {
+        ctx_http.post("/v1/rerank", ex_wrapper(rrk_ctx->routes->post_rerank));
+        ctx_http.post("/rerank",    ex_wrapper(rrk_ctx->routes->post_rerank));
+    }
+
     if (rag_ctx.embedder) {
         ctx_http.get ("/v1/vector_stores",              ex_wrapper(make_vs_list_handler(&rag_ctx)));
         ctx_http.post("/v1/vector_stores",              ex_wrapper(make_vs_create_handler(&rag_ctx)));
@@ -1519,7 +1676,19 @@ int command_serve(const ServeOptions & opts) {
     routes.update_meta(ctx_server);
     ctx_http.is_ready.store(true);
 
-    g_shutdown_handler = [&](int) { ctx_server.terminate(); };
+    // Secondaries must have their task loop running before the first
+    // request lands. Spawning after is_ready=true means ctx_http will
+    // start accepting traffic the moment the loops are up.
+    if (emb_ctx) { emb_ctx->loop = std::thread([&]{ emb_ctx->ctx->start_loop(); }); }
+    if (rrk_ctx) { rrk_ctx->loop = std::thread([&]{ rrk_ctx->ctx->start_loop(); }); }
+
+    g_shutdown_handler = [&](int) {
+        // Terminate the secondary loops first so they unblock and exit
+        // before the primary's start_loop() returns and we begin joining.
+        if (emb_ctx) emb_ctx->ctx->terminate();
+        if (rrk_ctx) rrk_ctx->ctx->terminate();
+        ctx_server.terminate();
+    };
     install_signal_handlers();
 
     std::cout << "chimera serve: listening on " << ctx_http.listening_address << "\n"
@@ -1530,6 +1699,8 @@ int command_serve(const ServeOptions & opts) {
     if (whisper_ctx) std::cout << "  audio: /v1/audio/transcriptions  /v1/audio/translations\n";
     if (sd_ctx)      std::cout << "  image: /v1/images/generations  /v1/images/edits  /v1/images/variations\n";
     if (rag_ctx.embedder) std::cout << "  rag:   /v1/vector_stores  /v1/vector_stores/:name{,/delete,/files,/search}\n";
+    if (emb_ctx)     std::cout << "  embed: /v1/embeddings (dedicated model: " << opts.embed_model << ")\n";
+    if (rrk_ctx)     std::cout << "  rerank: /v1/rerank (model: " << opts.rerank_model << ")\n";
     if (opts.persist_chats) {
         std::cout << "  persistence: --persist-chats ON (DB: "
                   << (chat_persist_ctx.db_path.empty()
@@ -1546,5 +1717,10 @@ int command_serve(const ServeOptions & opts) {
     if (ctx_http.thread.joinable()) {
         ctx_http.thread.join();
     }
+    // Secondary loops were signaled to terminate in the shutdown handler;
+    // wait for them to actually return before tearing down their owning
+    // unique_ptrs.
+    if (emb_ctx && emb_ctx->loop.joinable()) emb_ctx->loop.join();
+    if (rrk_ctx && rrk_ctx->loop.joinable()) rrk_ctx->loop.join();
     return 0;
 }

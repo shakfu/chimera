@@ -4,6 +4,26 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Added
+
+- `chimera serve --enable-embeddings <model.gguf>`: load a dedicated embedding model alongside the LLM and route `/v1/embeddings` to it. Same opt-in pattern as `--enable-audio` / `--enable-image`. When set, the primary LLM stays in generative mode and the embeddings endpoint is served by a secondary `server_context` running its own task loop on a worker thread. If both `--embeddings` (single-model embed mode on the primary) and `--enable-embeddings` are passed, the dedicated model wins.
+
+- `chimera serve --reranking <model.gguf>`: load a cross-encoder reranker and bind `POST /v1/rerank` (and `/rerank`). Same secondary-context machinery as `--enable-embeddings`, but with `pooling_type=LLAMA_POOLING_TYPE_RANK` — matches the toggle llama-server uses upstream. Natural follow-up to the RAG vector search: top-N hits from `/v1/vector_stores/:name/search` → rerank → top-k → LLM.
+
+  Both flags share a new `SecondaryServerCtx` helper in `chimera_serve.cpp`: heap-allocated, non-movable (because `server_routes` keeps a `const common_params &`), one worker thread per secondary running its `start_loop()`. Shutdown handler terminates secondaries before the primary so the loops unblock cleanly; their threads are joined after `ctx_http.thread`.
+
+- Word-level timestamps in `/v1/audio/transcriptions`. Pass `timestamp_granularities=["word"]` (multipart `timestamp_granularities[]=word` works too) with `response_format=verbose_json` and the response gains a top-level `words[]` array of `{start, end, word}` entries. Implementation walks `whisper_full_get_token_data` per segment, filters tokens at or above `whisper_token_beg` (timestamp specials like `[_BEG_]` / `[_TT_550]`), and groups remaining pieces into words by leading-space token boundaries. New fields: `chimera_whisper::Word`, `Segment::words`, `TranscribeRequest::word_timestamps`.
+
+- `POST /v1/audio/translations`. Trivial bind of the existing transcription handler with `translate=true` in `TranscribeRequest` — whisper does the to-English translation inline, output goes through the same response-format pipeline as transcription (`json` / `text` / `srt` / `vtt` / `verbose_json`).
+
+- SD log capture for image-generation error bodies. `chimera_sd.cpp` now mirrors every log line emitted via `sd_set_log_callback` (which sd.cpp uses to forward ggml log lines too) into a 64-entry mutex-protected ring buffer. The HTTP image handler clears the ring before calling `chimera_sd::generate`, and on throw appends up to 8 of the most recent lines under a `recent SD log:` header in the error body. The underlying generic message (`image generation failed`) stays the same; the new tail carries the descriptive line sd.cpp emitted — buft failures, scheduler/sampler-name rejections, ggml backend errors — which previously only reached stderr. New public API: `chimera_sd::recent_log_lines(max)` + `chimera_sd::clear_log_buffer()`. Does not help with cases where sd.cpp aborts the process via `GGML_ASSERT` (e.g. the SDXL-Turbo `cfg_scale=1.0`+`euler` crash); those still terminate the server.
+
+### Changed
+
+- Release workflow (`.github/workflows/release.yml`) packages each platform's binary as a compressed archive instead of uploading the raw executable. Unix targets ship `chimera-<version>-<target>.tar.gz`; Windows ships `chimera-<version>-windows-x86_64.zip`. Inside, the binary keeps its plain name (`chimera` / `chimera.exe`). The `.sha256` sidecar files were dropped — the GitHub release UI already shows a SHA-256 next to every asset.
+
+- Windows release matrix target renamed `windows-x86_64.exe` → `windows-x86_64` so the archive name no longer ends in `…windows-x86_64.exe.zip`. No effect on the unzipped binary, which is still `chimera.exe`.
+
 ## [0.1.2]
 
 ### Added

@@ -4,11 +4,14 @@
 // Public API in chimera_sd.h. Anything private to this TU (progress
 // spinner, numbered-output-path helper) stays in the anonymous namespace.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -31,7 +34,29 @@ void SdContextDeleter::operator()(sd_ctx_t * ctx) const {
     }
 }
 
-static void chimera_silent_sd_log(enum sd_log_level_t, const char *, void *) {}
+// Last-N log line ring shared by the chimera log callback and the
+// `recent_log_lines()` accessor. Lines are stored exactly as sd.cpp / ggml
+// emit them (already trailing-newline-bearing) so the public API can
+// join them for an HTTP error body without re-formatting.
+static std::mutex              g_log_mtx;
+static std::deque<std::string> g_log_buf;
+static constexpr size_t        kLogBufCap = 64;
+
+static void push_log_line(const char * text) {
+    if (text == nullptr || *text == '\0') return;
+    std::lock_guard<std::mutex> lock(g_log_mtx);
+    g_log_buf.emplace_back(text);
+    while (g_log_buf.size() > kLogBufCap) {
+        g_log_buf.pop_front();
+    }
+}
+
+static void chimera_silent_sd_log(enum sd_log_level_t, const char * text, void *) {
+    // Even in "silenced" mode (CLI path uses this while loading the model
+    // to suppress stderr noise) we still want the ring to capture lines —
+    // an HTTP error after model load is the whole point of the buffer.
+    push_log_line(text);
+}
 
 void chimera_silence_sd_log() {
     sd_set_log_callback(chimera_silent_sd_log, nullptr);
@@ -45,6 +70,7 @@ namespace {
 
 void sd_log_callback(enum sd_log_level_t level, const char * text, void * user_data) {
     (void) user_data;
+    push_log_line(text);
     if (level >= SD_LOG_WARN) {
         std::cerr << text;
     }
@@ -276,6 +302,25 @@ std::string sd_ggml_version() {
 std::string sd_system_info_raw() {
     if (const char * s = sd_get_system_info()) return s;
     return "";
+}
+
+// ---- log capture --------------------------------------------------------
+
+std::vector<std::string> recent_log_lines(size_t max_lines) {
+    std::lock_guard<std::mutex> lock(g_log_mtx);
+    std::vector<std::string> out;
+    const size_t take = std::min(max_lines, g_log_buf.size());
+    out.reserve(take);
+    for (auto it = g_log_buf.end() - static_cast<std::ptrdiff_t>(take);
+         it != g_log_buf.end(); ++it) {
+        out.push_back(*it);
+    }
+    return out;
+}
+
+void clear_log_buffer() {
+    std::lock_guard<std::mutex> lock(g_log_mtx);
+    g_log_buf.clear();
 }
 
 }  // namespace chimera_sd

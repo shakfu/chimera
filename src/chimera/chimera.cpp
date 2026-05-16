@@ -2118,6 +2118,10 @@ int main(int argc, char ** argv) {
             "Stable-diffusion GGUF to load alongside the LLM (enables /v1/images/*)");
         serve_cmd->add_option("--enable-rag", serve_opts.rag_embedding_model,
             "Embedding GGUF to load alongside the LLM (enables /v1/vector_stores/*)");
+        serve_cmd->add_option("--enable-embeddings", serve_opts.embed_model,
+            "Embedding GGUF to load alongside the LLM (routes /v1/embeddings to it)");
+        serve_cmd->add_option("--reranking", serve_opts.rerank_model,
+            "Cross-encoder reranker GGUF to load alongside the LLM (enables /v1/rerank)");
         serve_cmd->add_option("--rag-db", serve_opts.rag_db_path,
             "Path to the SQLite DB used by /v1/vector_stores/* "
             "(default: $CHIMERA_DB or platform default)");

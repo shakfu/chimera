@@ -138,8 +138,10 @@ chimera sd -m sd.gguf -p "..." -o out.png -b 4
 
 ```sh
 chimera serve -m model.gguf                                    # text-only
-chimera serve -m embed.gguf --embeddings                       # /v1/embeddings
-chimera serve -m model.gguf --enable-audio whisper.gguf        # +/v1/audio/transcriptions
+chimera serve -m embed.gguf --embeddings                       # /v1/embeddings (single-model embed mode)
+chimera serve -m model.gguf --enable-embeddings embed.gguf     # +/v1/embeddings (dedicated model, LLM stays generative)
+chimera serve -m model.gguf --reranking rerank.gguf            # +/v1/rerank (cross-encoder)
+chimera serve -m model.gguf --enable-audio whisper.gguf        # +/v1/audio/{transcriptions,translations}
 chimera serve -m model.gguf --enable-image sd.gguf             # +/v1/images/*
 chimera serve -m model.gguf --enable-rag embed.gguf            # +/v1/vector_stores/*
 chimera serve -m model.gguf --persist-chats                    # log every chat to DB
@@ -170,10 +172,16 @@ curl -s http://127.0.0.1:8080/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","prompt":"The capital of France is","max_tokens":4}'
 
-# Embeddings (server must be started with --embeddings)
+# Embeddings (server must be started with --embeddings or --enable-embeddings)
 curl -s http://127.0.0.1:8080/v1/embeddings \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","input":"hello world"}'
+# Array input is also accepted: "input":["a","b","c"] -> one vector per item
+
+# Rerank (requires --reranking <model.gguf>)
+curl -s http://127.0.0.1:8080/v1/rerank \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"any","query":"capital of France","documents":["Paris is the capital.","Berlin is in Germany.","Bananas are yellow."],"top_n":3}'
 
 # Models / health / metrics / props
 curl -s http://127.0.0.1:8080/v1/models
@@ -216,6 +224,15 @@ curl -s http://127.0.0.1:8080/v1/responses \
 curl -s http://127.0.0.1:8080/v1/audio/transcriptions \
   -F file=@speech.wav -F response_format=json
 # response_format: json | text | verbose_json | srt | vtt
+
+# Word-level timestamps in verbose_json (adds a top-level `words[]` array)
+curl -s http://127.0.0.1:8080/v1/audio/transcriptions \
+  -F file=@speech.wav -F response_format=verbose_json \
+  -F 'timestamp_granularities[]=word'
+
+# Audio translation (any source language -> English)
+curl -s http://127.0.0.1:8080/v1/audio/translations \
+  -F file=@speech.wav -F response_format=json
 
 # Image generation
 curl -s http://127.0.0.1:8080/v1/images/generations \

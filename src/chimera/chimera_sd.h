@@ -101,6 +101,26 @@ std::string sdcpp_version();
 // (chimera's required mode) this is the same ggml linked by llama.cpp.
 std::string sd_ggml_version();
 
+// ---- log capture --------------------------------------------------------
+//
+// SD (and the ggml backend it routes through) emits diagnostic lines via
+// `sd_set_log_callback`. The chimera log callback mirrors those into a
+// thread-safe ring buffer in addition to stderr, so HTTP handlers can
+// attach the last few lines to an error body when generation fails. The
+// underlying generic "image generation failed" message is rarely
+// actionable on its own — the ring buffer typically carries the
+// descriptive line ("buft failed", "unsupported sample method", ...) the
+// user actually needs to see.
+
+// Snapshot the most recent log lines (newest last). max_lines caps the
+// returned size; the ring itself is fixed-size internally.
+std::vector<std::string> recent_log_lines(size_t max_lines = 8);
+
+// Discard whatever the ring currently holds. Call this immediately
+// before invoking generate() so the snapshot taken on catch is scoped
+// to that request only.
+void clear_log_buffer();
+
 // Raw `sd_get_system_info()` output (multi-line: system info, backends,
 // CPU features as reported by sd.cpp's own ggml). Caller decides how to
 // render it.
