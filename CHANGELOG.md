@@ -4,6 +4,8 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.1.3]
+
 ### Added
 
 - `chimera serve --enable-embeddings <model.gguf>`: load a dedicated embedding model alongside the LLM and route `/v1/embeddings` to it. Same opt-in pattern as `--enable-audio` / `--enable-image`. When set, the primary LLM stays in generative mode and the embeddings endpoint is served by a secondary `server_context` running its own task loop on a worker thread. If both `--embeddings` (single-model embed mode on the primary) and `--enable-embeddings` are passed, the dedicated model wins.
