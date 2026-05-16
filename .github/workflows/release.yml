@@ -36,7 +36,7 @@ jobs:
             experimental: false
           - os: windows-latest
             backend: cpu
-            target: windows-x86_64.exe
+            target: windows-x86_64
             experimental: true
     env:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
@@ -78,56 +78,70 @@ jobs:
         run: make smoke
 
       - name: stage artifact
-        # Builds the versioned filename `chimera-<version>-<target>`, e.g.
-        # chimera-0.1.2-macos-arm64. The version comes from the tag the
-        # workflow was triggered on (bare semver like `0.1.2`, or a
-        # `v`-prefixed form). The `${TAG#v}` strip is a no-op for bare
-        # semver and removes the prefix from `v0.1.2`.
+        # Builds the versioned, compressed archive `chimera-<version>-<target>.<ext>`,
+        # e.g. `chimera-0.1.2-macos-arm64.tar.gz` or
+        # `chimera-0.1.2-windows-x86_64.zip`. The bare binary name inside the
+        # archive is `chimera` (or `chimera.exe`), matching what users expect
+        # after extraction. The `${TAG#v}` strip is a no-op for bare semver
+        # and removes the prefix from `v0.1.2`. No .sha256 sidecar is
+        # produced; the GitHub release UI already displays a SHA-256 for
+        # every uploaded asset.
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
-          ARTIFACT="chimera-${VERSION}-${{ matrix.target }}"
-          echo "artifact name: ${ARTIFACT}"
+          STEM="chimera-${VERSION}-${{ matrix.target }}"
 
-          mkdir -p dist
-          # MSVC produces build/Release/chimera.exe; everywhere else it's
-          # build/chimera. Probe and copy whichever exists.
+          mkdir -p dist stage
+
+          # Locate the built binary. MSVC produces build/Release/chimera.exe;
+          # everywhere else it's build/chimera (or build/chimera.exe on
+          # mingw, which we don't currently use but probe defensively).
           if [[ -f build/chimera ]]; then
-            cp build/chimera "dist/${ARTIFACT}"
+            BIN_SRC="build/chimera"
+            BIN_NAME="chimera"
           elif [[ -f build/Release/chimera.exe ]]; then
-            cp build/Release/chimera.exe "dist/${ARTIFACT}"
+            BIN_SRC="build/Release/chimera.exe"
+            BIN_NAME="chimera.exe"
           elif [[ -f build/chimera.exe ]]; then
-            cp build/chimera.exe "dist/${ARTIFACT}"
+            BIN_SRC="build/chimera.exe"
+            BIN_NAME="chimera.exe"
           else
             echo "could not locate built chimera binary" >&2
             ls -la build/ build/Release/ 2>&1 || true
             exit 1
           fi
 
-          # Strip debug symbols + local symbol table before hashing so the
-          # sha256 covers the bytes users actually download. MSVC release
-          # builds on Windows don't embed debug info in the .exe (the PDB
-          # lives in a sibling file we never copy), so strip(1) — which
-          # isn't shipped with the Windows runner anyway — is a no-op for
-          # us; skip it.
-          size_before=$(wc -c < "dist/${ARTIFACT}")
-          if [[ "${RUNNER_OS}" != "Windows" ]]; then
-            strip "dist/${ARTIFACT}"
-          fi
-          size_after=$(wc -c < "dist/${ARTIFACT}")
-          echo "stripped ${ARTIFACT}: ${size_before} -> ${size_after} bytes"
+          cp "${BIN_SRC}" "stage/${BIN_NAME}"
 
-          (cd dist && \
-            (sha256sum "${ARTIFACT}" 2>/dev/null || shasum -a 256 "${ARTIFACT}") \
-            > "${ARTIFACT}.sha256")
+          # Strip debug symbols + local symbol table on unix. MSVC release
+          # builds on Windows don't embed debug info in the .exe (the PDB
+          # lives in a sibling file we never copy), and strip(1) isn't
+          # shipped with the Windows runner anyway; skip it there.
+          if [[ "${RUNNER_OS}" != "Windows" ]]; then
+            size_before=$(wc -c < "stage/${BIN_NAME}")
+            strip "stage/${BIN_NAME}"
+            size_after=$(wc -c < "stage/${BIN_NAME}")
+            echo "stripped ${BIN_NAME}: ${size_before} -> ${size_after} bytes"
+          fi
+
+          # Package. Windows gets a .zip (what Windows users expect);
+          # everyone else gets .tar.gz. Naming the archive with the same
+          # versioned stem keeps the release asset listing tidy.
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            ARCHIVE="${STEM}.zip"
+            (cd stage && 7z a -tzip "../dist/${ARCHIVE}" "${BIN_NAME}") >/dev/null
+          else
+            ARCHIVE="${STEM}.tar.gz"
+            tar -czf "dist/${ARCHIVE}" -C stage "${BIN_NAME}"
+          fi
+          echo "archive: dist/${ARCHIVE} ($(wc -c < "dist/${ARCHIVE}") bytes)"
 
       - uses: actions/upload-artifact@v7
         with:
           # upload-artifact name is for internal storage between jobs;
-          # the version-suffixed filename inside `path` is what gets
-          # downloaded + published.
+          # the versioned archive inside `path` is what gets published.
           name: ${{ matrix.target }}
-          path: dist/chimera-*-${{ matrix.target }}*
+          path: dist/chimera-*-${{ matrix.target }}.*
           if-no-files-found: error
 
   publish:
@@ -180,15 +194,13 @@ jobs:
           # action-gh-release auto-generate notes otherwise.
           body_path: ${{ env.FOUND == '1' && 'release-notes.md' || '' }}
           generate_release_notes: ${{ env.FOUND != '1' }}
-          # Glob picks up the versioned filenames produced by the build job
-          # (`chimera-<version>-<target>` + the .sha256 sidecars).
+          # Glob picks up the versioned archives produced by the build job:
+          # `.tar.gz` for macOS/Linux, `.zip` for Windows. GitHub renders
+          # a SHA-256 next to each uploaded asset so no sidecar is shipped.
           files: |
-            dist/chimera-*-macos-arm64
-            dist/chimera-*-macos-arm64.sha256
-            dist/chimera-*-linux-x86_64
-            dist/chimera-*-linux-x86_64.sha256
-            dist/chimera-*-windows-x86_64.exe
-            dist/chimera-*-windows-x86_64.exe.sha256
+            dist/chimera-*-macos-arm64.tar.gz
+            dist/chimera-*-linux-x86_64.tar.gz
+            dist/chimera-*-windows-x86_64.zip
           # Don't fail the release if Windows artifacts are missing while
           # that leg is still experimental.
           fail_on_unmatched_files: false
