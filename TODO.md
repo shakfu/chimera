@@ -86,7 +86,10 @@ if a concrete user request shows up.
   rewrite of `command_serve` for a deployment shape chimera isn't
   aimed at (one process = one model is core to the busybox identity).
   Users who need multi-model routing should run one chimera per model
-  behind a real reverse proxy. Wontfix.
+  behind a real reverse proxy. Wontfix. See
+  [`doc/dev/server-router-mode.md`](doc/dev/server-router-mode.md)
+  for the full decision record (architecture, port cost, the
+  concurrency / single-GPU analysis, when to revisit).
 - **HTTPS direct serving** (`--ssl-cert-file` / `--ssl-key-file`) —
   cpp-httplib supports it but a reverse proxy (nginx, caddy, Cloudflare,
   etc.) is the right place to terminate TLS for any deployment that

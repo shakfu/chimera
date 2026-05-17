@@ -24,6 +24,8 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 - `doc/serve.md`: the `## What's not supported` list no longer mentions `/slots` and `/lora-adapters` (they're supported now), the endpoint table lists all four new routes, and a new `### KV-cache snapshots` + `### LoRA hot-swap` pair of subsections under `## Opt-in features` documents the flags and the request-shape conventions.
 
+- New decision record at `doc/dev/server-router-mode.md` capturing why chimera does not implement llama-server's router mode (multi-process, one-subprocess-per-model, the `is_router_server` branch). Covers: what router mode actually is upstream (multi-process via `sheredom/subprocess.h`, not multi-model-in-one-process), the ~2–3 week port cost plus permanent maintenance tax on llama.cpp drift, and — most usefully — the concurrency analysis showing router mode buys *model-residency parallelism* (multiple distinct models hot at once) but **not** compute parallelism on a single GPU (kernel submissions serialize at the device). Three concrete revisit triggers documented (multi-GPU customer who won't use a reverse proxy, concrete autoload+LRU demand, upstream collapsing router machinery into `libserver-context.a`). The `Out of scope (wontfix)` multi-tenancy bullet in `TODO.md` now links here for the full rationale.
+
 ## [0.1.4]
 
 ### Added
