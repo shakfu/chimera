@@ -1146,7 +1146,7 @@ server_http_context::handler_t make_vs_ingest_handler(RagContext * rag) {
         std::vector<chimera_embed::TokenChunk> chunks;
         {
             std::lock_guard<std::mutex> lk(rag->embedder_mutex);
-            chunks = chimera_embed::chunk_by_tokens(
+            chunks = chimera_embed::chunk_by_sentences(
                 text, *rag->embedder, col->chunk_tokens, col->chunk_overlap);
         }
         if (chunks.empty()) return rag_err(400, "no non-empty chunks produced");
@@ -1197,34 +1197,58 @@ server_http_context::handler_t make_vs_search_handler(RagContext * rag) {
         if (query.empty()) return rag_err(400, "field 'query' is required");
         const int k = coerce_int(body.value("k", json(5)), 5);
 
+        // Body "mode" defaults to hybrid — strictly better than the
+        // pre-hybrid semantic-only behaviour on prose, and clients that
+        // need the old behaviour can pass "semantic" explicitly.
+        const std::string mode_str = body.value("mode", std::string("hybrid"));
+        const auto mode_opt = chimera_vector_store::parse_search_mode(mode_str);
+        if (!mode_opt) {
+            return rag_err(400,
+                "invalid mode '" + mode_str +
+                "' (expected: semantic | lexical | hybrid)");
+        }
+        const auto mode = *mode_opt;
+
         auto conn = rag_open_db(rag);
         auto col = chimera_vector_store::find(conn.get(), name);
         if (!col) return rag_err(400, "no such collection: '" + name + "'");
-        if (col->embedding_model != rag->loaded_model) {
+        if (mode != chimera_vector_store::SearchMode::Lexical &&
+            col->embedding_model != rag->loaded_model) {
             return rag_err(400,
                 "collection '" + name + "' was indexed with '" + col->embedding_model +
                 "'; server has '" + rag->loaded_model + "' loaded.");
         }
 
         std::vector<float> qvec;
-        {
+        if (mode != chimera_vector_store::SearchMode::Lexical) {
             std::lock_guard<std::mutex> lk(rag->embedder_mutex);
             qvec = rag->embedder->embed(query);
         }
-        const auto hits = chimera_vector_store::search(conn.get(), *col, qvec, k);
+        const auto hits = chimera_vector_store::search(
+            conn.get(), *col, qvec, query, k, mode);
 
         json data = json::array();
         for (const auto & h : hits) {
-            data.push_back({
+            json item = {
                 { "document_id", h.document_id },
                 { "source_uri",  h.source_uri },
                 { "chunk_index", h.chunk_index },
                 { "text",        h.text },
                 { "distance",    h.distance },
-            });
+            };
+            if (mode == chimera_vector_store::SearchMode::Hybrid) {
+                item["rrf_score"]     = h.rrf_score;
+                item["semantic_rank"] = h.semantic_rank;
+                item["lexical_rank"]  = h.lexical_rank;
+            }
+            data.push_back(std::move(item));
         }
         auto res = std::make_unique<server_http_res>();
-        res->data = json{{ "object", "list" }, { "data", std::move(data) }}.dump();
+        res->data = json{
+            { "object", "list" },
+            { "mode",   chimera_vector_store::search_mode_name(mode) },
+            { "data",   std::move(data) }
+        }.dump();
         return res;
     };
 }
@@ -1239,71 +1263,123 @@ struct ChatPersistContext {
     std::mutex  mutex;   // serializes DB writes from concurrent HTTP workers
 };
 
-// Write a completed exchange to the DB: create one chats row, then append
-// every message from the request plus the new assistant reply.
-// `model_alias` is the model the request claimed; fall back to whatever
-// the server has loaded.
+// Extract a single message's content to a string. OpenAI permits
+// `content` to be either a string, an array of content parts (image_url,
+// text), or absent. We stringify non-string content as JSON so the row
+// remains lossless.
+std::string extract_message_content(const json & m) {
+    if (!m.contains("content")) return {};
+    const auto & c = m["content"];
+    if (c.is_string()) return c.get<std::string>();
+    return c.dump();
+}
+
+// Pull the system prompt (first system-role message with string content)
+// out of a chat-completions body for the chats.system_prompt column.
+std::string extract_system_prompt(const json & req_body) {
+    if (!req_body.contains("messages") || !req_body["messages"].is_array()) return {};
+    for (const auto & m : req_body["messages"]) {
+        if (m.contains("role") && m["role"] == "system" &&
+            m.contains("content") && m["content"].is_string()) {
+            return m["content"].get<std::string>();
+        }
+    }
+    return {};
+}
+
+// Create a new chats row up-front so its id can be set in the
+// X-Chimera-Chat-Id response header before streaming begins. Returns 0
+// on failure (logged); the caller treats 0 as "do not persist messages,
+// do not echo header".
+int64_t create_chat_row_for_request(ChatPersistContext * cpc,
+                                    const json &         req_body) {
+    try {
+        chimera_db::Connection conn = chimera_db::open_and_migrate(
+            cpc->db_path.empty() ? chimera_db::default_path() : cpc->db_path);
+
+        std::string model_alias = "any";
+        if (req_body.contains("model") && req_body["model"].is_string()) {
+            model_alias = req_body["model"].get<std::string>();
+        }
+        const std::string system_prompt = extract_system_prompt(req_body);
+
+        std::lock_guard<std::mutex> lk(cpc->mutex);
+        return chimera_chat_store::create_chat(
+            conn.get(),
+            /*model_path=*/model_alias, model_alias,
+            system_prompt, /*source=*/"serve");
+    } catch (const std::exception & e) {
+        std::fprintf(stderr,
+                     "chimera serve: create_chat_row_for_request failed: %s\n",
+                     e.what());
+        return 0;
+    }
+}
+
+// Verify a client-supplied X-Chimera-Chat-Id refers to an existing row.
+// Returns true on success. On failure, populates `err_out` and the
+// caller emits a 404.
+bool chat_id_exists(ChatPersistContext * cpc, int64_t chat_id) {
+    try {
+        chimera_db::Connection conn = chimera_db::open_and_migrate(
+            cpc->db_path.empty() ? chimera_db::default_path() : cpc->db_path);
+        std::lock_guard<std::mutex> lk(cpc->mutex);
+        return chimera_chat_store::load_chat(conn.get(), chat_id).has_value();
+    } catch (...) {
+        return false;
+    }
+}
+
+// Write a completed exchange to the DB. `chat_id` MUST already exist
+// (created by `create_chat_row_for_request` or supplied by the client
+// via X-Chimera-Chat-Id). When `append_full_history` is true, every
+// message in the request body is inserted; when false, only the last
+// message (intended to be the new user turn the client just appended)
+// is inserted. The new assistant reply is always appended.
+//
+// The split exists because clients that echo X-Chimera-Chat-Id back
+// resend the full conversation each request, but the prior turns are
+// already on disk from earlier requests against this chat_id — only
+// the new user message + assistant reply should be added.
 void persist_completed_chat(ChatPersistContext * cpc,
+                            int64_t             chat_id,
+                            bool                append_full_history,
                             const json &        req_body,
                             const std::string & assistant_content,
                             const std::string & assistant_reasoning,
                             int                 tokens_in,
                             int                 tokens_out) {
+    if (chat_id == 0) return;  // create failed earlier; nothing to do.
     try {
         if (!req_body.contains("messages") || !req_body["messages"].is_array()) return;
 
         chimera_db::Connection conn = chimera_db::open_and_migrate(
             cpc->db_path.empty() ? chimera_db::default_path() : cpc->db_path);
 
-        // Pull system prompt + model name out of the request for the
-        // chats row metadata. OpenAI's `model` may be the server-loaded
-        // name, an alias, or "any"; record verbatim.
-        std::string model_alias = "any";
-        if (req_body.contains("model") && req_body["model"].is_string()) {
-            model_alias = req_body["model"].get<std::string>();
-        }
-        std::string system_prompt;
-        for (const auto & m : req_body["messages"]) {
-            if (m.contains("role") && m["role"] == "system" &&
-                m.contains("content") && m["content"].is_string()) {
-                system_prompt = m["content"].get<std::string>();
-                break;
-            }
-        }
-
         std::lock_guard<std::mutex> lk(cpc->mutex);
 
-        const int64_t chat_id = chimera_chat_store::create_chat(
-            conn.get(),
-            /*model_path=*/model_alias, model_alias,
-            system_prompt, /*source=*/"serve");
-
-        // Every message in the request gets one row. The OpenAI client
-        // sends the full conversation on each request, so this captures
-        // the whole conversation (with the duplication caveat documented
-        // in CHANGELOG: multi-turn chats produce multiple chat rows
-        // that share content).
-        for (const auto & m : req_body["messages"]) {
-            const std::string role = m.value("role", std::string("user"));
-            std::string content;
-            if (m.contains("content")) {
-                if (m["content"].is_string()) {
-                    content = m["content"].get<std::string>();
-                } else {
-                    // Tool calls, image_url parts, etc. — serialize as JSON.
-                    content = m["content"].dump();
-                }
+        const auto & msgs = req_body["messages"];
+        if (append_full_history) {
+            for (const auto & m : msgs) {
+                const std::string role = m.value("role", std::string("user"));
+                chimera_chat_store::append_message(
+                    conn.get(), chat_id, role, extract_message_content(m));
             }
+        } else if (!msgs.empty()) {
+            // Echo path: append only the new user turn. We don't try to
+            // diff against what's already in the DB — clients that
+            // misuse the header (e.g. resend a full history under an
+            // existing chat_id) will get duplicate rows. That's their
+            // contract violation.
+            const auto & last = msgs.at(msgs.size() - 1);
+            const std::string role = last.value("role", std::string("user"));
             chimera_chat_store::append_message(
-                conn.get(), chat_id, role, content);
+                conn.get(), chat_id, role, extract_message_content(last));
         }
-        // The new assistant reply.
         chimera_chat_store::append_message(
             conn.get(), chat_id, "assistant", assistant_content,
             assistant_reasoning, /*media_json=*/"", tokens_in, tokens_out);
     } catch (const std::exception & e) {
-        // Persistence failure must never break the user's HTTP request.
-        // Log and move on; the response has already been (or will be) sent.
         std::fprintf(stderr, "chimera serve: persist_completed_chat failed: %s\n",
                      e.what());
     }
@@ -1312,6 +1388,8 @@ void persist_completed_chat(ChatPersistContext * cpc,
 // Parse a non-streaming /v1/chat/completions response body and pull out
 // the assistant content + token counts.
 void persist_non_streaming(ChatPersistContext * cpc,
+                            int64_t             chat_id,
+                            bool                append_full_history,
                             const json &        req_body,
                             const std::string & res_data) {
     try {
@@ -1335,7 +1413,8 @@ void persist_non_streaming(ChatPersistContext * cpc,
             tokens_in  = r["usage"].value("prompt_tokens",     0);
             tokens_out = r["usage"].value("completion_tokens", 0);
         }
-        persist_completed_chat(cpc, req_body, content, reasoning, tokens_in, tokens_out);
+        persist_completed_chat(cpc, chat_id, append_full_history, req_body,
+                                content, reasoning, tokens_in, tokens_out);
     } catch (...) {
         // Don't propagate.
     }
@@ -1345,6 +1424,8 @@ void persist_non_streaming(ChatPersistContext * cpc,
 // persist the result. SSE shape: `data: {json}\n\n` per chunk, plus a
 // `data: [DONE]` trailer.
 void persist_streaming(ChatPersistContext * cpc,
+                        int64_t             chat_id,
+                        bool                append_full_history,
                         const json &        req_body,
                         const std::string & sse_buffer) {
     std::string content, reasoning;
@@ -1393,15 +1474,51 @@ void persist_streaming(ChatPersistContext * cpc,
         }
     }
     if (!content.empty() || !reasoning.empty()) {
-        persist_completed_chat(cpc, req_body, content, reasoning, tokens_in, tokens_out);
+        persist_completed_chat(cpc, chat_id, append_full_history, req_body,
+                                content, reasoning, tokens_in, tokens_out);
     }
 }
 
+// Header name used to associate /v1/chat/completions requests with a
+// persisted chat row across multiple HTTP calls. Lookup is
+// case-insensitive (HTTP header names are case-insensitive; httplib
+// preserves the client's casing but we don't rely on it).
+constexpr const char * X_CHAT_ID_HEADER = "X-Chimera-Chat-Id";
+
+std::string lookup_header_ci(const std::map<std::string, std::string> & headers,
+                             const std::string & name) {
+    for (const auto & kv : headers) {
+        if (kv.first.size() != name.size()) continue;
+        bool eq = true;
+        for (size_t i = 0; i < name.size(); ++i) {
+            const char a = static_cast<char>(std::tolower(
+                static_cast<unsigned char>(kv.first[i])));
+            const char b = static_cast<char>(std::tolower(
+                static_cast<unsigned char>(name[i])));
+            if (a != b) { eq = false; break; }
+        }
+        if (eq) return kv.second;
+    }
+    return {};
+}
+
 // Wraps server_routes::post_chat_completions so each successful exchange
-// is saved to the chats + messages tables. Streaming responses are
-// passed through chunk-by-chunk and assembled in a buffer for parsing at
-// stream end. Persistence runs *after* the chunk is sent to the client;
-// any error in persistence is logged but never visible to the caller.
+// is saved to the chats + messages tables. Behaviour:
+//   - No X-Chimera-Chat-Id on the request: create a new chats row before
+//     calling inner, echo its id back as X-Chimera-Chat-Id on the
+//     response, persist *all* request messages plus the assistant reply.
+//   - X-Chimera-Chat-Id present and refers to an existing chat: reuse
+//     it; persist only the last message in the body plus the assistant
+//     reply (the prior turns are already on disk from earlier calls).
+//   - X-Chimera-Chat-Id present but malformed or unknown: HTTP 404 with
+//     a JSON error body; inner is not invoked.
+//
+// Streaming responses are passed through chunk-by-chunk and assembled in
+// a buffer for parsing at stream end. Persistence runs *after* the chunk
+// is sent to the client; any error in persistence is logged but never
+// visible to the caller. The X-Chimera-Chat-Id response header is set
+// before returning so it reaches the client even on streaming responses
+// (where the body comes through `next`).
 server_http_context::handler_t make_persisting_chat_handler(
     server_http_context::handler_t inner,
     ChatPersistContext *           cpc) {
@@ -1412,26 +1529,69 @@ server_http_context::handler_t make_persisting_chat_handler(
             // Malformed JSON — let the inner handler emit its own 400.
             return inner(req);
         }
+
+        const std::string id_hdr = lookup_header_ci(req.headers, X_CHAT_ID_HEADER);
+        int64_t  client_chat_id    = 0;
+        bool     append_full_hist  = true;
+        if (!id_hdr.empty()) {
+            try {
+                client_chat_id = std::stoll(id_hdr);
+            } catch (...) {
+                auto res = std::make_unique<server_http_res>();
+                res->status = 400;
+                res->data = json{
+                    { "error", { { "message",
+                        std::string("invalid ") + X_CHAT_ID_HEADER +
+                        " header: '" + id_hdr + "' (expected integer)" },
+                                 { "type", "invalid_request_error" } } }
+                }.dump();
+                return res;
+            }
+            if (!chat_id_exists(cpc, client_chat_id)) {
+                auto res = std::make_unique<server_http_res>();
+                res->status = 404;
+                res->data = json{
+                    { "error", { { "message",
+                        std::string("no such chat id: ") + std::to_string(client_chat_id) },
+                                 { "type", "not_found" } } }
+                }.dump();
+                return res;
+            }
+            append_full_hist = false;
+        } else {
+            // Create the row up-front so we can advertise the id on the
+            // response header before streaming starts. If creation fails
+            // we still serve the response — the header is just omitted.
+            client_chat_id = create_chat_row_for_request(cpc, req_body);
+        }
+
         auto res = inner(req);
         if (!res || res->status >= 300) return res;
 
+        if (client_chat_id != 0) {
+            res->headers[X_CHAT_ID_HEADER] = std::to_string(client_chat_id);
+        }
+
         if (!res->is_stream()) {
             // Non-streaming: we have the full body in res->data.
-            persist_non_streaming(cpc, req_body, res->data);
+            persist_non_streaming(cpc, client_chat_id, append_full_hist,
+                                   req_body, res->data);
             return res;
         }
 
         // Streaming: wrap `next` to mirror each chunk into a buffer,
         // then parse + persist when the stream ends. The shared_ptr
         // keeps the buffer alive across the move-from of res->next.
-        auto buffer = std::make_shared<std::string>();
+        auto buffer     = std::make_shared<std::string>();
         auto inner_next = std::move(res->next);
         auto saved_body = std::make_shared<json>(std::move(req_body));
-        res->next = [inner_next, buffer, cpc, saved_body](std::string & out) {
+        res->next = [inner_next, buffer, cpc, saved_body,
+                     client_chat_id, append_full_hist](std::string & out) {
             const bool has_more = inner_next(out);
             buffer->append(out);
             if (!has_more) {
-                persist_streaming(cpc, *saved_body, *buffer);
+                persist_streaming(cpc, client_chat_id, append_full_hist,
+                                   *saved_body, *buffer);
             }
             return has_more;
         };

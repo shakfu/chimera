@@ -231,6 +231,93 @@ EOF
         failed_names+=("vector-store-setup")
     fi
     rm -f "$VEC_DB" "$VEC_DB-wal" "$VEC_DB-shm" "$VEC_DOC"
+
+    # Hybrid / lexical search: same setup as the semantic test above, but
+    # the corpus carries a deliberately rare proper-noun-like token
+    # ("xyzzyfrobnoc") that no semantic search would surface from a
+    # generic query. Lexical mode must hit that chunk via BM25; hybrid
+    # mode must produce output annotated with `rrf=` (the signal that
+    # the RRF merge ran rather than a fall-through to one leg).
+    HYB_DB="$(mktemp -t chimera-hyb-XXXXXX).db"
+    HYB_DOC="$(mktemp -t chimera-hyb-doc-XXXXXX).txt"
+    cat > "$HYB_DOC" <<'EOF'
+Audio file formats commonly used in machine learning include WAV, FLAC, and MP3. WAV is uncompressed and preferred for training.
+
+Image file formats vary widely. PNG is lossless. JPEG is lossy and not recommended for masks.
+
+The xyzzyfrobnoc protocol is a fictitious wire format invented for this regression test. It carries no real semantic content but is keyword-unique within this corpus.
+
+Photosynthesis converts light energy into chemical energy in plants.
+EOF
+    if CHIMERA_DB="$HYB_DB" "$CHIMERA" index create -n hyb_test -e "$EMBED_MODEL" \
+            --chunk-tokens 96 --chunk-overlap 12 >/dev/null 2>&1 \
+        && CHIMERA_DB="$HYB_DB" "$CHIMERA" index ingest -n hyb_test -f "$HYB_DOC" \
+            >/dev/null 2>&1; then
+        # Lexical leg must surface the rare token.
+        LEX_OUT="$(CHIMERA_DB="$HYB_DB" "$CHIMERA" search -n hyb_test \
+            -q "xyzzyfrobnoc" -k 1 --mode lexical 2>/dev/null || true)"
+        if printf '%s' "$LEX_OUT" | grep -qi 'xyzzyfrobnoc'; then
+            printf "  ${PASS_TAG}  %s\n" "search --mode lexical (BM25 hits rare token)"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "search --mode lexical"
+            printf "        got: %s\n" "$LEX_OUT"
+            fail=$((fail + 1))
+            failed_names+=("search-lexical")
+        fi
+
+        # Hybrid leg: combined query with both a lexical anchor and a
+        # semantic intent. Output format includes `rrf=<score>` only on
+        # the hybrid path; verifying that field is present is a cheap
+        # proof that the RRF merge actually ran.
+        HYB_OUT="$(CHIMERA_DB="$HYB_DB" "$CHIMERA" search -n hyb_test \
+            -q "xyzzyfrobnoc wire format" -k 3 --mode hybrid 2>/dev/null || true)"
+        if printf '%s' "$HYB_OUT" | grep -q 'rrf=' \
+            && printf '%s' "$HYB_OUT" | grep -qi 'xyzzyfrobnoc'; then
+            printf "  ${PASS_TAG}  %s\n" "search --mode hybrid (RRF merge + rare-token recall)"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "search --mode hybrid"
+            printf "        got: %s\n" "$HYB_OUT"
+            fail=$((fail + 1))
+            failed_names+=("search-hybrid")
+        fi
+
+        # Default mode is hybrid: omitting --mode should produce the
+        # same `rrf=` annotation as --mode hybrid. Guards against a
+        # future refactor accidentally flipping the default back.
+        DEF_OUT="$(CHIMERA_DB="$HYB_DB" "$CHIMERA" search -n hyb_test \
+            -q "xyzzyfrobnoc wire format" -k 3 2>/dev/null || true)"
+        if printf '%s' "$DEF_OUT" | grep -q 'rrf='; then
+            printf "  ${PASS_TAG}  %s\n" "search default mode is hybrid"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "search default mode"
+            printf "        got: %s\n" "$DEF_OUT"
+            fail=$((fail + 1))
+            failed_names+=("search-default-mode")
+        fi
+
+        # Invalid --mode value: must exit non-zero (BadInput) without
+        # crashing or producing hits. Guards the parse_search_mode entry
+        # point on the CLI side.
+        BAD_OUT="$(CHIMERA_DB="$HYB_DB" "$CHIMERA" search -n hyb_test \
+            -q "anything" --mode nonsense 2>&1 || true)"
+        if printf '%s' "$BAD_OUT" | grep -qi 'invalid --mode'; then
+            printf "  ${PASS_TAG}  %s\n" "search --mode <bogus> exits with BadInput"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "search --mode validation"
+            printf "        got: %s\n" "$BAD_OUT"
+            fail=$((fail + 1))
+            failed_names+=("search-mode-validation")
+        fi
+    else
+        printf "  ${FAIL_TAG}  %s\n" "hybrid search create/ingest"
+        fail=$((fail + 1))
+        failed_names+=("hybrid-search-setup")
+    fi
+    rm -f "$HYB_DB" "$HYB_DB-wal" "$HYB_DB-shm" "$HYB_DOC"
 else
     skip_test "embed" "no embedding model under $MODELS/"
     skip_test "vector store" "no embedding model under $MODELS/"
@@ -365,6 +452,155 @@ if [[ -f "$GEN_MODEL" ]]; then
         failed_names+=("chat-persistence")
     fi
     rm -f "$CHAT_DB" "$CHAT_DB-wal" "$CHAT_DB-shm"
+
+    # X-Chimera-Chat-Id header: end-to-end against `chimera serve
+    # --persist-chats`. Verifies four cases and the DB state they
+    # produce. Skipped when `python3` or `curl` are missing — both ship
+    # by default on every supported platform, but a stripped-down CI
+    # container might not have them, and SKIP is friendlier than FAIL.
+    if command -v python3 >/dev/null && command -v curl >/dev/null \
+            && command -v sqlite3 >/dev/null; then
+        HDR_DB="$(mktemp -t chimera-hdr-XXXXXX).db"
+        HDR_LOG="$(mktemp -t chimera-hdr-log-XXXXXX)"
+        HDR_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+        # Spawn serve on the chosen port. CPU-only (-gpu-layers 0) so the
+        # test runs identically on machines without a GPU and doesn't
+        # collide with concurrent GPU users.
+        "$CHIMERA" serve -m "$GEN_MODEL" --persist-chats --chat-db "$HDR_DB" \
+            --host 127.0.0.1 --port "$HDR_PORT" --gpu-layers 0 \
+            > "$HDR_LOG" 2>&1 &
+        HDR_PID=$!
+
+        # Poll /health until 200 or 20 s elapsed.
+        ready=0
+        for _ in $(seq 1 40); do
+            if curl -sS -o /dev/null -w '%{http_code}' \
+                    "http://127.0.0.1:$HDR_PORT/health" 2>/dev/null \
+                    | grep -q '^200$'; then
+                ready=1
+                break
+            fi
+            sleep 0.5
+        done
+
+        if [[ "$ready" != "1" ]]; then
+            printf "  ${FAIL_TAG}  %s\n" "X-Chimera-Chat-Id (server failed to start)"
+            printf "        log tail:\n"
+            tail -5 "$HDR_LOG" | sed 's/^/          /'
+            fail=$((fail + 1))
+            failed_names+=("chat-id-header-startup")
+        else
+            # Case 1: no header on request → response header advertises
+            # the new chat id.
+            R1_HDR="$(curl -sS -D - -o /dev/null \
+                -H 'Content-Type: application/json' \
+                -d '{"model":"any","messages":[{"role":"user","content":"hi"}],"max_tokens":4,"stream":false}' \
+                "http://127.0.0.1:$HDR_PORT/v1/chat/completions" 2>/dev/null)"
+            FIRST_ID="$(printf '%s' "$R1_HDR" | grep -i '^X-Chimera-Chat-Id:' | tr -d '\r' | awk '{print $2}')"
+            if [[ -n "$FIRST_ID" ]]; then
+                printf "  ${PASS_TAG}  %s\n" "X-Chimera-Chat-Id new chat → header echoed"
+                pass=$((pass + 1))
+            else
+                printf "  ${FAIL_TAG}  %s\n" "X-Chimera-Chat-Id new chat"
+                printf "        got headers: %s\n" "$R1_HDR"
+                fail=$((fail + 1))
+                failed_names+=("chat-id-header-new")
+            fi
+
+            # Case 2: echo the captured id on a follow-up request →
+            # response must carry the same id and the DB must add only
+            # the new user + assistant rows (not duplicate the prior
+            # turn).
+            if [[ -n "$FIRST_ID" ]]; then
+                R2_HDR="$(curl -sS -D - -o /dev/null \
+                    -H 'Content-Type: application/json' \
+                    -H "X-Chimera-Chat-Id: $FIRST_ID" \
+                    -d '{"model":"any","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"again"}],"max_tokens":4,"stream":false}' \
+                    "http://127.0.0.1:$HDR_PORT/v1/chat/completions" 2>/dev/null)"
+                R2_ID="$(printf '%s' "$R2_HDR" | grep -i '^X-Chimera-Chat-Id:' | tr -d '\r' | awk '{print $2}')"
+                if [[ "$R2_ID" == "$FIRST_ID" ]]; then
+                    printf "  ${PASS_TAG}  %s\n" "X-Chimera-Chat-Id echo → same id reused"
+                    pass=$((pass + 1))
+                else
+                    printf "  ${FAIL_TAG}  %s (expected %s, got %s)\n" \
+                        "X-Chimera-Chat-Id echo" "$FIRST_ID" "$R2_ID"
+                    fail=$((fail + 1))
+                    failed_names+=("chat-id-header-echo")
+                fi
+            fi
+
+            # Case 3: unknown id → HTTP 404, no inner handler invocation
+            # (verified indirectly: the chat row count in the DB does
+            # not change).
+            R3_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+                -H 'Content-Type: application/json' \
+                -H 'X-Chimera-Chat-Id: 9999999' \
+                -d '{"model":"any","messages":[{"role":"user","content":"x"}],"max_tokens":4,"stream":false}' \
+                "http://127.0.0.1:$HDR_PORT/v1/chat/completions" 2>/dev/null || true)"
+            if [[ "$R3_CODE" == "404" ]]; then
+                printf "  ${PASS_TAG}  %s\n" "X-Chimera-Chat-Id unknown id → 404"
+                pass=$((pass + 1))
+            else
+                printf "  ${FAIL_TAG}  %s (got HTTP %s)\n" \
+                    "X-Chimera-Chat-Id unknown id" "$R3_CODE"
+                fail=$((fail + 1))
+                failed_names+=("chat-id-header-unknown")
+            fi
+
+            # Case 4: malformed id (non-integer) → HTTP 400.
+            R4_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+                -H 'Content-Type: application/json' \
+                -H 'X-Chimera-Chat-Id: notanint' \
+                -d '{"model":"any","messages":[{"role":"user","content":"x"}],"max_tokens":4,"stream":false}' \
+                "http://127.0.0.1:$HDR_PORT/v1/chat/completions" 2>/dev/null || true)"
+            if [[ "$R4_CODE" == "400" ]]; then
+                printf "  ${PASS_TAG}  %s\n" "X-Chimera-Chat-Id malformed → 400"
+                pass=$((pass + 1))
+            else
+                printf "  ${FAIL_TAG}  %s (got HTTP %s)\n" \
+                    "X-Chimera-Chat-Id malformed" "$R4_CODE"
+                fail=$((fail + 1))
+                failed_names+=("chat-id-header-malformed")
+            fi
+        fi
+
+        # Tear down before inspecting the DB so WAL is checkpointed via
+        # the shutdown path. SIGTERM, then escalate to KILL if it lingers.
+        if kill -0 "$HDR_PID" 2>/dev/null; then
+            kill -TERM "$HDR_PID" 2>/dev/null || true
+            for _ in $(seq 1 20); do
+                kill -0 "$HDR_PID" 2>/dev/null || break
+                sleep 0.25
+            done
+            kill -KILL "$HDR_PID" 2>/dev/null || true
+        fi
+        wait "$HDR_PID" 2>/dev/null || true
+
+        # DB-state assertion. After cases 1 and 2 we expect exactly one
+        # chats row (id reused via the header). Cases 3 and 4 must NOT
+        # have created rows. Messages: 2 from case 1 (user+assistant) +
+        # 2 from case 2 (last user "again" + assistant) = 4. The
+        # malformed/unknown cases are negative tests so their rejection
+        # propagating to "no rows" is the assertion.
+        if [[ "$ready" == "1" ]]; then
+            ROW_COUNTS="$(sqlite3 "$HDR_DB" \
+                "SELECT (SELECT COUNT(*) FROM chats) || ' ' || (SELECT COUNT(*) FROM messages)" \
+                2>/dev/null || echo "ERR")"
+            if [[ "$ROW_COUNTS" == "1 4" ]]; then
+                printf "  ${PASS_TAG}  %s\n" "X-Chimera-Chat-Id DB state (1 chat, 4 messages)"
+                pass=$((pass + 1))
+            else
+                printf "  ${FAIL_TAG}  %s (got '%s', expected '1 4')\n" \
+                    "X-Chimera-Chat-Id DB state" "$ROW_COUNTS"
+                fail=$((fail + 1))
+                failed_names+=("chat-id-header-db-state")
+            fi
+        fi
+
+        rm -f "$HDR_DB" "$HDR_DB-wal" "$HDR_DB-shm" "$HDR_LOG"
+    else
+        skip_test "X-Chimera-Chat-Id" "needs python3 + curl + sqlite3"
+    fi
 fi
 
 echo

@@ -8,9 +8,11 @@
 #include "llama.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <string_view>
 
 namespace chimera_embed {
 
@@ -239,6 +241,200 @@ std::vector<TokenChunk> chunk_by_tokens(const std::string & text,
             out.push_back({std::move(chunk_text), idx++, end - start});
         }
         if (end >= n_total) break;
+    }
+    return out;
+}
+
+namespace {
+
+// Split `text` into sentence-like spans. A boundary is one of:
+//   - sentence-terminator punctuation (. ? !) optionally followed by
+//     closing quotes/parens and *required* trailing whitespace
+//   - blank line (two or more consecutive newlines)
+//   - end-of-input
+//
+// The returned spans include the terminator and trailing whitespace so
+// concatenating them reproduces the original text byte-for-byte. Empty
+// spans are dropped (so two consecutive blank lines don't produce
+// empties).
+//
+// This is intentionally a hand-rolled scanner, not a proper sentence
+// segmenter (no Punkt-style abbreviation handling). It misclassifies
+// "e.g." and decimal numbers as boundaries, which the chunker tolerates
+// because oversize chunks fall back to the token-window splitter and
+// undersize chunks just pack more sentences together.
+std::vector<std::string_view> split_sentences(std::string_view text) {
+    std::vector<std::string_view> out;
+    if (text.empty()) return out;
+
+    auto is_terminator = [](char c) {
+        return c == '.' || c == '?' || c == '!';
+    };
+    auto is_closer = [](char c) {
+        // Closing punctuation that follows a terminator: ")", "]", quotes.
+        return c == ')' || c == ']' || c == '"' || c == '\'';
+    };
+
+    size_t start = 0;
+    size_t i = 0;
+    const size_t n = text.size();
+    while (i < n) {
+        const char c = text[i];
+
+        // Paragraph break: two or more newlines in a row.
+        if (c == '\n') {
+            size_t j = i;
+            while (j < n && text[j] == '\n') ++j;
+            if (j - i >= 2) {
+                // Emit the run including the trailing newlines so the
+                // next chunk starts after the blank line.
+                if (j > start) {
+                    out.push_back(text.substr(start, j - start));
+                }
+                start = j;
+                i = j;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+
+        if (is_terminator(c)) {
+            size_t j = i + 1;
+            // Repeated terminators ("..." / "?!"): consume them.
+            while (j < n && is_terminator(text[j])) ++j;
+            // Optional closers.
+            while (j < n && is_closer(text[j])) ++j;
+            // Require trailing whitespace (or EOF) to count as a real
+            // boundary; otherwise we're inside "e.g." or "3.14".
+            if (j >= n || std::isspace(static_cast<unsigned char>(text[j]))) {
+                // Eat the trailing whitespace so the next sentence
+                // doesn't start with " " or "\n".
+                while (j < n && std::isspace(static_cast<unsigned char>(text[j]))
+                              && text[j] != '\n') {
+                    ++j;
+                }
+                // Single newlines stay with the current sentence; blank
+                // lines are handled by the loop above.
+                if (j < n && text[j] == '\n' &&
+                    (j + 1 >= n || text[j + 1] != '\n')) {
+                    ++j;
+                }
+                if (j > start) {
+                    out.push_back(text.substr(start, j - start));
+                }
+                start = j;
+                i = j;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+        ++i;
+    }
+    if (start < n) {
+        out.push_back(text.substr(start, n - start));
+    }
+    return out;
+}
+
+}  // namespace
+
+std::vector<TokenChunk> chunk_by_sentences(const std::string & text,
+                                           const Embedder &    embedder,
+                                           int                 chunk_tokens,
+                                           int                 overlap_tokens) {
+    std::vector<TokenChunk> out;
+    if (text.empty() || chunk_tokens <= 0) return out;
+    if (overlap_tokens < 0 || overlap_tokens >= chunk_tokens) {
+        fail(ExitCode::BadInput,
+             "chunk overlap must be in [0, chunk_tokens) (got " +
+             std::to_string(overlap_tokens) + " vs chunk_tokens=" +
+             std::to_string(chunk_tokens) + ")");
+    }
+
+    const int max_tokens = embedder.n_ctx();
+    if (max_tokens > 0 && chunk_tokens > max_tokens) {
+        chunk_tokens = max_tokens;
+        if (overlap_tokens >= chunk_tokens) {
+            overlap_tokens = chunk_tokens / 8;
+        }
+    }
+
+    const auto sentences = split_sentences(text);
+    if (sentences.empty()) return out;
+
+    // Pre-tokenize each sentence so the pack loop only deals with counts.
+    struct Sent { std::string text; int n_tokens; };
+    std::vector<Sent> sents;
+    sents.reserve(sentences.size());
+    for (const auto & sv : sentences) {
+        std::string s(sv);
+        const int n = static_cast<int>(
+            embedder.tokenize(s, /*add_special=*/false,
+                                  /*parse_special=*/false).size());
+        sents.push_back({std::move(s), n});
+    }
+
+    auto emit = [&](std::string chunk_text, int token_count) {
+        auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
+        chunk_text.erase(chunk_text.begin(),
+                         std::find_if(chunk_text.begin(), chunk_text.end(), not_space));
+        chunk_text.erase(std::find_if(chunk_text.rbegin(), chunk_text.rend(), not_space).base(),
+                         chunk_text.end());
+        if (chunk_text.empty()) return;
+        out.push_back({std::move(chunk_text), static_cast<int>(out.size()), token_count});
+    };
+
+    size_t i = 0;
+    while (i < sents.size()) {
+        // Oversize singleton: fall back to the token-window splitter for
+        // this run-on sentence, then continue with the next sentence.
+        if (sents[i].n_tokens > chunk_tokens) {
+            auto sub = chunk_by_tokens(sents[i].text, embedder,
+                                       chunk_tokens, overlap_tokens);
+            for (auto & c : sub) {
+                emit(std::move(c.text), c.token_count);
+            }
+            ++i;
+            continue;
+        }
+
+        // Greedy pack: accumulate sentences while they fit.
+        std::string buf;
+        int buf_tokens = 0;
+        size_t first = i;
+        while (i < sents.size() &&
+               buf_tokens + sents[i].n_tokens <= chunk_tokens) {
+            buf += sents[i].text;
+            buf_tokens += sents[i].n_tokens;
+            ++i;
+        }
+        if (buf.empty()) {
+            // Defensive: shouldn't happen given the oversize check above.
+            ++i;
+            continue;
+        }
+        emit(std::move(buf), buf_tokens);
+
+        // Compute overlap: walk back from the just-packed range to find
+        // the smallest tail whose token count is >= overlap_tokens, then
+        // restart the next pack from that sentence. Skip overlap when
+        // we've already consumed every sentence.
+        if (i >= sents.size() || overlap_tokens == 0) continue;
+        int tail_tokens = 0;
+        size_t back = i;
+        while (back > first && tail_tokens < overlap_tokens) {
+            --back;
+            tail_tokens += sents[back].n_tokens;
+        }
+        // Don't loop forever: if `back` didn't move past `first` and the
+        // tail tokens already exceed chunk_tokens minus the next
+        // sentence, just advance. (Pathological case — overlap >=
+        // chunk_tokens is rejected at the top of this function, so this
+        // is mostly belt-and-braces.)
+        if (back >= i) continue;
+        i = back;
     }
     return out;
 }

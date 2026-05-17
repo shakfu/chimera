@@ -18,6 +18,7 @@
 
 #include "sqlite3.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <sstream>
@@ -91,6 +92,22 @@ Collection row_to_collection(sqlite3_stmt * stmt) {
 
 bool is_valid_distance(const std::string & d) {
     return d == "cosine" || d == "l2" || d == "l1";
+}
+
+std::optional<SearchMode> parse_search_mode(const std::string & s) {
+    if (s == "semantic") return SearchMode::Semantic;
+    if (s == "lexical")  return SearchMode::Lexical;
+    if (s == "hybrid")   return SearchMode::Hybrid;
+    return std::nullopt;
+}
+
+const char * search_mode_name(SearchMode m) {
+    switch (m) {
+        case SearchMode::Semantic: return "semantic";
+        case SearchMode::Lexical:  return "lexical";
+        case SearchMode::Hybrid:   return "hybrid";
+    }
+    return "?";
 }
 
 // =======================================================================
@@ -307,22 +324,23 @@ int64_t insert_document(sqlite3 * db, const Collection & col, const DocumentInpu
 // search
 // =======================================================================
 
-std::vector<Hit> search(sqlite3 *                   db,
-                        const Collection &          col,
-                        const std::vector<float> &  query_embedding,
-                        int                         k) {
+namespace {
+
+// Semantic KNN, used both directly by search() and as one leg of
+// hybrid_search(). Returns at most k hits, sorted by `distance` asc.
+std::vector<Hit> search_semantic(sqlite3 *                  db,
+                                 const Collection &         col,
+                                 const std::vector<float> & query_embedding,
+                                 int                        k) {
     if (static_cast<int>(query_embedding.size()) != col.dim) {
         fail(ExitCode::BadInput,
              "query embedding dim mismatch: collection '" + col.name + "' expects " +
              std::to_string(col.dim) + ", got " +
              std::to_string(query_embedding.size()));
     }
-    if (k <= 0) k = 5;
-
     // Join the vec0 KNN result back to `documents` for the user-visible
-    // text + provenance. sqlite-vec requires the k-bound to be a literal
-    // or come through the MATCH operator alongside the vector; we use a
-    // LIMIT clause which it interprets the same way.
+    // text + provenance. sqlite-vec requires the k-bound to come through
+    // the MATCH operator's `k = ?` filter.
     StmtGuard q;
     const std::string sql =
         "SELECT d.id, COALESCE(d.source_uri, ''), d.chunk_index, d.text, v.distance "
@@ -331,23 +349,212 @@ std::vector<Hit> search(sqlite3 *                   db,
         "WHERE v.embedding MATCH ? AND k = ? "
         "ORDER BY v.distance";
     if (sqlite3_prepare_v2(db, sql.c_str(), -1, q.out(), nullptr) != SQLITE_OK) {
-        sqlite_throw(db, "prepare(search)");
+        sqlite_throw(db, "prepare(search_semantic)");
     }
     bind_vector(q.get(), 1, query_embedding);
     sqlite3_bind_int(q.get(), 2, k);
 
     std::vector<Hit> hits;
     hits.reserve(static_cast<size_t>(k));
+    int rank = 0;
     while (sqlite3_step(q.get()) == SQLITE_ROW) {
         Hit h;
-        h.document_id  = sqlite3_column_int64(q.get(), 0);
-        h.source_uri   = reinterpret_cast<const char *>(sqlite3_column_text(q.get(), 1));
-        h.chunk_index  = sqlite3_column_int(q.get(), 2);
-        h.text         = reinterpret_cast<const char *>(sqlite3_column_text(q.get(), 3));
-        h.distance     = sqlite3_column_double(q.get(), 4);
+        h.document_id   = sqlite3_column_int64(q.get(), 0);
+        h.source_uri    = reinterpret_cast<const char *>(sqlite3_column_text(q.get(), 1));
+        h.chunk_index   = sqlite3_column_int  (q.get(), 2);
+        h.text          = reinterpret_cast<const char *>(sqlite3_column_text(q.get(), 3));
+        h.distance      = sqlite3_column_double(q.get(), 4);
+        h.semantic_rank = rank++;
         hits.push_back(std::move(h));
     }
     return hits;
+}
+
+// Lexical (FTS5) leg. Uses bm25() ranking via the implicit `rank`
+// virtual column. `query_text` is bound as a MATCH expression. FTS5
+// syntax errors throw — `search()` catches the throw and falls back to
+// a phrase-quoted form.
+//
+// Throws ChimeraError(Runtime) on FTS5 prepare/step failure; the
+// non-error empty-result path is just an empty vector.
+std::vector<Hit> search_lexical_raw(sqlite3 *           db,
+                                    const Collection &  col,
+                                    const std::string & query_text,
+                                    int                 k) {
+    StmtGuard q;
+    const char * sql =
+        "SELECT d.id, COALESCE(d.source_uri, ''), d.chunk_index, d.text, "
+        "       documents_fts.rank "
+        "FROM documents_fts "
+        "JOIN documents d ON d.id = documents_fts.rowid "
+        "WHERE documents_fts MATCH ? AND d.collection_id = ? "
+        "ORDER BY documents_fts.rank "
+        "LIMIT ?";
+    if (sqlite3_prepare_v2(db, sql, -1, q.out(), nullptr) != SQLITE_OK) {
+        sqlite_throw(db, "prepare(search_lexical)");
+    }
+    sqlite3_bind_text (q.get(), 1, query_text.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(q.get(), 2, col.id);
+    sqlite3_bind_int  (q.get(), 3, k);
+
+    std::vector<Hit> hits;
+    hits.reserve(static_cast<size_t>(k));
+    int rank_idx = 0;
+    int rc;
+    while ((rc = sqlite3_step(q.get())) == SQLITE_ROW) {
+        Hit h;
+        h.document_id  = sqlite3_column_int64(q.get(), 0);
+        h.source_uri   = reinterpret_cast<const char *>(sqlite3_column_text(q.get(), 1));
+        h.chunk_index  = sqlite3_column_int  (q.get(), 2);
+        h.text         = reinterpret_cast<const char *>(sqlite3_column_text(q.get(), 3));
+        // bm25() is reported as a negative double (lower = better) but
+        // we keep the relative order via `lexical_rank`; surface the raw
+        // value through `distance` for parity with the semantic leg so
+        // CLI/JSON output always has *something* numeric to show.
+        h.distance     = sqlite3_column_double(q.get(), 4);
+        h.lexical_rank = rank_idx++;
+        hits.push_back(std::move(h));
+    }
+    if (rc != SQLITE_DONE) {
+        fail(ExitCode::Runtime,
+             std::string("step(search_lexical): ") + sqlite3_errmsg(db));
+    }
+    return hits;
+}
+
+// FTS5 will throw on stray quotes / parens / special characters. Wrap
+// the prepare+step pair so the caller can retry with a phrase-quoted
+// form. Returns std::nullopt on syntax error; otherwise the hits.
+std::optional<std::vector<Hit>> try_search_lexical(sqlite3 *           db,
+                                                   const Collection &  col,
+                                                   const std::string & query_text,
+                                                   int                 k) {
+    try {
+        return search_lexical_raw(db, col, query_text, k);
+    } catch (const std::exception & e) {
+        const std::string msg = e.what();
+        if (msg.find("fts5") != std::string::npos ||
+            msg.find("syntax error") != std::string::npos ||
+            msg.find("no such column") != std::string::npos) {
+            return std::nullopt;
+        }
+        throw;
+    }
+}
+
+// FTS5-safe quoting: escape any embedded `"` by doubling it and wrap
+// the whole string in double quotes. This forces FTS5 to treat the
+// input as a literal phrase — punctuation, parens, and reserved words
+// inside are all neutralised.
+std::string fts5_phrase_quote(const std::string & s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('"');
+    for (char c : s) {
+        if (c == '"') out.push_back('"');  // double up internal quotes
+        out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+}
+
+std::vector<Hit> search_lexical(sqlite3 *           db,
+                                const Collection &  col,
+                                const std::string & query_text,
+                                int                 k) {
+    if (query_text.empty()) return {};
+    auto first = try_search_lexical(db, col, query_text, k);
+    if (first) return std::move(*first);
+    // FTS5 syntax error: fall back to phrase-quoted form. Don't catch
+    // a second failure — that would be a real bug.
+    return search_lexical_raw(db, col, fts5_phrase_quote(query_text), k);
+}
+
+// Reciprocal-rank fusion. Classic formulation:
+//   rrf_score(d) = Σ_i  1 / (k_rrf + rank_i(d))
+// with k_rrf = 60 (the value from the original RRF paper; values in
+// 10..100 work in practice and the exact choice is not load-bearing).
+//
+// We feed both legs with `k_internal = max(k_target, 30)` so neither
+// index starves the other before the merge.
+std::vector<Hit> rrf_merge(std::vector<Hit> semantic,
+                           std::vector<Hit> lexical,
+                           int              k_target) {
+    constexpr double K_RRF = 60.0;
+    // Index by document_id so we can union the two result sets without
+    // a quadratic scan. We keep the semantic-leg Hit as the canonical
+    // copy (it carries the cosine distance) and fold in lexical_rank.
+    std::vector<Hit> merged;
+    merged.reserve(semantic.size() + lexical.size());
+    auto find_by_id = [&](int64_t id) -> Hit * {
+        for (auto & h : merged) {
+            if (h.document_id == id) return &h;
+        }
+        return nullptr;
+    };
+    for (auto & s : semantic) {
+        s.rrf_score = 1.0 / (K_RRF + (s.semantic_rank + 1));
+        merged.push_back(std::move(s));
+    }
+    for (auto & l : lexical) {
+        if (Hit * existing = find_by_id(l.document_id)) {
+            existing->lexical_rank = l.lexical_rank;
+            existing->rrf_score   += 1.0 / (K_RRF + (l.lexical_rank + 1));
+        } else {
+            l.rrf_score = 1.0 / (K_RRF + (l.lexical_rank + 1));
+            merged.push_back(std::move(l));
+        }
+    }
+    std::sort(merged.begin(), merged.end(),
+              [](const Hit & a, const Hit & b) {
+                  return a.rrf_score > b.rrf_score;
+              });
+    if (k_target > 0 && static_cast<int>(merged.size()) > k_target) {
+        merged.resize(static_cast<size_t>(k_target));
+    }
+    return merged;
+}
+
+}  // namespace
+
+std::vector<Hit> search(sqlite3 *                   db,
+                        const Collection &          col,
+                        const std::vector<float> &  query_embedding,
+                        int                         k) {
+    return search(db, col, query_embedding, /*query_text=*/"", k,
+                  SearchMode::Semantic);
+}
+
+std::vector<Hit> search(sqlite3 *                   db,
+                        const Collection &          col,
+                        const std::vector<float> &  query_embedding,
+                        const std::string &         query_text,
+                        int                         k,
+                        SearchMode                  mode) {
+    if (k <= 0) k = 5;
+
+    switch (mode) {
+        case SearchMode::Semantic:
+            return search_semantic(db, col, query_embedding, k);
+        case SearchMode::Lexical:
+            if (query_text.empty()) {
+                fail(ExitCode::BadInput,
+                     "lexical search requires non-empty query text");
+            }
+            return search_lexical(db, col, query_text, k);
+        case SearchMode::Hybrid: {
+            if (query_text.empty() || query_embedding.empty()) {
+                fail(ExitCode::BadInput,
+                     "hybrid search requires both query text and embedding");
+            }
+            const int k_internal = std::max(k, 30);
+            auto sem = search_semantic(db, col, query_embedding, k_internal);
+            auto lex = search_lexical (db, col, query_text,      k_internal);
+            return rrf_merge(std::move(sem), std::move(lex), k);
+        }
+    }
+    // Unreachable; switch above is exhaustive over SearchMode.
+    return {};
 }
 
 }  // namespace chimera_vector_store

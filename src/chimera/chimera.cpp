@@ -1572,7 +1572,7 @@ int command_index_ingest(const std::string &              db_path,
     size_t total_chunks = 0;
     for (const auto & path : sources) {
         const std::string text = read_file(path);
-        const auto chunks = chimera_embed::chunk_by_tokens(
+        const auto chunks = chimera_embed::chunk_by_sentences(
             text, embedder, eff_chunk_tokens, eff_chunk_overlap);
         for (const auto & c : chunks) {
             auto vec = embedder.embed(c.text);
@@ -1657,10 +1657,19 @@ int command_search(const std::string & db_path,
                    int                 threads,
                    int                 gpu_layers,
                    const std::string & pooling,
-                   bool                cache_embeddings) {
+                   bool                cache_embeddings,
+                   const std::string & mode_str) {
     if (query.empty()) {
         fail(ExitCode::BadInput, "search requires -q/--query");
     }
+    auto mode_opt = chimera_vector_store::parse_search_mode(mode_str);
+    if (!mode_opt) {
+        fail(ExitCode::BadInput,
+             "invalid --mode '" + mode_str +
+             "' (expected: semantic | lexical | hybrid)");
+    }
+    const auto mode = *mode_opt;
+
     auto conn = chimera_db::open_and_migrate(
         db_path.empty() ? chimera_db::default_path() : db_path);
     auto col = chimera_vector_store::find(conn.get(), name);
@@ -1668,43 +1677,59 @@ int command_search(const std::string & db_path,
         fail(ExitCode::BadInput, "no such collection: '" + name + "'");
     }
 
-    chimera_embed::Config cfg;
-    cfg.model      = col->embedding_model;
-    cfg.pooling    = pooling;
-    cfg.threads    = threads;
-    cfg.gpu_layers = gpu_layers;
-    cfg.n_ctx      = static_cast<uint32_t>(ctx_size);
-    cfg.normalize  = true;
-    chimera_embed::Embedder embedder(cfg);
-    std::unique_ptr<chimera_embed_cache::Cache> ecache;
-    if (cache_embeddings) {
-        const std::string mid = chimera_embed_cache::compute_model_id(col->embedding_model);
-        if (mid.empty()) {
-            fail(ExitCode::BadInput,
-                 "--cache-embeddings: cannot fingerprint embedding model "
-                 "(unreadable file: " + col->embedding_model + ")");
+    // Lexical-only mode skips the embedding model load entirely — FTS5
+    // has no use for vectors, and a multi-100 MB GGUF load just to do a
+    // BM25 lookup would be perverse.
+    std::vector<float> qvec;
+    if (mode != chimera_vector_store::SearchMode::Lexical) {
+        chimera_embed::Config cfg;
+        cfg.model      = col->embedding_model;
+        cfg.pooling    = pooling;
+        cfg.threads    = threads;
+        cfg.gpu_layers = gpu_layers;
+        cfg.n_ctx      = static_cast<uint32_t>(ctx_size);
+        cfg.normalize  = true;
+        chimera_embed::Embedder embedder(cfg);
+        std::unique_ptr<chimera_embed_cache::Cache> ecache;
+        if (cache_embeddings) {
+            const std::string mid = chimera_embed_cache::compute_model_id(col->embedding_model);
+            if (mid.empty()) {
+                fail(ExitCode::BadInput,
+                     "--cache-embeddings: cannot fingerprint embedding model "
+                     "(unreadable file: " + col->embedding_model + ")");
+            }
+            ecache = std::make_unique<chimera_embed_cache::Cache>(
+                db_path.empty() ? chimera_db::default_path() : db_path, mid);
+            embedder.set_cache(ecache.get());
         }
-        ecache = std::make_unique<chimera_embed_cache::Cache>(
-            db_path.empty() ? chimera_db::default_path() : db_path, mid);
-        embedder.set_cache(ecache.get());
+        qvec = embedder.embed(query);
+        if (static_cast<int>(qvec.size()) != col->dim) {
+            fail(ExitCode::Runtime,
+                 "query embedding dim mismatch: collection expects " +
+                 std::to_string(col->dim) + ", model produced " +
+                 std::to_string(qvec.size()));
+        }
     }
-    auto qvec = embedder.embed(query);
-    if (static_cast<int>(qvec.size()) != col->dim) {
-        fail(ExitCode::Runtime,
-             "query embedding dim mismatch: collection expects " +
-             std::to_string(col->dim) + ", model produced " +
-             std::to_string(qvec.size()));
-    }
-    const auto hits = chimera_vector_store::search(conn.get(), *col, qvec, k);
+
+    const auto hits = chimera_vector_store::search(
+        conn.get(), *col, qvec, query, k, mode);
     if (hits.empty()) {
         std::cout << "(no hits)\n";
         return 0;
     }
     for (size_t i = 0; i < hits.size(); ++i) {
         const auto & h = hits[i];
-        std::cout << "#" << (i + 1)
-                  << "  distance=" << h.distance
-                  << "  " << h.source_uri
+        std::cout << "#" << (i + 1);
+        if (mode == chimera_vector_store::SearchMode::Hybrid) {
+            std::cout << "  rrf=" << h.rrf_score
+                      << "  sem=" << (h.semantic_rank >= 0
+                                      ? std::to_string(h.semantic_rank + 1) : "-")
+                      << "  lex=" << (h.lexical_rank  >= 0
+                                      ? std::to_string(h.lexical_rank + 1)  : "-");
+        } else {
+            std::cout << "  distance=" << h.distance;
+        }
+        std::cout << "  " << h.source_uri
                   << "  chunk=" << h.chunk_index
                   << "\n----\n" << h.text << "\n----\n\n";
     }
@@ -2371,6 +2396,9 @@ int main(int argc, char ** argv) {
         search_cmd->add_flag("--cache-embeddings", srch_cache_embeddings,
             "Memoize embed(query) -> vector in --db so repeated searches "
             "with the same query skip the model");
+        std::string srch_mode = "hybrid";
+        search_cmd->add_option("--mode", srch_mode,
+            "Retrieval mode: semantic | lexical | hybrid (default: hybrid)");
 
         app.parse(argc, argv);
 
@@ -2472,7 +2500,7 @@ int main(int argc, char ** argv) {
         } else if (*search_cmd) {
             rc = command_search(srch_db_path, srch_name, srch_query, srch_k,
                                  srch_ctx_size, srch_threads, srch_gpu_layers,
-                                 srch_pooling, srch_cache_embeddings);
+                                 srch_pooling, srch_cache_embeddings, srch_mode);
         }
 
         llama_backend_free();

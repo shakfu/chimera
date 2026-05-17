@@ -293,17 +293,37 @@ chimera index list                                    # collections + counts
 chimera index stats  -n notes
 chimera index drop   -n notes
 
-chimera search -n notes -q "how does X work" -k 5
+chimera search -n notes -q "how does X work" -k 5                    # hybrid (default)
+chimera search -n notes -q "how does X work" -k 5 --mode semantic    # vec0 KNN only
+chimera search -n notes -q "Eiffel"            -k 5 --mode lexical   # FTS5 BM25 only
+chimera search -n notes -q "Eiffel tower Paris" -k 5 --mode hybrid   # RRF fusion
 
 # Cache per-chunk + per-query embeddings in --db so re-runs skip the model:
 chimera index ingest -n notes -f doc.md --cache-embeddings
 chimera search       -n notes -q "..." --cache-embeddings
 ```
 
+Chunking is sentence-aware by default: text is split on sentence
+terminators and blank lines, then packed into `--chunk-tokens` budgets
+with `--chunk-overlap` tokens of context carried forward as
+whole-sentence tails. Oversize singleton sentences (run-ons,
+machine-generated text) fall back to a mid-stream token-window cut so
+ingestion never refuses input.
+
+Retrieval modes:
+
+- **`semantic`** — vec0 KNN on the embedding, using whatever distance
+  metric the collection was created with (default cosine). Best for
+  conceptual matches that don't share vocabulary with the corpus.
+- **`lexical`** — FTS5 BM25 over the chunk text. Best for exact
+  keyword / proper-noun lookups; skips loading the embedding model.
+- **`hybrid`** *(default)* — runs both, combines by reciprocal-rank
+  fusion (`Σ 1 / (60 + rank_i)`). Strictly improves recall over either
+  leg on typical English prose at the cost of one extra SELECT.
+
 Override the DB location: `--db <path>` on any subcommand, or set
-`$CHIMERA_DB` once. Tuning: `--chunk-chars` (default 2048), `--chunk-overlap`
-(default 256). The pooling defaults to `mean`; use `--pooling cls` for
-BERT-style models.
+`$CHIMERA_DB` once. The pooling defaults to `mean`; use `--pooling cls`
+for BERT-style models.
 
 ---
 

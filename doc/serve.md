@@ -114,9 +114,40 @@ chimera serve -m model.gguf --persist-chats
 When set, every `/v1/chat/completions` request (streaming and
 non-streaming alike) is saved to the same SQLite DB the CLI uses
 (`$CHIMERA_DB` or platform default; override with `--chat-db`).
-Each request creates one new chat row — multi-turn clients that
-resend the full conversation each request will produce multiple
-rows sharing content (the OpenAI API doesn't carry a chat id).
+
+By default, each request without an `X-Chimera-Chat-Id` header
+creates a new chat row, and the response echoes the new row's id
+back in `X-Chimera-Chat-Id`. Multi-turn clients should capture
+that id from the first response and send it back on subsequent
+requests in the same conversation:
+
+```
+$ curl -i -d '{"messages":[{"role":"user","content":"hi"}]}' \
+       http://127.0.0.1:8080/v1/chat/completions
+HTTP/1.1 200 OK
+X-Chimera-Chat-Id: 17
+...
+
+$ curl -i -H 'X-Chimera-Chat-Id: 17' \
+       -d '{"messages":[..., {"role":"user","content":"and another"}]}' \
+       http://127.0.0.1:8080/v1/chat/completions
+HTTP/1.1 200 OK
+X-Chimera-Chat-Id: 17
+```
+
+When the header is present and points to an existing chat, only
+the *last* message in the request body is appended (along with the
+new assistant reply); the prior turns are already on disk from
+earlier calls. This avoids the duplicate-row problem that arises
+when clients resend the full conversation.
+
+| Request shape                              | DB effect                                                                  | Response header                  |
+|--------------------------------------------|----------------------------------------------------------------------------|----------------------------------|
+| No `X-Chimera-Chat-Id`                     | New chats row; **all** request messages + assistant reply appended.        | `X-Chimera-Chat-Id: <new-id>`    |
+| `X-Chimera-Chat-Id: <existing-id>`         | **Only** the last request message + assistant reply appended.              | `X-Chimera-Chat-Id: <same-id>`   |
+| `X-Chimera-Chat-Id: <unknown-id>`          | None.                                                                       | HTTP 404; `inner` not invoked.   |
+| `X-Chimera-Chat-Id: <non-integer>`         | None.                                                                       | HTTP 400; `inner` not invoked.   |
+
 Use `chimera chat --list` and `chimera chat --search QUERY` from
 the CLI to browse them.
 
@@ -150,10 +181,10 @@ curl -s http://127.0.0.1:8080/v1/vector_stores/notes/files \
 curl -s http://127.0.0.1:8080/v1/vector_stores/notes/files \
   -F file=@notes.md
 
-# Search
+# Search (default mode = hybrid; pass "mode" to override)
 curl -s http://127.0.0.1:8080/v1/vector_stores/notes/search \
   -X POST -H 'Content-Type: application/json' \
-  -d '{"query": "how does X work?", "k": 5}'
+  -d '{"query": "how does X work?", "k": 5, "mode": "hybrid"}'
 
 # List and inspect
 curl -s http://127.0.0.1:8080/v1/vector_stores
@@ -235,7 +266,7 @@ Bound when `--enable-rag` is set:
 | GET  | `/v1/vector_stores/:name` | — | Stats for one collection. |
 | POST | `/v1/vector_stores/:name/delete` | — | Drop. POST because server-http doesn't expose DELETE. |
 | POST | `/v1/vector_stores/:name/files` | multipart / JSON | Ingest. multipart with `file=@...`, or JSON `{"text": "...", "source_uri": "..."}`. |
-| POST | `/v1/vector_stores/:name/search` | JSON | KNN. Body: `{"query": "...", "k": 5}`. |
+| POST | `/v1/vector_stores/:name/search` | JSON | Retrieve. Body: `{"query": "...", "k": 5, "mode": "hybrid"}`. `mode` is one of `semantic` (vec0 KNN), `lexical` (FTS5 BM25), or `hybrid` (RRF-merge of the two; default). Hybrid hits include `rrf_score`, `semantic_rank`, `lexical_rank`. |
 
 ### Request fields
 

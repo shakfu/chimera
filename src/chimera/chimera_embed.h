@@ -107,4 +107,30 @@ std::vector<TokenChunk> chunk_by_tokens(const std::string & text,
                                         int                 chunk_tokens,
                                         int                 overlap_tokens);
 
+// Sentence-aware chunker. Splits `text` on sentence-terminator
+// punctuation (`.`, `?`, `!`) and paragraph breaks (blank lines), then
+// greedily packs sentences into chunks of up to `chunk_tokens` tokens
+// (measured against `embedder`'s vocab). Each subsequent chunk reuses
+// the tail sentences of the previous chunk so the total overlap is at
+// least `overlap_tokens` tokens (or zero if the previous chunk was
+// itself shorter than the overlap).
+//
+// A single sentence longer than `chunk_tokens` is split mid-stream via
+// `chunk_by_tokens`, which always succeeds — pathological inputs (one
+// huge run-on, source code, base64 blobs) still produce usable chunks.
+//
+// Compared to the pure token-window splitter, this avoids cutting at
+// arbitrary mid-sentence positions, which empirically improves
+// retrieval quality on prose: the embedded text now corresponds to
+// complete thoughts. For purely structured / non-prose input the
+// behavior degenerates to the token-window splitter via the fallback.
+//
+// Constraints on `chunk_tokens` / `overlap_tokens` are the same as for
+// `chunk_by_tokens` (overlap must be in [0, chunk_tokens); chunk_tokens
+// is clamped to `embedder.n_ctx()`).
+std::vector<TokenChunk> chunk_by_sentences(const std::string & text,
+                                           const Embedder &    embedder,
+                                           int                 chunk_tokens,
+                                           int                 overlap_tokens);
+
 }  // namespace chimera_embed

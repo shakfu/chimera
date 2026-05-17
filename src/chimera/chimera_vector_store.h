@@ -46,7 +46,29 @@ struct Hit {
     int         chunk_index;
     std::string text;
     double      distance;           // smaller is closer (cosine distance)
+
+    // Populated by hybrid search; -1 means "this index did not surface
+    // this hit". Semantic and lexical ranks are 0-based; the fused
+    // score is reciprocal-rank-fusion (larger is better, in [0, 1]).
+    int         semantic_rank = -1;
+    int         lexical_rank  = -1;
+    double      rrf_score     = 0.0;
 };
+
+// Search mode passed to `search()`. The default at the API surface is
+// Hybrid: it is strictly better than Semantic on typical English text
+// (it adds keyword recall without losing semantic recall) and the cost
+// is one extra SELECT against the FTS5 index. Callers wanting the
+// pre-hybrid behavior pass Semantic explicitly.
+enum class SearchMode {
+    Semantic,   // vec0 cosine/l2/l1 KNN only.
+    Lexical,    // FTS5 over documents.text only.
+    Hybrid,     // reciprocal-rank fusion of the two.
+};
+
+// String <-> enum conversions for the CLI/API surface.
+std::optional<SearchMode> parse_search_mode(const std::string & s);
+const char *              search_mode_name(SearchMode m);
 
 // --- collection lifecycle ----------------------------------------------
 
@@ -95,9 +117,34 @@ int64_t insert_document(sqlite3 * db, const Collection & col, const DocumentInpu
 
 // Top-k nearest neighbors of `query_embedding` within `col`. Results are
 // sorted by `distance` ascending (closest first).
+//
+// Kept as the no-mode overload for callers (and tests) that only need
+// semantic KNN. Equivalent to `search(db, col, embedding, "", k,
+// SearchMode::Semantic)`.
 std::vector<Hit> search(sqlite3 *                   db,
                         const Collection &          col,
                         const std::vector<float> &  query_embedding,
                         int                         k);
+
+// Mode-aware search. `query_text` is required for SearchMode::Lexical
+// and SearchMode::Hybrid (used as the FTS5 MATCH expression);
+// `query_embedding` is required for SearchMode::Semantic and
+// SearchMode::Hybrid. Empty inputs for the unused side are tolerated.
+//
+// For Hybrid, both indexes are queried with `k_internal = max(k, 30)`
+// and merged by reciprocal-rank fusion (RRF score
+// `Σ 1 / (60 + rank_i)`). The returned vector is sorted by
+// `rrf_score` descending and truncated to k.
+//
+// FTS5 syntax errors in `query_text` (rare for prose, common for
+// user-typed query strings containing parens / quotes) are caught and
+// fall back to a phrase-quoted form ("\"<text>\"") so search still
+// returns results rather than HTTP 500.
+std::vector<Hit> search(sqlite3 *                   db,
+                        const Collection &          col,
+                        const std::vector<float> &  query_embedding,
+                        const std::string &         query_text,
+                        int                         k,
+                        SearchMode                  mode);
 
 }  // namespace chimera_vector_store

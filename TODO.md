@@ -57,20 +57,11 @@ Longer-term:
 
 Medium-term:
 
-- [ ] Smarter chunking (sentence-aware, semantic boundaries).
-- [ ] Hybrid search: combine FTS5 + sqlite-vec with reciprocal-rank
-      fusion or weighted scoring.
 - [ ] `chimera db backup` / `chimera db vacuum` subcommands. Backup
       must include the WAL + SHM siblings or use `VACUUM INTO`.
-- [ ] Save partial assistant turns on `Ctrl-C` in `chimera chat
-      --persist`, with a `partial=1` column on `messages` so resume
-      can mark them as incomplete.
 
 Longer-term:
 
-- [ ] `X-Chimera-Chat-Id` request header on `/v1/chat/completions` so
-      multi-turn clients can persist into one chat row instead of
-      duplicating per request.
 - [ ] Auto-reattach media on `chimera chat --resume`. Today
       `media_json` records the paths but resume doesn't reload them.
 - [ ] Streaming progress for `POST /v1/vector_stores/:name/files`

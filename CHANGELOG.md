@@ -6,6 +6,23 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Added
 
+- Sentence-aware chunking for `chimera index ingest` and the equivalent serve route. The previous fixed token-window splitter (with overlap measured in tokens) is replaced by `chimera_embed::chunk_by_sentences`: text is split on sentence terminators (`.`, `?`, `!`) and paragraph breaks (blank lines), then greedy-packed into chunks bounded by the collection's `chunk_tokens` budget. Overlap is carried as whole-sentence tails of the previous chunk re-prepended to the next. Pathological inputs (run-on sentences longer than the budget, source code, base64) fall back to `chunk_by_tokens` for the offending span, so ingestion never refuses input. Empirically this improves retrieval quality on prose because the embedded text now corresponds to complete thoughts rather than arbitrary mid-sentence cuts; for structured/non-prose input the behavior degenerates to the old splitter via the fallback.
+
+- Hybrid retrieval with reciprocal-rank fusion. New `documents_fts` virtual table (FTS5 over `documents.text`) is created in schema v5 and back-populated from existing rows via `INSERT INTO documents_fts(documents_fts) VALUES('rebuild')`; insert/delete/update triggers keep it in sync with `documents`. `chimera_vector_store::SearchMode` selects between three retrieval paths:
+  - `Semantic` — vec0 KNN on the collection's chosen distance metric (unchanged behavior).
+  - `Lexical` — FTS5 BM25 over the chunk text. Falls back to phrase-quoted form on FTS5 syntax errors (e.g. user-typed queries with stray parens or quotes) so search never returns HTTP 500 for input it could otherwise tolerate.
+  - `Hybrid` *(default)* — pulls top-`max(k, 30)` from each leg and merges by `rrf_score = Σ 1 / (60 + rank_i)`. Hits gain `semantic_rank`, `lexical_rank`, and `rrf_score` fields; output sorted by RRF score descending.
+
+  Surface area: `chimera search --mode {semantic|lexical|hybrid}` (default `hybrid`); `POST /v1/vector_stores/:name/search` body accepts `"mode"` with the same values and echoes the chosen mode on the response. Lexical-only mode short-circuits the embedding model load — a 100+ MB GGUF doesn't need to be paged in to do a BM25 lookup. The choice to make `hybrid` the default changes search results for existing collections; collections created before this release continue to work because the FTS5 table is rebuilt from existing rows during the v5 migration.
+
+- `X-Chimera-Chat-Id` request/response header on `/v1/chat/completions` for multi-turn server clients. Closes the gap where `--persist-chats` previously produced one chat row per request (because the OpenAI API has no chat id). Behavior:
+  - Request without the header: the wrapper creates a chats row *before* delegating to the inner handler so its id is known in time to be set on the streaming response. Response echoes `X-Chimera-Chat-Id: <new-id>`. All messages in the request plus the assistant reply are appended (unchanged).
+  - Request with `X-Chimera-Chat-Id: <existing-id>`: only the **last** message in the body plus the assistant reply are appended; prior turns are assumed to already be on disk from earlier calls. Response echoes the same id.
+  - Request with an unknown id: HTTP 404, inner handler not invoked.
+  - Request with a non-integer id: HTTP 400.
+
+  Header lookup is case-insensitive (HTTP semantics). Persistence still runs *after* the stream finishes, so a failed persist never breaks the user's request. New helpers in `chimera_serve.cpp`: `create_chat_row_for_request`, `chat_id_exists`, plus a case-insensitive header-map lookup.
+
 - Ctrl-C in `chimera chat --persist` now persists the in-flight assistant turn instead of discarding it. A SIGINT handler installed only for the duration of `chat_sample_loop` (RAII via `ChatSigintGuard`) flips an atomic that the per-token loop polls; on trip the loop exits early, the streamed content so far is written with a new `partial=1` flag, and the REPL prints `[interrupted — partial response saved]` before returning to the prompt. Handler is uninstalled outside generation so Ctrl-C at the prompt still goes to linenoise. POSIX uses `sigaction` without `SA_RESTART` (so blocked syscalls EINTR cleanly); Windows uses `std::signal`.
 
   Schema v4 adds `messages.partial INTEGER NOT NULL DEFAULT 0`; existing rows backfill to 0 (interpretation: every previously-persisted message was complete). `chimera_chat_store::append_message` takes an optional `partial` arg; `StoredMessage.partial` and `Chat.partial_count` (populated by `list_chats` via a correlated subquery) are exposed.
@@ -13,6 +30,15 @@ All notable changes to chimera will be documented in this file. Format is loosel
   Surfacing: `chimera chat --list` shows `(N interrupted)` next to chats containing partial turns; `chimera chat --resume <id>` includes the interrupted count in its banner.
 
 ### Changed
+
+- Schema v5: `documents_fts` virtual table added with content-table backing on `documents.id`, and three sync triggers (`documents_ai/ad/au`). Existing collections get a `rebuild` of the FTS5 index during migration so hybrid/lexical search works against previously-ingested documents without re-ingest.
+
+- Default retrieval mode flipped from semantic-only to hybrid. Pre-hybrid behavior is recoverable via `--mode semantic` (CLI) or `"mode": "semantic"` (HTTP). Justified because hybrid is a superset of semantic for prose: keyword recall is added (helping proper nouns and rare-term queries) without losing the conceptual matches that semantic-only delivered. Cost is one additional FTS5 SELECT per request.
+
+- `scripts/test.sh` end-to-end suite is now 32 tests (was 23). New coverage:
+  - Hybrid retrieval (4 tests): a small corpus with a deliberately rare proper-noun-like token asserts that `--mode lexical` surfaces it via BM25, `--mode hybrid` produces `rrf=`-annotated output, omitting `--mode` falls through to hybrid (default-mode regression guard), and `--mode <bogus>` exits with BadInput.
+  - `X-Chimera-Chat-Id` header (5 tests): spawns `serve --persist-chats` on a free port, asserts the response header on a no-header request, echo-id-reuse, unknown id → 404, malformed id → 400, and a final DB-state check (1 chats row + 4 messages rows after the four-case sequence — proving the unknown/malformed cases never invoked the inner handler).
+  - Skipped on CI containers without `python3` + `curl` + `sqlite3` (SKIP, not FAIL).
 
 - Privacy documentation for persistence features. New "Privacy / data on disk" section in `doc/serve.md` enumerating exactly what `serve --persist-chats` and `chat --persist` record (message content, reasoning spans, model path, token counts, timestamps, media paths; explicitly *not* client IPs, headers, API keys, or HTTP bodies), where the DB lives per platform, and how to wipe persisted state. A matching summary table in `doc/cheatsheet.md` covers all five write-to-disk surfaces (chat persist, serve persist-chats, RAG ingest, embedding cache, linenoise history). Closes the gap where opt-in persistence shipped without a user-facing privacy note.
 

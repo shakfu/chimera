@@ -259,11 +259,54 @@ constexpr const char * MIGRATION_V4 = R"SQL(
     ALTER TABLE messages ADD COLUMN partial INTEGER NOT NULL DEFAULT 0;
 )SQL";
 
+// v5: FTS5 mirror over `documents.text` to support lexical and hybrid
+// retrieval modes alongside the per-collection vec0 semantic index.
+// Same content='documents' / content_rowid='id' pattern used by
+// messages_fts, so the FTS5 storage is a side-index rather than a
+// duplicated copy of the text.
+//
+// `INSERT INTO documents_fts(documents_fts) VALUES('rebuild')` is the
+// FTS5 incantation for "ingest every row of the content table now".
+// Without this, collections that already had documents at v4 would
+// keep returning empty FTS5 results until the next ingest.
+//
+// The `collection_id` column is UNINDEXED so we don't waste index space
+// on it; it's only used as a filter at search time. `chunk_index` is
+// stored alongside so callers don't need to re-join `documents` if all
+// they want is provenance metadata.
+constexpr const char * MIGRATION_V5 = R"SQL(
+    CREATE VIRTUAL TABLE documents_fts USING fts5(
+        text,
+        collection_id UNINDEXED,
+        chunk_index   UNINDEXED,
+        content=documents,
+        content_rowid=id
+    );
+
+    CREATE TRIGGER documents_ai AFTER INSERT ON documents BEGIN
+        INSERT INTO documents_fts(rowid, text, collection_id, chunk_index)
+        VALUES (new.id, new.text, new.collection_id, new.chunk_index);
+    END;
+    CREATE TRIGGER documents_ad AFTER DELETE ON documents BEGIN
+        INSERT INTO documents_fts(documents_fts, rowid, text, collection_id, chunk_index)
+        VALUES ('delete', old.id, old.text, old.collection_id, old.chunk_index);
+    END;
+    CREATE TRIGGER documents_au AFTER UPDATE ON documents BEGIN
+        INSERT INTO documents_fts(documents_fts, rowid, text, collection_id, chunk_index)
+        VALUES ('delete', old.id, old.text, old.collection_id, old.chunk_index);
+        INSERT INTO documents_fts(rowid, text, collection_id, chunk_index)
+        VALUES (new.id, new.text, new.collection_id, new.chunk_index);
+    END;
+
+    INSERT INTO documents_fts(documents_fts) VALUES('rebuild');
+)SQL";
+
 constexpr Migration MIGRATIONS[] = {
     { 1, "initial chat + collection schema",       MIGRATION_V1 },
     { 2, "add embedding_cache table",              MIGRATION_V2 },
     { 3, "per-collection distance + chunk knobs",  MIGRATION_V3 },
     { 4, "add partial flag to messages",           MIGRATION_V4 },
+    { 5, "FTS5 over documents for hybrid search",  MIGRATION_V5 },
 };
 
 constexpr int kLatest = sizeof(MIGRATIONS) / sizeof(MIGRATIONS[0]);
