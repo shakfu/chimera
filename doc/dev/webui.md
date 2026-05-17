@@ -232,17 +232,89 @@ patching `server-http.cpp`.
 
 ### 5.5. The webui hits a few endpoints chimera *doesn't* expose
 
-The UI was designed against the full `llama-server` route surface.
-chimera deliberately omits some of those (`POST /completion` legacy
-shape, `POST /props` mutation, etc. — see the comment block at the top
-of `chimera_serve.cpp`). The UI degrades gracefully (the unused features
-just don't appear or show errors in the console) but if a user reports
-"feature X is broken in chimera's webui," the answer is often "that
-feature relies on a route chimera doesn't bind by design." Before
-binding the missing route in response, re-read the "deliberately not
-exposed" list — most of those omissions were reasoned through.
+The UI was designed against the full `llama-server` route surface;
+chimera exposes a curated subset. The actual API surface the webui
+talks to is small — sourced from
+`tools/server/webui/src/lib/constants/api-endpoints.ts` plus a grep
+of `fetch()` call sites in `src/lib/services/*.ts`:
 
-### 5.6. cmake configure cache vs. asset regeneration
+| Endpoint                            | Method      | Used by                          | Chimera? |
+|-------------------------------------|-------------|----------------------------------|----------|
+| `./v1/chat/completions`             | POST        | chat (streamed + non-streamed)   | ✓ bound  |
+| `./v1/models`                       | GET         | model picker / model info        | ✓ bound  |
+| `./props`                           | GET         | server capability detection      | ✓ bound (GET only — `POST /props` for runtime mutation is wontfix per `chimera_serve.cpp` top-of-file list) |
+| `./slots` (+ optional `?model=`)    | GET         | slot status panel                | ✓ bound  |
+| `/models/load`                      | POST        | router-mode model switch         | ✗ — chimera is single-model by design (wontfix) |
+| `/models/unload`                    | POST        | router-mode model switch         | ✗ — same |
+| `/tools`                            | GET + POST  | built-in tool plugins panel      | ✗ — upstream `--server-tools` is EXPERIMENTAL; not exposed |
+| `/cors-proxy`                       | proxy       | webui's MCP client               | ✗ — upstream `--webui-mcp-proxy` is EXPERIMENTAL; not exposed |
+
+**Net effect.** Core chat works: send messages, get streamed responses,
+see the loaded model, inspect slot status. Three feature areas degrade:
+
+1. **Model switcher / "load this model" panel.** No-op in chimera — one
+   process, one model. The UI may show an empty list or an error toast;
+   nothing else breaks. The "list" half (`/v1/models`) does work and
+   reports the single loaded model.
+2. **MCP (Model Context Protocol) integration.** The webui can talk to
+   external MCP servers, but only when chimera proxies cross-origin
+   requests via `/cors-proxy`. Since chimera doesn't expose that route,
+   MCP either works only against same-origin servers (rare) or fails
+   outright. Pyodide (Python-in-browser, which is client-side only) is
+   unaffected.
+3. **Built-in tool plugins panel.** The webui's tool-plugin UI talks to
+   `/tools`. That endpoint isn't bound. Note: tool *calling* — the
+   model emitting tool-use blocks inside chat completions — still works
+   because the parsing lives in `/v1/chat/completions` server-side. The
+   missing route is only for the panel that *configures* tools.
+
+Before binding any of the missing routes in response to a user
+complaint, re-read the "deliberately not exposed" list at the top of
+`chimera_serve.cpp` — most of those omissions were reasoned through
+(`POST /completion` legacy shape, `POST /props` mutation, router-mode,
+the experimental tools + MCP plugins). Adding them piecemeal in
+response to "the UI panel is empty" reports is how chimera's busybox
+identity gets diluted.
+
+### 5.6. What chimera exposes that the webui doesn't surface
+
+The mirror-image gap: chimera binds several routes the upstream webui
+has no UI for. They still work over HTTP for code clients; the chat
+UI just doesn't know about them.
+
+- **`/v1/messages` and `/v1/messages/count_tokens`** (Anthropic Messages
+  API compat) — the webui speaks OpenAI shape only. Clients pointed at
+  these routes directly (the Anthropic Python SDK, `claude-code`-shaped
+  tools) work fine; the webui simply doesn't expose them as an option.
+- **`/v1/vector_stores/*`** (RAG / vector store routes, when
+  `--enable-rag` is set) — no UI surface at all. Users have to drive
+  ingest + search via the CLI (`chimera index`, `chimera search`) or
+  raw HTTP.
+- **`X-Chimera-Chat-Id` header** (chat persistence consolidation, when
+  `--persist-chats` is set) — the webui doesn't send it, so each
+  message produces a new chats row instead of being grouped into one
+  conversation. The DB still records everything; it just doesn't get
+  the multi-turn consolidation the header was designed for. Worth
+  knowing before promising "persisted chat history" in the same
+  breath as "the webui works."
+- **`/v1/audio/{transcriptions,translations}`** (when `--enable-audio`)
+  — no UI.
+- **`/v1/images/{generations,edits,variations}`** (when
+  `--enable-image`) — no UI.
+- **`/v1/rerank`** (when `--reranking`) — no UI.
+- **`/v1/embeddings`** when chimera was started with `--enable-embeddings`
+  routing to a dedicated embedding model — the webui has no embedding
+  UI.
+- **`/lora-adapters` POST** for hot-swap — no UI (the webui doesn't know
+  about LoRAs in chimera's loaded-at-startup-then-rescaled shape).
+
+This is the §6.1 argument in concrete form: making the chimera-specific
+surface usable from a browser is **only** tractable under Variant B
+(separate-bundle, `--public-path`), where we can ship a UI that knows
+about these routes. Variant A pins us to upstream's pinned UI which by
+definition only knows about upstream's routes.
+
+### 5.7. cmake configure cache vs. asset regeneration
 
 `add_custom_command(OUTPUT <asset>.hpp DEPENDS <asset> ...)` is what
 triggers re-xxd when the asset content changes. If `make deps` re-stages
@@ -252,7 +324,7 @@ been observed to go stale, but if you see the bundle.js in the binary
 not matching the bundle.js on disk after a llama.cpp bump, suspect this
 mechanism and `rm -rf build/src/chimera/*.hpp` to force.
 
-### 5.7. Asset size and download timing
+### 5.8. Asset size and download timing
 
 `bundle.js` is ~6.6 MB uncompressed. cpp-httplib serves it
 uncompressed (no gzip). On a slow network the first page load is
