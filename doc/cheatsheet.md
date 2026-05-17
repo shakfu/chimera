@@ -71,6 +71,12 @@ Slash commands inside the REPL:
 
 History persists at `$CHIMERA_HISTORY` or `~/.chimera_chat_history`.
 
+`--persist` saves message content, reasoning spans (when emitted),
+attached-media paths, token counts, model path, and timestamps to a
+local SQLite DB (see [Privacy / data on disk](#privacy--data-on-disk)).
+Ctrl-C mid-generation stores the partial turn with a `partial=1` flag;
+`--list` shows `(N interrupted)` next to affected chats.
+
 ---
 
 ## tokenize — vocab debugging
@@ -340,6 +346,38 @@ sqlite + sqlite-vec versions. Useful for bug reports.
 | Variable           | Effect |
 |--------------------|--------|
 | `CHIMERA_HISTORY`  | Where `chat` reads/writes its readline history. Defaults to `~/.chimera_chat_history`. |
+| `CHIMERA_DB`       | Path to the SQLite DB used by `--persist`, `--persist-chats`, `index`, `search`, and `--cache-embeddings`. Defaults to the platform XDG path (see below). |
+| `XDG_DATA_HOME`    | On Linux (and honored cross-platform when set), the DB lives at `$XDG_DATA_HOME/chimera/chimera.db`. |
+
+---
+
+## Privacy / data on disk
+
+All write-to-disk features are **opt-in**. Without persistence flags
+chimera runs purely in memory.
+
+| Flag                              | Writes to                            | Records                                                                                  |
+|-----------------------------------|--------------------------------------|------------------------------------------------------------------------------------------|
+| `chat --persist`                  | SQLite DB (chats + messages)         | Verbatim message content, reasoning spans, model path, token counts, timestamps, paths of any attached `/image` / `/audio` (bytes are not copied), `source='chat'`. Ctrl-C mid-generation saves the partial turn with `partial=1`. |
+| `serve --persist-chats`           | SQLite DB (chats + messages)         | Same shape as above with `source='serve'`. One row per `/v1/chat/completions` request — the OpenAI API has no chat id, so multi-turn clients produce multiple rows sharing content. |
+| `index ingest` / `serve --enable-rag` | SQLite DB (collections + documents + per-collection `vec0_*`) | Ingested text (chunked), source URIs, embedding vectors. |
+| `embed --cache-embeddings`        | SQLite DB (`embedding_cache`)        | SHA-256 of input text plus its embedding vector (raw float32). |
+| Linenoise input history           | `$CHIMERA_HISTORY` or `~/.chimera_chat_history` | Every line you type at the `chat` prompt across all sessions. |
+
+Default DB path:
+- macOS: `~/Library/Application Support/chimera/chimera.db`
+- Linux: `$XDG_DATA_HOME/chimera/chimera.db` or `~/.local/share/chimera/chimera.db`
+- Windows: `%LOCALAPPDATA%\chimera\chimera.db`
+
+`chimera serve` never persists request headers, client IPs, API keys,
+or raw HTTP bodies. Nothing leaves the machine — all storage is local.
+
+To wipe persisted chats: `sqlite3 chimera.db "DELETE FROM chats;
+DELETE FROM messages;"` (FTS5 triggers cascade). To wipe everything:
+remove `chimera.db`, `chimera.db-wal`, and `chimera.db-shm` together.
+
+See [`serve.md`](serve.md#privacy--data-on-disk) for the full table
+of columns and additional notes.
 
 ---
 

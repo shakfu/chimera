@@ -12,6 +12,7 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <csignal>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -250,6 +251,47 @@ void decode_tokens(llama_context * ctx, const std::vector<llama_token> & tokens,
     }
 }
 
+// Set by the SIGINT handler installed around chat_sample_loop. Polled
+// each token so Ctrl-C aborts generation promptly; the caller persists
+// whatever content streamed before the break with partial=1.
+std::atomic<bool> g_chat_interrupt_requested{false};
+
+extern "C" void chat_sigint_handler(int) {
+    g_chat_interrupt_requested.store(true, std::memory_order_relaxed);
+}
+
+// RAII guard: install chat_sigint_handler for SIGINT on construction,
+// restore the previous disposition on destruction. Also clears the
+// interrupt flag on construction so a stale signal doesn't carry over.
+struct ChatSigintGuard {
+#ifndef _WIN32
+    struct sigaction prev{};
+    bool installed = false;
+    ChatSigintGuard() {
+        g_chat_interrupt_requested.store(false, std::memory_order_relaxed);
+        struct sigaction sa{};
+        sa.sa_handler = chat_sigint_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;  // no SA_RESTART; we want syscalls to EINTR
+        installed = (sigaction(SIGINT, &sa, &prev) == 0);
+    }
+    ~ChatSigintGuard() {
+        if (installed) sigaction(SIGINT, &prev, nullptr);
+    }
+#else
+    void (*prev)(int) = nullptr;
+    bool installed = false;
+    ChatSigintGuard() {
+        g_chat_interrupt_requested.store(false, std::memory_order_relaxed);
+        prev = std::signal(SIGINT, chat_sigint_handler);
+        installed = (prev != SIG_ERR);
+    }
+    ~ChatSigintGuard() {
+        if (installed) std::signal(SIGINT, prev);
+    }
+#endif
+};
+
 // Sample a chat reply, routing reasoning content (e.g. text inside
 // <think>...</think>) through Sem::Think. Each new token is appended to
 // the raw accumulator and the running text is re-parsed with
@@ -258,6 +300,11 @@ void decode_tokens(llama_context * ctx, const std::vector<llama_token> & tokens,
 // deltas. Returns the *content* portion of the reply (without reasoning),
 // which is what we want to store in chat history — the next turn's
 // templating shouldn't reinject the model's prior thinking.
+//
+// If *out_interrupted is non-null and SIGINT fires during the loop, the
+// loop exits early and *out_interrupted is set to true. Whatever content
+// was streamed up to that point is still returned (caller persists it
+// with partial=1).
 std::string chat_sample_loop(
     llama_context * ctx,
     common_sampler * sampler,
@@ -265,13 +312,18 @@ std::string chat_sample_loop(
     int n_predict,
     const common_chat_parser_params & parser_params,
     std::vector<llama_token> * out_tokens,
-    std::string * out_reasoning = nullptr) {
+    std::string * out_reasoning = nullptr,
+    bool * out_interrupted = nullptr) {
 
     std::string raw;
     std::string content;
     common_chat_msg prev;
 
     for (int i = 0; i < n_predict; ++i) {
+        if (g_chat_interrupt_requested.load(std::memory_order_relaxed)) {
+            if (out_interrupted) *out_interrupted = true;
+            break;
+        }
         const llama_token token = common_sampler_sample(sampler, ctx, -1, false);
         if (token == LLAMA_TOKEN_NULL || llama_vocab_is_eog(vocab, token)) {
             break;
@@ -842,12 +894,18 @@ int command_chat(const LlamaCommonOptions & opts,
         // Replace any system-prompt we seeded above with whatever the
         // resumed chat actually carries. Then append the rest in order.
         history.clear();
+        size_t partial_count = 0;
         for (const auto & m : stored) {
             history.push_back(make_chat_msg(m.role, m.content));
+            if (m.partial) ++partial_count;
         }
         std::cout << Sem::Info << "resumed chat #" << chat_id
                   << " (" << stored.size() << " messages, model "
-                  << existing->model_alias << ")" << Sem::Reset << "\n";
+                  << existing->model_alias;
+        if (partial_count > 0) {
+            std::cout << ", " << partial_count << " interrupted";
+        }
+        std::cout << ")" << Sem::Reset << "\n";
     } else if (persist_cfg.persist) {
         chat_id = chimera_chat_store::create_chat(
             chat_conn.get(), opts.model, chat_model_alias, system_prompt,
@@ -1141,6 +1199,7 @@ int command_chat(const LlamaCommonOptions & opts,
         std::vector<llama_token> generated;
         std::string reply;
         std::string reply_reasoning;   // populated when the model emits <think>...</think>
+        bool reply_interrupted = false;
         size_t n_prompt = 0;
         double t_prompt = 0.0;
         double t_gen    = 0.0;
@@ -1191,9 +1250,12 @@ int command_chat(const LlamaCommonOptions & opts,
                 continue;
             }
             const auto t1 = clock::now();
-            reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
-                                     opts.n_predict, parser_params, &generated,
-                                     &reply_reasoning);
+            {
+                ChatSigintGuard sigint_guard;
+                reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
+                                         opts.n_predict, parser_params, &generated,
+                                         &reply_reasoning, &reply_interrupted);
+            }
             t_gen = secs(clock::now() - t1);
         } else {
             // Text-only fast path: KV-prefix reuse via token comparison.
@@ -1220,9 +1282,12 @@ int command_chat(const LlamaCommonOptions & opts,
             n_prompt = tail.size();
             for (llama_token tok : tail) common_sampler_accept(sampler.get(), tok, false);
             const auto t1 = clock::now();
-            reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
-                                     opts.n_predict, parser_params, &generated,
-                                     &reply_reasoning);
+            {
+                ChatSigintGuard sigint_guard;
+                reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
+                                         opts.n_predict, parser_params, &generated,
+                                         &reply_reasoning, &reply_interrupted);
+            }
             t_gen = secs(clock::now() - t1);
             kv_tokens = full_tokens;
             kv_tokens.insert(kv_tokens.end(), generated.begin(), generated.end());
@@ -1237,13 +1302,23 @@ int command_chat(const LlamaCommonOptions & opts,
             std::cout << Sem::Stats << buf << Sem::Reset << "\n";
         }
 
+        if (reply_interrupted) {
+            // chat_sample_loop returns with the SGR state mid-stream; emit
+            // a newline and a reset so the [interrupted] notice renders on
+            // its own line in default colors.
+            std::cout << "\n" << Sem::Info
+                      << "[interrupted — partial response "
+                      << (chat_id ? "saved" : "kept in-memory only")
+                      << "]" << Sem::Reset << "\n";
+        }
         history.push_back(make_chat_msg("assistant", reply));
         if (chat_id) {
             chimera_chat_store::append_message(
                 chat_conn.get(), chat_id, "assistant", reply,
                 reply_reasoning, /*media_json=*/"",
                 static_cast<int>(n_prompt),
-                static_cast<int>(generated.size()));
+                static_cast<int>(generated.size()),
+                /*partial=*/reply_interrupted);
         }
     }
 
@@ -1649,8 +1724,11 @@ int command_chat_list(const std::string & db_path, int limit) {
     std::cout << "saved chats:\n";
     for (const auto & c : chats) {
         std::cout << "  #" << c.id
-                  << "  " << c.message_count << " msgs"
-                  << "  model=" << c.model_alias
+                  << "  " << c.message_count << " msgs";
+        if (c.partial_count > 0) {
+            std::cout << " (" << c.partial_count << " interrupted)";
+        }
+        std::cout << "  model=" << c.model_alias
                   << "  updated_at=" << c.updated_at;
         if (!c.title.empty()) std::cout << "  title=\"" << c.title << "\"";
         std::cout << "\n";

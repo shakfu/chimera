@@ -120,6 +120,9 @@ rows sharing content (the OpenAI API doesn't carry a chat id).
 Use `chimera chat --list` and `chimera chat --search QUERY` from
 the CLI to browse them.
 
+See [Privacy / data on disk](#privacy--data-on-disk) for exactly
+what is recorded.
+
 ### Vector store / RAG
 
 ```
@@ -392,3 +395,85 @@ second `Ctrl-C` force-exits — useful if a request is hung.
   one whisper + one SD) per process.
 
 See the changelog for the full per-phase list.
+
+---
+
+## Privacy / data on disk
+
+chimera is local-only — nothing leaves the machine — but it does
+write to disk when persistence features are enabled, and it's worth
+knowing exactly what.
+
+### What `--persist-chats` records
+
+When `chimera serve --persist-chats` is set, every
+`/v1/chat/completions` request triggers a write to the SQLite DB:
+
+| Stored                                     | Notes                                                              |
+|--------------------------------------------|--------------------------------------------------------------------|
+| Full message content (all roles)           | The verbatim `messages[]` array sent by the client, including any system prompt, plus the assistant's reply. |
+| `reasoning_content` (when the model emits it) | The `<think>...</think>` span, stored in a separate column.        |
+| Model path + alias                         | The local path passed via `-m` and its basename.                   |
+| Token counts (prompt + generated)          | Integers; no token IDs.                                            |
+| Timestamps                                 | `created_at` / `updated_at` (unix seconds, machine local).         |
+| `source = 'serve'`                         | So you can tell CLI-saved chats apart from server-saved ones.      |
+
+What is **not** stored: client IP, request headers, API key, raw HTTP
+body, image bytes (only paths are recorded by the CLI path when you
+attach media; `serve` does not record image_url parts as files). FTS5
+content lives in the `messages_fts` virtual table — a searchable
+mirror of the same text, not an additional copy.
+
+### What `chat --persist` records
+
+The CLI variant stores the same shape as `--persist-chats`, plus:
+
+- For `/image` and `/audio` attachments: the **filesystem paths** of
+  attached media are serialized into `media_json`. The bytes themselves
+  are not copied into the DB; if you later move or delete the file,
+  resume won't be able to reconstruct it (and today's `--resume` does
+  not re-attach media regardless).
+- `source = 'chat'`.
+
+If `chat --persist` is interrupted with Ctrl-C mid-generation, the
+partial assistant turn is saved with `partial = 1`. `chat --list`
+shows a `(N interrupted)` count next to affected chats; `chat --resume`
+prints how many interrupted turns it found.
+
+### Where the DB lives
+
+Resolution order:
+
+1. Explicit `--db / --chat-db / --rag-db` flag (per-subcommand).
+2. `$CHIMERA_DB` environment variable.
+3. Platform default:
+   - macOS: `~/Library/Application Support/chimera/chimera.db`
+   - Linux: `$XDG_DATA_HOME/chimera/chimera.db` or `~/.local/share/chimera/chimera.db`
+   - Windows: `%LOCALAPPDATA%\chimera\chimera.db`
+
+The file is created on first use with default user-owned permissions
+(typically `0644` on Unix). WAL mode is enabled, so siblings
+`chimera.db-wal` and `chimera.db-shm` live next to it.
+
+### Turning it off / wiping it
+
+- All persistence is **opt-in**. `chimera serve` without `--persist-chats`
+  writes nothing chat-related; `chimera chat` without `--persist` runs
+  fully in memory.
+- The vector store (`--enable-rag`, `chimera index`) uses the same DB
+  file but a disjoint set of tables — disabling RAG flags is enough to
+  stop further writes to those tables.
+- To wipe persisted chats only:
+  `sqlite3 <path-to>/chimera.db "DELETE FROM chats; DELETE FROM messages;"`
+  (FTS5 triggers cascade the delete.) Or just remove the whole `.db`,
+  `.db-wal`, and `.db-shm` triple to reset.
+- The embedding cache (`embed --cache-embeddings`) is also stored in
+  the same DB; clear it with `DELETE FROM embedding_cache;`.
+
+### Linenoise history
+
+Independent of the SQLite DB, `chimera chat` writes a plain-text
+readline history to `$CHIMERA_HISTORY` (default
+`~/.chimera_chat_history`). This file contains every line you've typed
+at the prompt across every chat session. Set `CHIMERA_HISTORY=/dev/null`
+to disable, or just delete the file to clear it.

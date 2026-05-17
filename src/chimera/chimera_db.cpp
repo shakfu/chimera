@@ -249,10 +249,21 @@ constexpr const char * MIGRATION_V3 = R"SQL(
     ALTER TABLE collections ADD COLUMN chunk_overlap INTEGER NOT NULL DEFAULT 64;
 )SQL";
 
+// v4: add `partial` flag to messages. Set to 1 when an assistant turn was
+// persisted mid-generation (Ctrl-C in `chimera chat --persist`) so resume
+// and list paths can render an "[interrupted]" marker and downstream
+// templating can decide whether to re-prompt. Defaults to 0 for all
+// existing rows, which preserves the prior interpretation (every persisted
+// message was complete).
+constexpr const char * MIGRATION_V4 = R"SQL(
+    ALTER TABLE messages ADD COLUMN partial INTEGER NOT NULL DEFAULT 0;
+)SQL";
+
 constexpr Migration MIGRATIONS[] = {
     { 1, "initial chat + collection schema",       MIGRATION_V1 },
     { 2, "add embedding_cache table",              MIGRATION_V2 },
     { 3, "per-collection distance + chunk knobs",  MIGRATION_V3 },
+    { 4, "add partial flag to messages",           MIGRATION_V4 },
 };
 
 constexpr int kLatest = sizeof(MIGRATIONS) / sizeof(MIGRATIONS[0]);

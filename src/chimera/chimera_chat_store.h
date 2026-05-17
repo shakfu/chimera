@@ -25,6 +25,7 @@ struct Chat {
     std::string source;          // 'chat' | 'serve'
     std::string metadata_json;
     int64_t     message_count;   // populated by list_chats()
+    int64_t     partial_count;   // populated by list_chats(); >0 if any interrupted turns
 };
 
 struct StoredMessage {
@@ -38,6 +39,7 @@ struct StoredMessage {
     int         tokens_in;
     int         tokens_out;
     int64_t     created_at;
+    bool        partial;         // true if persisted mid-generation (interrupted)
 };
 
 struct SearchHit {
@@ -88,7 +90,8 @@ int64_t append_message(sqlite3 *           db,
                        const std::string & reasoning   = "",
                        const std::string & media_json  = "",
                        int                 tokens_in   = 0,
-                       int                 tokens_out  = 0);
+                       int                 tokens_out  = 0,
+                       bool                partial     = false);
 
 // Drop the last message in a chat (largest seq). Used by --resume +
 // /regen on a persistent session, and for cleanup paths.

@@ -4,6 +4,18 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Added
+
+- Ctrl-C in `chimera chat --persist` now persists the in-flight assistant turn instead of discarding it. A SIGINT handler installed only for the duration of `chat_sample_loop` (RAII via `ChatSigintGuard`) flips an atomic that the per-token loop polls; on trip the loop exits early, the streamed content so far is written with a new `partial=1` flag, and the REPL prints `[interrupted — partial response saved]` before returning to the prompt. Handler is uninstalled outside generation so Ctrl-C at the prompt still goes to linenoise. POSIX uses `sigaction` without `SA_RESTART` (so blocked syscalls EINTR cleanly); Windows uses `std::signal`.
+
+  Schema v4 adds `messages.partial INTEGER NOT NULL DEFAULT 0`; existing rows backfill to 0 (interpretation: every previously-persisted message was complete). `chimera_chat_store::append_message` takes an optional `partial` arg; `StoredMessage.partial` and `Chat.partial_count` (populated by `list_chats` via a correlated subquery) are exposed.
+
+  Surfacing: `chimera chat --list` shows `(N interrupted)` next to chats containing partial turns; `chimera chat --resume <id>` includes the interrupted count in its banner.
+
+### Changed
+
+- Privacy documentation for persistence features. New "Privacy / data on disk" section in `doc/serve.md` enumerating exactly what `serve --persist-chats` and `chat --persist` record (message content, reasoning spans, model path, token counts, timestamps, media paths; explicitly *not* client IPs, headers, API keys, or HTTP bodies), where the DB lives per platform, and how to wipe persisted state. A matching summary table in `doc/cheatsheet.md` covers all five write-to-disk surfaces (chat persist, serve persist-chats, RAG ingest, embedding cache, linenoise history). Closes the gap where opt-in persistence shipped without a user-facing privacy note.
+
 ## [0.1.3]
 
 ### Added

@@ -51,6 +51,7 @@ Chat row_to_chat(sqlite3_stmt * stmt) {
     c.source        = col_text(stmt, 7);
     c.metadata_json = col_text(stmt, 8);
     c.message_count = 0;  // filled by list_chats() via correlated subquery
+    c.partial_count = 0;  // ditto
     return c;
 }
 
@@ -128,7 +129,9 @@ std::vector<Chat> list_chats(sqlite3 * db, int limit) {
         "       c.model_path, COALESCE(c.model_alias,''), "
         "       COALESCE(c.system_prompt,''), c.source, "
         "       COALESCE(c.metadata_json,''), "
-        "       (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) "
+        "       (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id), "
+        "       (SELECT COUNT(*) FROM messages m "
+        "         WHERE m.chat_id = c.id AND m.partial = 1) "
         "FROM chats c "
         "ORDER BY c.updated_at DESC "
         "LIMIT ?";
@@ -139,6 +142,7 @@ std::vector<Chat> list_chats(sqlite3 * db, int limit) {
     while (sqlite3_step(q.get()) == SQLITE_ROW) {
         Chat c = row_to_chat(q.get());
         c.message_count = sqlite3_column_int64(q.get(), 9);
+        c.partial_count = sqlite3_column_int64(q.get(), 10);
         out.push_back(std::move(c));
     }
     return out;
@@ -182,7 +186,8 @@ int64_t append_message(sqlite3 *           db,
                        const std::string & reasoning,
                        const std::string & media_json,
                        int                 tokens_in,
-                       int                 tokens_out) {
+                       int                 tokens_out,
+                       bool                partial) {
     // Wrap in a transaction so the (compute-next-seq, insert, touch_chat)
     // triple is atomic. Concurrent writers (we don't have any today) would
     // otherwise race on seq.
@@ -211,8 +216,8 @@ int64_t append_message(sqlite3 *           db,
         StmtGuard ins;
         const char * sql =
             "INSERT INTO messages (chat_id, seq, role, content, reasoning, "
-            "                      media_json, tokens_in, tokens_out, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            "                      media_json, tokens_in, tokens_out, created_at, partial) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         if (sqlite3_prepare_v2(db, sql, -1, ins.out(), nullptr) != SQLITE_OK) {
             sqlite_throw(db, "prepare(append_message)");
         }
@@ -227,6 +232,7 @@ int64_t append_message(sqlite3 *           db,
         sqlite3_bind_int  (ins.get(), 7, tokens_in);
         sqlite3_bind_int  (ins.get(), 8, tokens_out);
         sqlite3_bind_int64(ins.get(), 9, now_seconds());
+        sqlite3_bind_int  (ins.get(), 10, partial ? 1 : 0);
         if (sqlite3_step(ins.get()) != SQLITE_DONE) {
             sqlite_throw(db, "step(append_message)");
         }
@@ -268,7 +274,8 @@ std::vector<StoredMessage> load_messages(sqlite3 * db, int64_t chat_id) {
     const char * sql =
         "SELECT id, chat_id, seq, role, content, "
         "       COALESCE(reasoning,''), COALESCE(media_json,''), "
-        "       COALESCE(tokens_in,0), COALESCE(tokens_out,0), created_at "
+        "       COALESCE(tokens_in,0), COALESCE(tokens_out,0), created_at, "
+        "       COALESCE(partial,0) "
         "FROM messages WHERE chat_id = ? ORDER BY seq";
     if (sqlite3_prepare_v2(db, sql, -1, q.out(), nullptr) != SQLITE_OK) {
         sqlite_throw(db, "prepare(load_messages)");
@@ -286,6 +293,7 @@ std::vector<StoredMessage> load_messages(sqlite3 * db, int64_t chat_id) {
         m.tokens_in   = sqlite3_column_int  (q.get(), 7);
         m.tokens_out  = sqlite3_column_int  (q.get(), 8);
         m.created_at  = sqlite3_column_int64(q.get(), 9);
+        m.partial     = sqlite3_column_int  (q.get(), 10) != 0;
         out.push_back(std::move(m));
     }
     return out;
