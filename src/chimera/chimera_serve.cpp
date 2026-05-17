@@ -100,9 +100,13 @@
 //   - Built-in tool plugins (`--server-tools`). EXPERIMENTAL upstream.
 //   - MCP CORS proxy (`--webui-mcp-proxy`). EXPERIMENTAL upstream.
 //   - GCP / Vertex AI compat (`ctx_http.register_gcp_compat()`).
-//   - Web chat UI (`public/{index.html, bundle.js, bundle.css}`). manage.py
-//     passes `LLAMA_BUILD_WEBUI=OFF` to skip baking the ~11 MB asset bundle
-//     into libserver-context.a.
+//   - Web chat UI (`public/{index.html, bundle.js, bundle.css}`). Experimental:
+//     opt in at configure time with `-DCHIMERA_WEBUI_EMBED=ON` to xxd-bake
+//     upstream's prebuilt bundle (~7 MB) into the chimera binary. When
+//     enabled, GET / serves index.html and GET /bundle.{js,css} serve the
+//     assets; the runtime route-binding lives in upstream's server-http.cpp
+//     gated by the LLAMA_BUILD_WEBUI compile define + params.webui (chimera
+//     defaults the latter true; pass `--no-webui` to disable per-run).
 //   - Child-server / parent-process sleeping notification.
 //   - SSL / TLS (no `--ssl-cert-file` / `--ssl-key-file`). Run behind a
 //     reverse proxy for HTTPS.
@@ -253,6 +257,13 @@ common_params build_common_params(const ServeOptions & opts) {
     if (!opts.api_key.empty()) {
         params.api_keys.push_back(opts.api_key);
     }
+
+    // Embedded webui. Only meaningful when the build was configured
+    // with CHIMERA_WEBUI_EMBED=1 (see scripts/manage.py); the actual
+    // route binding happens inside server_http_context::init based on
+    // this field. In a webui-less build the routes don't exist either
+    // way, so the flag is a harmless pass-through.
+    params.webui = opts.webui;
 
     // KV-cache slot snapshots. Upstream gates POST /slots/:id on this
     // being non-empty (returns "not supported" otherwise). GET /slots
@@ -1933,6 +1944,11 @@ int command_serve(const ServeOptions & opts) {
               << "  LLM:   /v1/chat/completions  /v1/completions  /v1/embeddings\n"
               << "  meta:  /v1/models  /health  /metrics  /props  /slots  /lora-adapters\n"
               << "  tools: /infill  /tokenize  /detokenize  /apply-template\n"
+#ifdef LLAMA_BUILD_WEBUI
+              << (opts.webui
+                    ? "  webui: GET /  /bundle.js  /bundle.css (built with CHIMERA_WEBUI_EMBED=ON)\n"
+                    : "  webui: built in but disabled by --no-webui\n")
+#endif
               << "  anthropic: /v1/messages  /v1/messages/count_tokens\n";
     if (whisper_ctx) std::cout << "  audio: /v1/audio/transcriptions  /v1/audio/translations\n";
     if (sd_ctx)      std::cout << "  image: /v1/images/generations  /v1/images/edits  /v1/images/variations\n";

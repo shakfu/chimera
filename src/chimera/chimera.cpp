@@ -2283,6 +2283,9 @@ int main(int argc, char ** argv) {
             "LoRA adapter to load alongside the base model as path[:scale] "
             "(scale defaults to 1.0; repeatable). Enables POST /lora-adapters "
             "to hot-swap which adapters are active without reloading.");
+        serve_cmd->add_flag("!--no-webui", serve_opts.webui,
+            "Disable the embedded web chat UI at GET / (only meaningful in "
+            "builds compiled with CHIMERA_WEBUI_EMBED=1; a no-op otherwise)");
 
         // `chimera db <subcommand>` — embedded SQLite (+ sqlite-vec)
         // management. Phase 1 ships just `status`; future subcommands

@@ -688,6 +688,24 @@ class LlamaCppBuilder(GgmlBuilder):
         self.glob_copy(
             self.src_dir / "tools" / "server", src_aux, patterns=["server-http.cpp"]
         )
+        # Webui assets + xxd helper. server-http.cpp #includes
+        # "index.html.hpp" / "bundle.{js,css}.hpp" / "loading.html.hpp"
+        # when compiled with LLAMA_BUILD_WEBUI defined. These .hpp files
+        # are xxd-baked from the raw assets at chimera build time when
+        # the top-level CHIMERA_WEBUI_EMBED option is ON; staging the
+        # raw assets and the xxd helper here means the option flip
+        # doesn't require re-running the llama.cpp builder. The asset
+        # bundle is ~7 MB total — tolerable footprint for a dev tree
+        # even when the feature isn't enabled. Pre-built (no Node
+        # toolchain needed) so the chimera build can stay self-contained.
+        webui_aux = src_aux / "webui"
+        webui_aux.mkdir(exist_ok=True)
+        self.glob_copy(
+            self.src_dir / "tools" / "server" / "public",
+            webui_aux,
+            patterns=["index.html", "bundle.js", "bundle.css", "loading.html"],
+        )
+        self.copy(self.src_dir / "scripts" / "xxd.cmake", src_aux / "xxd.cmake")
 
     def build(self) -> None:
         if not self.src_dir.exists():
@@ -721,7 +739,14 @@ class LlamaCppBuilder(GgmlBuilder):
             # server-context STATIC library target is defined. We do NOT build
             # the llama-server *executable* below; only the static lib and the
             # vendored cpp-httplib are needed to power `chimera serve`. The
-            # 11 MB Web UI is skipped via LLAMA_BUILD_WEBUI=OFF.
+            # webui route binding lives in server-http.cpp, which chimera
+            # compiles itself (it's not part of libserver-context.a). So
+            # LLAMA_BUILD_WEBUI here stays OFF — the asset .hpp files and
+            # the LLAMA_BUILD_WEBUI compile define are produced on the chimera
+            # side instead, gated by the top-level CHIMERA_WEBUI_EMBED CMake
+            # option. _copy_headers() unconditionally stages the prebuilt
+            # public/* assets and xxd.cmake into src-aux/ so the option can
+            # flip them on without re-running this builder.
             LLAMA_BUILD_SERVER=True,
             LLAMA_BUILD_WEBUI=False,
             LLAMA_BUILD_TESTS=False,

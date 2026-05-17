@@ -99,6 +99,39 @@ endif()
 unset(_linenoise_probe)
 message(STATUS "linenoise:              ${CHIMERA_LINENOISE} -> link=${CHIMERA_LINK_LINENOISE}")
 
+# -----------------------------------------------------------------------------
+# Optional embedded webui (experimental)
+# -----------------------------------------------------------------------------
+# CHIMERA_WEBUI_EMBED:
+#   ON   = bake upstream llama.cpp's prebuilt web UI bundle into the binary
+#          (xxd-encoded asset .hpp files included by server-http.cpp). Adds
+#          ~7 MB to the binary; routes GET / + /bundle.{js,css} when the
+#          server is up. Compiled-in UI is pinned to whichever llama.cpp
+#          version chimera vendored, so the UI lifecycle is coupled to the
+#          chimera release cadence.
+#   OFF  = no webui routes; default. Binary stays lean.
+#   AUTO = ON if thirdparty/llama.cpp/src-aux/webui/ exists, else OFF.
+# Disable at runtime regardless of build choice with `chimera serve --no-webui`.
+set(CHIMERA_WEBUI_EMBED "OFF" CACHE STRING "Embed llama.cpp web UI (ON / OFF / AUTO)")
+set_property(CACHE CHIMERA_WEBUI_EMBED PROPERTY STRINGS "AUTO" "ON" "OFF")
+
+set(_webui_probe "${CMAKE_SOURCE_DIR}/thirdparty/llama.cpp/src-aux/webui/index.html")
+set(CHIMERA_LINK_WEBUI OFF)
+if("${CHIMERA_WEBUI_EMBED}" STREQUAL "ON")
+    if(NOT EXISTS "${_webui_probe}")
+        message(FATAL_ERROR
+            "CHIMERA_WEBUI_EMBED=ON but ${_webui_probe} not found.\n"
+            "Run: python scripts/manage.py build --llama  (or --all)")
+    endif()
+    set(CHIMERA_LINK_WEBUI ON)
+elseif("${CHIMERA_WEBUI_EMBED}" STREQUAL "AUTO")
+    if(EXISTS "${_webui_probe}")
+        set(CHIMERA_LINK_WEBUI ON)
+    endif()
+endif()
+unset(_webui_probe)
+message(STATUS "webui:                  ${CHIMERA_WEBUI_EMBED} -> link=${CHIMERA_LINK_WEBUI}")
+
 # stable-diffusion.cpp requires GGML_MAX_NAME=128 for long tensor names.
 # When SD shares llama.cpp's ggml, both must use the same value.
 if(NOT SD_USE_VENDORED_GGML)

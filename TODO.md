@@ -17,32 +17,25 @@
 
 Longer-term:
 
-- [ ] Web chat UI — opt-in only, **not** in the default release.
-      Two independent variants to wire up; users pick one (or neither)
-      at build time. Mirrors the `CHIMERA_LINENOISE=AUTO|ON|OFF`
-      pattern.
+- [ ] Web chat UI — **Variant A (embedded webui) shipped** as an
+      experimental opt-in: configure with `-DCHIMERA_WEBUI_EMBED=ON`
+      and the chimera binary serves GET / + /bundle.{js,css} from
+      upstream's prebuilt bundle (~6 MB stripped, ~7 MB unstripped; no Node
+      toolchain required). Disable at runtime with `serve --no-webui`.
+      Caveat: the baked UI is pinned to the vendored llama.cpp version,
+      so the UI lifecycle is coupled to the chimera release cadence.
 
-      Variant A — **embedded webui** (`CHIMERA_WEBUI_EMBED=ON`):
-      re-enable `LLAMA_BUILD_WEBUI=ON` in `manage.py`, run upstream's
-      `xxd.cmake` machinery to bake the built bundle into the binary
-      as a C header, bind a `GET /` handler that serves it. Binary
-      grows ~11 MB. Pro: single artifact, drop-and-run. Con: UI is
-      pinned to whatever chimera version was cut; updating the UI
-      requires a chimera rebuild.
-
-      Variant B — **public-path** (`CHIMERA_WEBUI_PATH=ON`): compile in
-      a static-file handler keyed off a new `chimera serve
-      --public-path <dir>` flag. Webui bundle ships as a separate
-      tarball (or the user points at any directory). Pro: UI lifecycle
-      decoupled from chimera; opens a door to shipping a
-      chimera-specific UI later that surfaces RAG mode,
-      `X-Chimera-Chat-Id`, etc. Con: two artifacts to ship, runtime
-      flag required to enable.
-
-      Both need: `manage.py build --webui` to drive the upstream JS
-      toolchain (adds a Node dependency at build time, opt-in only),
-      and a decision on whether the route is auth-gated by `--api-key`
-      like the JSON routes are.
+      Still open:
+      - Variant B — **public-path** (`CHIMERA_WEBUI_PATH=ON`): compile
+        in a static-file handler keyed off a new `chimera serve
+        --public-path <dir>` flag. Pro: UI lifecycle decoupled from
+        chimera; opens a door to shipping a chimera-specific UI later
+        that surfaces RAG mode, `X-Chimera-Chat-Id`, etc.
+      - Decide whether GET / + /bundle.* should be `--api-key`-gated
+        like the JSON routes are. Currently the webui routes follow
+        upstream's middleware (unauth-gated when no api-key is set;
+        any-bearer-token-accepting when one is). Browsers can't easily
+        send custom Authorization headers on a top-level navigation.
 - [ ] SSE for image generation progress on `/v1/images/*`. Pick a
       client convention; OpenAI's spec doesn't define one. SD already
       reports step-by-step progress to the callback we currently route

@@ -40,6 +40,8 @@ Output: `build/chimera`.
 
 Run `make deps` alone if you just want to (re)build the third-party libs, or `make rebuild` after touching only chimera source.
 
+Experimental: `make build-with-webui` is identical to `make build` but flips `-DCHIMERA_WEBUI_EMBED=ON`, which xxd-bakes upstream llama.cpp's prebuilt web chat UI bundle (`GET /` + `/bundle.{js,css}`) into the chimera binary. Adds ~6 MB to the stripped binary (~7 MB unstripped) — the asset bytes are in the data section and `strip` can't drop them. No Node toolchain required. The UI is pinned to whichever llama.cpp version chimera vendored. Disable at runtime with `chimera serve --no-webui`. See [`doc/dev/webui.md`](doc/dev/webui.md) for the wiring and the seams.
+
 ### System dependencies
 
 OpenSSL is required at link time (cpp-httplib uses it for TLS support inside the bundled HTTP server). On macOS this also pulls in the system Security and CoreFoundation frameworks. Install OpenSSL via your package manager (`brew install openssl@3` on macOS; `apt install libssl-dev` on Debian/Ubuntu) before running `make build`.
@@ -241,8 +243,9 @@ src/chimera/
   CMakeLists.txt                chimera target (consumes parent-scope vars)
 doc/
   serve.md, cheatsheet.md       User-facing prose + one-page reference.
-  dev/server.md, dev/sqlite.md  Internal notes: what's bound, schema model,
-                                phased plans, things-to-watch-for.
+  dev/server.md, dev/sqlite.md, Internal notes: what's bound, schema model,
+  dev/maintenance.md,           phased plans, webui experimental wiring,
+  dev/webui.md                  things-to-watch-for.
 ```
 
 ### Why so many translation units

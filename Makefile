@@ -1,4 +1,4 @@
-.PHONY: deps build rebuild clean reset test smoke install uninstall release-notes bump-check test-db-migrate test-golden
+.PHONY: deps build build-with-webui rebuild clean reset test smoke install uninstall release-notes bump-check test-db-migrate test-golden
 
 # Python interpreter, picked at make-invocation time by probing the host.
 # Order: `python3` (Linux / macOS / Conda / venv), `python` (Windows
@@ -20,6 +20,15 @@ DESTDIR ?=
 
 build: deps
 	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release
+	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
+
+# build-with-webui: same as `build`, but flips the experimental
+# CHIMERA_WEBUI_EMBED option ON so the chimera binary xxd-bakes
+# upstream's prebuilt web UI bundle (GET / + /bundle.{js,css}). Adds
+# ~7 MB to the binary; no Node toolchain required. See doc/dev/webui.md
+# for the seams. Pass --no-webui at runtime to suppress per-invocation.
+build-with-webui: deps
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DCHIMERA_WEBUI_EMBED=ON
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 rebuild:

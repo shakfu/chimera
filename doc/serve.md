@@ -380,7 +380,7 @@ Other endpoints do not stream. `/v1/audio/transcriptions` and
 
 ## Common errors
 
-**`{"error":{"message":"This server does not support embeddings. Start it with \`--embeddings\`"}}`**
+**`{"error":{"message":"This server does not support embeddings. Start it with --embeddings"}}`**
 You called `/v1/embeddings` on a server started without `--embeddings`.
 Restart with the flag (and likely a different model — most chat models
 won't also serve as embedding models).
@@ -457,7 +457,12 @@ second `Ctrl-C` force-exits — useful if a request is hung.
   header decoders that still wouldn't cover m4a/webm). Transcode
   client-side with `ffmpeg -i in.<ext> -ar 16000 -ac 1 out.wav`.
 - HTTPS direct serving (use a reverse proxy).
-- The web chat UI shipped with llama-server.
+- The web chat UI shipped with llama-server — *unless* you opt in at build
+  time. Configure with `cmake -S . -B build -DCHIMERA_WEBUI_EMBED=ON` (then
+  `make rebuild`) and the binary picks up GET / + /bundle.{js,css} serving
+  upstream's prebuilt bundle (~6 MB on a stripped binary, ~7 MB unstripped; no Node toolchain
+  required). Experimental: the UI is pinned to whichever llama.cpp version
+  chimera vendored. Disable per-run with `chimera serve --no-webui`.
 - Multi-model routing — chimera serve loads one LLM (plus optionally
   one whisper + one SD) per process.
 

@@ -1,0 +1,309 @@
+# Embedded web UI — developer guide
+
+The chimera binary can optionally bake llama.cpp's prebuilt web chat UI
+into itself. This document covers how it is wired up, how to enable it
+locally, and the seams that bit during implementation.
+
+It is the maintainer's view. End-user-facing notes (the `--no-webui`
+flag, what the UI is) live in [`doc/serve.md`](../serve.md). The wider
+`chimera serve` implementation notes are in
+[`doc/dev/server.md`](server.md); this file is the webui-specific
+addendum.
+
+> **Status — experimental.** Variant A (embedded) only. Variant B
+> (`--public-path <dir>` for an external bundle) is not implemented; see
+> [§ 6](#6-future-work-variant-b-and-friends).
+
+---
+
+## 1. The one fact that makes the wiring make sense
+
+Upstream's webui route binding lives in `tools/server/server-http.cpp`,
+gated by the compile-time `LLAMA_BUILD_WEBUI` macro and the runtime
+`params.webui` boolean. Crucially, **upstream does NOT compile
+`server-http.cpp` into `libserver-context.a`** — it compiles it directly
+into the `llama-server` executable. So flipping `LLAMA_BUILD_WEBUI=ON`
+in the llama.cpp build does nothing for chimera; we link the static
+library, not the executable.
+
+Chimera already worked around this for the non-webui parts of
+server-http: `manage.py` copies `server-http.cpp` into
+`thirdparty/llama.cpp/src-aux/`, and `src/chimera/CMakeLists.txt`
+compiles it as part of the `chimera` target (see
+`src/chimera/CMakeLists.txt` line ~52). To get the webui we extend the
+same trick:
+
+1. Stage the four prebuilt assets + `xxd.cmake` into `src-aux/webui/`.
+2. When the user configures with `-DCHIMERA_WEBUI_EMBED=ON`, the chimera
+   CMake runs `xxd.cmake` against each asset to produce `<asset>.hpp`
+   files in the chimera build dir.
+3. Those `.hpp` paths are added to the chimera target's source list, the
+   build dir is added to the include path, and `LLAMA_BUILD_WEBUI` is
+   defined on the chimera target so the `#ifdef`s in our local copy of
+   `server-http.cpp` activate.
+
+The route binding then happens automatically inside
+`server_http_context::init(params)`, which `chimera_serve.cpp` was
+already calling.
+
+---
+
+## 2. Enabling the build
+
+One-shot from a clean checkout:
+
+```
+make build-with-webui
+```
+
+That target is just `make deps` followed by `cmake … -DCHIMERA_WEBUI_EMBED=ON`
+and a chimera-target build. Equivalent to (and useful for understanding what
+it does):
+
+```
+make deps
+cmake -S . -B build -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release \
+                   -DCHIMERA_WEBUI_EMBED=ON
+make rebuild
+```
+
+The CMake option mirrors the existing `CHIMERA_LINENOISE` ON/OFF/AUTO
+pattern, so you can also drive it directly:
+
+```
+# AUTO — links only if thirdparty/llama.cpp/src-aux/webui/index.html exists
+cmake -S . -B build -DCHIMERA_WEBUI_EMBED=AUTO
+make rebuild
+
+# OFF (the default for `make build`)
+cmake -S . -B build       # or -DCHIMERA_WEBUI_EMBED=OFF
+make rebuild
+```
+
+`make deps` always stages the assets, regardless of the option — they
+sit at ~7 MB on disk in the dev tree, only inflate the binary when the
+option flips them in. This decouples the staging step from the binary
+flip so toggling on a previously-built tree is a one-line `cmake`
+reconfigure + rebuild, not a full `make deps` cycle.
+
+**No Node toolchain at build time.** The bundles ship pre-built in
+`build/llama.cpp/tools/server/public/`, and `xxd.cmake` is pure CMake.
+Rebuilding the JS bundle (e.g. to ship a chimera-customized UI) would
+require Node + the upstream `webui/` Vite project — out of scope for the
+current experiment.
+
+---
+
+## 3. Where things live
+
+| Path | Purpose |
+|------|---------|
+| `build/llama.cpp/tools/server/public/{index,bundle.{js,css},loading}.html` | Upstream-shipped prebuilt assets. |
+| `build/llama.cpp/scripts/xxd.cmake` | Pure-CMake byte-array generator (no `xxd(1)` dependency). |
+| `scripts/manage.py` :: `LlamaCppBuilder._copy_headers` | Stages assets + `xxd.cmake` into `src-aux/webui/` and `src-aux/xxd.cmake`. |
+| `thirdparty/llama.cpp/src-aux/webui/` | Where the staged assets land (gitignored). |
+| `thirdparty/llama.cpp/src-aux/xxd.cmake` | Staged copy of the helper. |
+| `CMakeLists.txt` (top-level) | Defines `CHIMERA_WEBUI_EMBED` option; resolves AUTO; exports `CHIMERA_LINK_WEBUI`. |
+| `src/chimera/CMakeLists.txt` | When `CHIMERA_LINK_WEBUI` is ON: runs xxd, adds `.hpp` to sources, sets include dir, defines `LLAMA_BUILD_WEBUI`. |
+| `src/chimera/chimera_serve.cpp` | Sets `params.webui = opts.webui`. The actual route binding is in our locally-compiled `server-http.cpp`. |
+| `src/chimera/chimera.h` :: `ServeOptions::webui` | Default true; flipped by `--no-webui`. |
+| `src/chimera/chimera.cpp` | `--no-webui` CLI flag declaration. |
+| `build/<chimera-build>/src/chimera/<asset>.hpp` | Generated at build time; one `unsigned char[]` + length per asset. |
+
+---
+
+## 4. Verifying it worked
+
+After building with `-DCHIMERA_WEBUI_EMBED=ON`:
+
+```
+ls build/src/chimera/*.hpp
+# expect: bundle.css.hpp  bundle.js.hpp  index.html.hpp  loading.html.hpp
+
+ls -la build/chimera
+# expect: ~7 MB larger than an OFF build
+```
+
+Run-time smoke:
+
+```
+PORT=8080
+./build/chimera serve -m models/Llama-3.2-1B-Instruct-Q8_0.gguf \
+    --host 127.0.0.1 --port $PORT &
+
+# Wait for /health to go 200, then:
+curl -o /dev/null -w "%{http_code} %{content_type} size=%{size_download}\n" \
+    http://127.0.0.1:$PORT/
+# expect: 200 text/html; charset=utf-8  size=~6900
+
+curl -o /dev/null -w "%{http_code} size=%{size_download}\n" \
+    http://127.0.0.1:$PORT/bundle.js
+# expect: 200  size=~6.6 MB
+
+curl -o /dev/null -w "%{http_code}\n" http://127.0.0.1:$PORT/bundle.css
+# expect: 200
+```
+
+The startup banner should also include a `webui:` line. If
+`--no-webui` is passed, the banner reads `built in but disabled by
+--no-webui` and `GET /` returns 404.
+
+---
+
+## 5. Seams to watch out for
+
+These are the things that aren't obvious from the code, ordered by how
+likely they are to bite a future maintainer.
+
+### 5.1. `LLAMA_BUILD_WEBUI` is a chimera-side flag now, not a llama.cpp flag
+
+`scripts/manage.py` keeps `LLAMA_BUILD_WEBUI=False` in the llama.cpp
+build. Resist the urge to flip it. Even ON, it would only bake the
+assets into the `llama-server` executable, which chimera doesn't ship —
+and would not affect `libserver-context.a`. The chimera-side wiring is
+the only thing that matters.
+
+If a future llama.cpp bump moves the route-binding block out of
+`server-http.cpp` and into `libserver-context.a`, this whole scheme
+collapses to "just enable upstream's flag" — at which point the chimera
+CMake gymnastics in `src/chimera/CMakeLists.txt` should be deleted, not
+preserved alongside it. Pin-check (`chimera_pin_check.cpp`) won't catch
+that move because the binding is plain inline code, not a typed handler
+field; you'll discover it when a webui-on build either double-binds
+`GET /` (httplib errors) or silently stops binding it (route 404s).
+Smoke test in [§ 7](#7-testing) defends against the second case.
+
+### 5.2. The UI is pinned to the vendored llama.cpp version
+
+The bundles in `build/llama.cpp/tools/server/public/` are
+prebuilt-and-committed in upstream's tree. Updating the UI means
+bumping `LLAMACPP_VERSION` in `scripts/manage.py` and rebuilding.
+There is no "ship a UI patch without a chimera rebuild" story.
+
+This is the headline trade-off of Variant A. Variant B (see § 6) would
+fix it.
+
+### 5.3. The route binding ignores `--api-key`
+
+Upstream's webui block (`server-http.cpp` around line 320) registers
+`GET /` and `GET /bundle.{js,css}` *outside* the
+`middleware_validate_api_key` chain — those routes are served regardless
+of whether `--api-key` is set. The XHR/fetch calls the UI makes
+afterwards (`/v1/chat/completions`, etc.) do go through the middleware
+and require the bearer token, which the UI prompts the user for in its
+settings panel.
+
+This is consistent with upstream's behavior and probably the right
+default (a browser can't easily send `Authorization` on a top-level
+navigation), but it does mean **anyone who can reach the port can load
+the page** even on an auth-gated chimera. The data exposure is zero
+(every actual API call is still auth-gated), but it's worth knowing
+before you publish a chimera instance on a non-private network.
+
+### 5.4. The COEP / COOP headers on `GET /`
+
+Upstream sets `Cross-Origin-Embedder-Policy: require-corp` and
+`Cross-Origin-Opener-Policy: same-origin` on the `/` response, required
+by the webui's Pyodide (Python-in-browser) feature. If you load chimera
+behind a reverse proxy that strips or rewrites those headers, Pyodide
+breaks; non-Pyodide use is unaffected. The headers are set inside
+upstream's lambda, not in chimera — we can't change them without
+patching `server-http.cpp`.
+
+### 5.5. The webui hits a few endpoints chimera *doesn't* expose
+
+The UI was designed against the full `llama-server` route surface.
+chimera deliberately omits some of those (`POST /completion` legacy
+shape, `POST /props` mutation, etc. — see the comment block at the top
+of `chimera_serve.cpp`). The UI degrades gracefully (the unused features
+just don't appear or show errors in the console) but if a user reports
+"feature X is broken in chimera's webui," the answer is often "that
+feature relies on a route chimera doesn't bind by design." Before
+binding the missing route in response, re-read the "deliberately not
+exposed" list — most of those omissions were reasoned through.
+
+### 5.6. cmake configure cache vs. asset regeneration
+
+`add_custom_command(OUTPUT <asset>.hpp DEPENDS <asset> ...)` is what
+triggers re-xxd when the asset content changes. If `make deps` re-stages
+the assets (e.g. after a `LLAMACPP_VERSION` bump), the `.hpp` files
+should regenerate on the next chimera build automatically. They have not
+been observed to go stale, but if you see the bundle.js in the binary
+not matching the bundle.js on disk after a llama.cpp bump, suspect this
+mechanism and `rm -rf build/src/chimera/*.hpp` to force.
+
+### 5.7. Asset size and download timing
+
+`bundle.js` is ~6.6 MB uncompressed. cpp-httplib serves it
+uncompressed (no gzip). On a slow network the first page load is
+multi-second; the browser caches aggressively after that, but each
+distinct chimera version invalidates the cache (no `Cache-Control:
+immutable` + content-hashed filenames, just the static path). Not a
+problem on localhost; might be worth knowing if a user reports "the UI
+takes forever to load over SSH tunnel."
+
+---
+
+## 6. Future work (Variant B and friends)
+
+Three follow-ups, ordered by usefulness:
+
+1. **Variant B — `CHIMERA_WEBUI_PATH=ON` + `--public-path <dir>`.** Wire
+   up upstream's `set_mount_point` branch (the `if (!params.public_path.empty())`
+   sibling of the `#ifdef LLAMA_BUILD_WEBUI` block in `server-http.cpp`).
+   Ship the bundle as a separate tarball. Pros: UI lifecycle decoupled
+   from chimera, smaller default binary, door open to shipping a
+   chimera-specific UI that surfaces RAG / `X-Chimera-Chat-Id`. Cons:
+   two artifacts, runtime flag required. **Recommended next step if the
+   experiment graduates.**
+
+2. **Smoke test in `scripts/test.sh`.** A conditional block that probes
+   whether the current binary has the webui baked in (e.g. `GET /` →
+   200 + `text/html` vs. 404), and asserts the working case when so.
+   No-op when `CHIMERA_WEBUI_EMBED=OFF`. Defends against the
+   "upstream moved the binding" failure mode in § 5.1.
+
+3. **`manage.py build --webui` for rebuilding the bundle from
+   source.** Pulls in Node + npm and runs upstream's
+   `tools/server/webui/` Vite project. Only needed if we ever want to
+   ship a chimera-customized UI instead of upstream's verbatim.
+
+The "make the webui understand chimera-specific features" question
+(RAG mode toggle, chat-id surfaced in the UI, `/v1/messages` Anthropic
+compat shown alongside OpenAI) is *only* tractable under Variant B —
+Variant A pins us to upstream's UI source.
+
+---
+
+## 7. Testing
+
+There are currently no automated tests for the webui path. The
+`scripts/test.sh` end-to-end suite tests against an `OFF` build (the
+default), so the webui code paths are not exercised by `make test`.
+
+The minimum useful addition would be the conditional smoke test
+sketched in § 6.2: probe whether the binary has the webui, and if so
+assert the three endpoints respond correctly. Keep it short — a full
+browser-driven test (Playwright, etc.) is overkill for an experimental
+feature.
+
+Until that lands, the manual verification recipe in § 4 is what we have.
+
+---
+
+## 8. Useful references
+
+- `tools/server/server-http.cpp` in the vendored llama.cpp tree — the
+  authoritative source for the route binding, the COEP/COOP headers,
+  and the api-key middleware ordering.
+- `tools/server/CMakeLists.txt` in the vendored llama.cpp tree — shows
+  how upstream itself invokes `xxd.cmake` for the same assets. Our
+  chimera-side CMake mirrors that block.
+- `tools/server/webui/` in the vendored llama.cpp tree — the Svelte
+  source the bundles are built from. Read this only if you're planning
+  Variant B with a chimera-customized UI.
+- [`doc/serve.md`](../serve.md) — user-facing notes (the `--no-webui`
+  flag and the build-time opt-in mention).
+- [`doc/dev/server.md`](server.md) — the broader `chimera serve`
+  developer guide; § 4 ("Routes") and § 7 ("Things to watch out for")
+  pair well with this document.

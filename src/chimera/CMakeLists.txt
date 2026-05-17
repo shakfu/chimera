@@ -97,6 +97,36 @@ if(CHIMERA_LINK_LINENOISE)
     target_compile_definitions(chimera PRIVATE CHIMERA_HAS_LINENOISE)
 endif()
 
+# Optional embedded webui. When the top-level scope set CHIMERA_LINK_WEBUI,
+# xxd-encode the four prebuilt assets (index.html, bundle.js, bundle.css,
+# loading.html) into .hpp files under the chimera build dir, add them to
+# the target sources, expose the generated dir on the include path so
+# server-http.cpp can #include them, and flip the LLAMA_BUILD_WEBUI define
+# that gates the upstream route-binding block in server-http.cpp.
+if(CHIMERA_LINK_WEBUI)
+    set(_webui_assets index.html bundle.js bundle.css loading.html)
+    set(_webui_src "${LLAMACPP_SRC_AUX}/webui")
+    set(_webui_xxd "${LLAMACPP_SRC_AUX}/xxd.cmake")
+    foreach(_asset ${_webui_assets})
+        set(_in  "${_webui_src}/${_asset}")
+        set(_out "${CMAKE_CURRENT_BINARY_DIR}/${_asset}.hpp")
+        add_custom_command(
+            DEPENDS "${_in}" "${_webui_xxd}"
+            OUTPUT  "${_out}"
+            COMMAND "${CMAKE_COMMAND}" "-DINPUT=${_in}" "-DOUTPUT=${_out}" -P "${_webui_xxd}"
+            COMMENT "xxd webui asset: ${_asset} -> ${_asset}.hpp"
+            VERBATIM
+        )
+        set_source_files_properties("${_out}" PROPERTIES GENERATED TRUE)
+        target_sources(chimera PRIVATE "${_out}")
+    endforeach()
+    target_include_directories(chimera PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+    target_compile_definitions(chimera PRIVATE LLAMA_BUILD_WEBUI)
+    unset(_webui_assets)
+    unset(_webui_src)
+    unset(_webui_xxd)
+endif()
+
 # CXX_COMPILE_OPTIONS contains -std=c++17 (or /std:c++17 on MSVC), which
 # the C compiler rejects. Gate the option list to C++ sources only so
 # sqlite3.c / sqlite-vec.c / server-http.cpp (wait — that's C++) get

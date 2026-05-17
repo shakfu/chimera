@@ -185,6 +185,18 @@ struct ServeOptions {
     // are *active* (and at what scale) per-request without a reload.
     // GET /lora-adapters lists the loaded set. Repeatable on the CLI.
     std::vector<std::string> lora_adapters; // --lora <path[:scale]>
+
+    // Embedded web chat UI. Only takes effect when the build was
+    // configured with CHIMERA_WEBUI_EMBED=1 — the bundle is xxd-baked
+    // into libserver-context.a at compile time and the routes (GET /,
+    // /bundle.js, /bundle.css) are bound by upstream's
+    // server_http_context::init when this flag is true. With a webui-
+    // less build, this flag is a no-op (no /, no /bundle.* routes
+    // exist either way). Defaults to true so the UI is served whenever
+    // it was compiled in; pass --no-webui to suppress at runtime
+    // (e.g. on production deployments behind a reverse proxy that
+    // serves a different UI).
+    bool webui = true;                  // --no-webui (only meaningful in webui-embedded builds)
 };
 
 int command_serve(const ServeOptions & opts);
