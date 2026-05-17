@@ -58,6 +58,10 @@ CHIMERA_ASSERT_HANDLER(post_detokenize);
 CHIMERA_ASSERT_HANDLER(post_apply_template);
 CHIMERA_ASSERT_HANDLER(post_anthropic_messages);
 CHIMERA_ASSERT_HANDLER(post_anthropic_count_tokens);
+CHIMERA_ASSERT_HANDLER(get_slots);
+CHIMERA_ASSERT_HANDLER(post_slots);
+CHIMERA_ASSERT_HANDLER(get_lora_adapters);
+CHIMERA_ASSERT_HANDLER(post_lora_adapters);
 
 #undef CHIMERA_ASSERT_HANDLER
 

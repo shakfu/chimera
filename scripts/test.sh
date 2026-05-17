@@ -603,6 +603,185 @@ if [[ -f "$GEN_MODEL" ]]; then
     fi
 fi
 
+# /slots and /lora-adapters: KV-cache snapshots + LoRA hot-swap routes.
+# Two passes against the same model:
+#   1. serve with no --slot-save-path and no --lora — verifies the routes
+#      are bound and report the configured upstream errors / empty lists.
+#   2. serve with --slot-save-path <tmp> — verifies a real save -> restore
+#      round-trip produces a snapshot file and the restore call succeeds.
+# LoRA hot-swap with a real adapter would need a fixture .gguf we don't
+# ship, so we only test the unloaded-list shape.
+if [[ -f "$GEN_MODEL" ]] && command -v python3 >/dev/null && command -v curl >/dev/null; then
+    SLOT_LOG="$(mktemp -t chimera-slot-log-XXXXXX)"
+    SLOT_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    "$CHIMERA" serve -m "$GEN_MODEL" --host 127.0.0.1 --port "$SLOT_PORT" \
+        --gpu-layers 0 > "$SLOT_LOG" 2>&1 &
+    SLOT_PID=$!
+
+    ready=0
+    for _ in $(seq 1 40); do
+        if curl -sS -o /dev/null -w '%{http_code}' \
+                "http://127.0.0.1:$SLOT_PORT/health" 2>/dev/null \
+                | grep -q '^200$'; then
+            ready=1
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [[ "$ready" != "1" ]]; then
+        printf "  ${FAIL_TAG}  %s\n" "/slots /lora-adapters (server failed to start)"
+        tail -5 "$SLOT_LOG" | sed 's/^/          /'
+        fail=$((fail + 1))
+        failed_names+=("slots-lora-startup")
+    else
+        # GET /slots: 200 + JSON array. With --parallel 1 (default) it
+        # should contain exactly one entry.
+        GS_BODY="$(curl -sS "http://127.0.0.1:$SLOT_PORT/slots" 2>/dev/null || true)"
+        if printf '%s' "$GS_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if isinstance(d,list) and len(d)>=1 and "id" in d[0] else 1)' 2>/dev/null; then
+            printf "  ${PASS_TAG}  %s\n" "GET /slots returns JSON array of slot status"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "GET /slots"
+            printf "        got: %s\n" "$GS_BODY"
+            fail=$((fail + 1))
+            failed_names+=("slots-get")
+        fi
+
+        # POST /slots/0?action=save without --slot-save-path: must return
+        # 501 not_supported (upstream's gating message). Catches a future
+        # regression where chimera forgets to bind the route or the
+        # status mapping shifts.
+        PS_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' -d '{"filename":"x.bin"}' \
+            "http://127.0.0.1:$SLOT_PORT/slots/0?action=save" 2>/dev/null || true)"
+        if [[ "$PS_CODE" == "501" ]]; then
+            printf "  ${PASS_TAG}  %s\n" "POST /slots/0?action=save without --slot-save-path → 501"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (got HTTP %s, want 501)\n" \
+                "POST /slots/0 not-supported gating" "$PS_CODE"
+            fail=$((fail + 1))
+            failed_names+=("slots-not-supported")
+        fi
+
+        # GET /lora-adapters without --lora: 200 + empty array.
+        GL_BODY="$(curl -sS "http://127.0.0.1:$SLOT_PORT/lora-adapters" 2>/dev/null || true)"
+        if printf '%s' "$GL_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if isinstance(d,list) and len(d)==0 else 1)' 2>/dev/null; then
+            printf "  ${PASS_TAG}  %s\n" "GET /lora-adapters (no --lora) returns []"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "GET /lora-adapters empty list"
+            printf "        got: %s\n" "$GL_BODY"
+            fail=$((fail + 1))
+            failed_names+=("lora-empty-list")
+        fi
+
+        # POST /lora-adapters with an empty array: valid no-op, 200.
+        # Doubles as a check that the POST route is bound and accepts
+        # the documented body shape.
+        PL_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' -d '[]' \
+            "http://127.0.0.1:$SLOT_PORT/lora-adapters" 2>/dev/null || true)"
+        if [[ "$PL_CODE" == "200" ]]; then
+            printf "  ${PASS_TAG}  %s\n" "POST /lora-adapters [] → 200"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (got HTTP %s, want 200)\n" \
+                "POST /lora-adapters no-op" "$PL_CODE"
+            fail=$((fail + 1))
+            failed_names+=("lora-post-empty")
+        fi
+    fi
+
+    # Tear down before the next pass so the port frees and the SQLite
+    # locks (if any) release cleanly.
+    if kill -0 "$SLOT_PID" 2>/dev/null; then
+        kill -TERM "$SLOT_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$SLOT_PID" 2>/dev/null || break
+            sleep 0.25
+        done
+        kill -KILL "$SLOT_PID" 2>/dev/null || true
+    fi
+    wait "$SLOT_PID" 2>/dev/null || true
+    rm -f "$SLOT_LOG"
+
+    # Pass 2: real --slot-save-path. Drive a small completion to seed
+    # the slot's KV cache (otherwise save serializes an empty cache and
+    # the round-trip proves nothing), then save -> restore, then verify
+    # the snapshot file actually landed on disk.
+    SLOT_DIR="$(mktemp -d -t chimera-slot-XXXXXX)"
+    SLOT_LOG2="$(mktemp -t chimera-slot-log2-XXXXXX)"
+    SLOT_PORT2="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    "$CHIMERA" serve -m "$GEN_MODEL" --host 127.0.0.1 --port "$SLOT_PORT2" \
+        --gpu-layers 0 --slot-save-path "$SLOT_DIR" \
+        > "$SLOT_LOG2" 2>&1 &
+    SLOT_PID2=$!
+
+    ready=0
+    for _ in $(seq 1 40); do
+        if curl -sS -o /dev/null -w '%{http_code}' \
+                "http://127.0.0.1:$SLOT_PORT2/health" 2>/dev/null \
+                | grep -q '^200$'; then
+            ready=1
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [[ "$ready" != "1" ]]; then
+        printf "  ${FAIL_TAG}  %s\n" "/slots save/restore (server failed to start)"
+        tail -5 "$SLOT_LOG2" | sed 's/^/          /'
+        fail=$((fail + 1))
+        failed_names+=("slots-save-startup")
+    else
+        # Seed the slot with a short completion so the KV cache has
+        # something to serialize.
+        curl -sS -o /dev/null -X POST -H 'Content-Type: application/json' \
+            -d '{"model":"any","messages":[{"role":"user","content":"hi"}],"max_tokens":4,"stream":false}' \
+            "http://127.0.0.1:$SLOT_PORT2/v1/chat/completions" >/dev/null 2>&1 || true
+
+        SAVE_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' -d '{"filename":"snap.bin"}' \
+            "http://127.0.0.1:$SLOT_PORT2/slots/0?action=save" 2>/dev/null || true)"
+        if [[ "$SAVE_CODE" == "200" && -s "$SLOT_DIR/snap.bin" ]]; then
+            printf "  ${PASS_TAG}  %s\n" "POST /slots/0?action=save with --slot-save-path → 200 + file written"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (HTTP %s, file exists=%s)\n" \
+                "/slots save" "$SAVE_CODE" "$([[ -s $SLOT_DIR/snap.bin ]] && echo yes || echo no)"
+            fail=$((fail + 1))
+            failed_names+=("slots-save")
+        fi
+
+        RESTORE_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' -d '{"filename":"snap.bin"}' \
+            "http://127.0.0.1:$SLOT_PORT2/slots/0?action=restore" 2>/dev/null || true)"
+        if [[ "$RESTORE_CODE" == "200" ]]; then
+            printf "  ${PASS_TAG}  %s\n" "POST /slots/0?action=restore → 200"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (got HTTP %s)\n" "/slots restore" "$RESTORE_CODE"
+            fail=$((fail + 1))
+            failed_names+=("slots-restore")
+        fi
+    fi
+
+    if kill -0 "$SLOT_PID2" 2>/dev/null; then
+        kill -TERM "$SLOT_PID2" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$SLOT_PID2" 2>/dev/null || break
+            sleep 0.25
+        done
+        kill -KILL "$SLOT_PID2" 2>/dev/null || true
+    fi
+    wait "$SLOT_PID2" 2>/dev/null || true
+    rm -rf "$SLOT_DIR" "$SLOT_LOG2"
+else
+    skip_test "/slots /lora-adapters" "needs $GEN_MODEL + python3 + curl"
+fi
+
 echo
 # Color the fail-count green at zero, red otherwise; pass is always
 # green if non-zero. The summary line is what readers scan first, so

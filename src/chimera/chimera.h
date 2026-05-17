@@ -170,6 +170,21 @@ struct ServeOptions {
     // same SQLite DB as the CLI's `chat --persist`.
     bool        persist_chats = false; // --persist-chats
     std::string chat_db_path;          // --chat-db (default: $CHIMERA_DB or platform default)
+
+    // KV-cache slot snapshots. When non-empty, POST /slots/:id?action=...
+    // (save / restore / erase) becomes functional and writes/reads
+    // snapshot files under this directory. GET /slots (slot status
+    // metadata) is always available regardless of this setting — the
+    // path only gates the write/restore side. Trailing slash is added
+    // by upstream if missing.
+    std::string slot_save_path;         // --slot-save-path <dir>
+
+    // LoRA adapters loaded alongside the base model. Each entry is
+    // "path[:scale]" (default scale 1.0). All listed adapters are
+    // loaded at startup; POST /lora-adapters lets clients change which
+    // are *active* (and at what scale) per-request without a reload.
+    // GET /lora-adapters lists the loaded set. Repeatable on the CLI.
+    std::vector<std::string> lora_adapters; // --lora <path[:scale]>
 };
 
 int command_serve(const ServeOptions & opts);

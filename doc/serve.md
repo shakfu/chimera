@@ -221,6 +221,40 @@ curl -s http://127.0.0.1:8080/v1/images/edits \
   -F strength=0.6
 ```
 
+### KV-cache snapshots
+
+```
+chimera serve -m model.gguf --slot-save-path /var/cache/chimera/slots
+```
+
+When `--slot-save-path` is set, `POST /slots/:id?action=save&filename=foo.bin`
+serializes the slot's current KV cache (the model's attention state for every
+token it has processed) to `<slot-save-path>/foo.bin`, and `?action=restore`
+reloads it into that slot. The win is skipping prompt prefill on a long
+system-prompt / RAG-context conversation: prefilling a 30k-token prompt costs
+seconds to tens of seconds; restoring a snapshot is sub-second.
+
+`GET /slots` (slot status — which slot holds which conversation, how many
+tokens are cached, ...) is always available and not gated by this flag.
+`?action=erase` works without `--slot-save-path` too; only save/restore need
+the directory.
+
+### LoRA hot-swap
+
+```
+chimera serve -m base.gguf \
+              --lora adapters/code-lora.gguf:0.8 \
+              --lora adapters/persona-lora.gguf
+```
+
+All listed adapters are loaded at startup (with a scale of 1.0 if omitted).
+`GET /lora-adapters` returns the loaded list with current scales;
+`POST /lora-adapters` takes a JSON array of `{"id": <index>, "scale": <float>}`
+and changes which adapters apply to subsequent requests, without a model
+reload. Setting an adapter's scale to 0 effectively disables it. New
+adapter files can't be added at runtime — anything you want to hot-swap to
+must be on the startup `--lora` list.
+
 ---
 
 ## Endpoints
@@ -242,6 +276,10 @@ Always bound:
 | POST | `/tokenize`, `/detokenize` | JSON | Vocab helpers — token-id ↔ text. |
 | POST | `/apply-template` | JSON | Render the chat template against a `messages[]` array without generating. |
 | POST | `/v1/responses` | JSON | OpenAI Responses API. Stateful within a single chimera serve invocation; state is lost on restart. |
+| GET  | `/slots` | — | Per-slot status (id, state, prompt, n_past, ...). |
+| POST | `/slots/:id_slot` | JSON | `?action=save` / `?action=restore` / `?action=erase` for KV-cache snapshots. Save/restore require `--slot-save-path`; erase works without it. |
+| GET  | `/lora-adapters` | — | List LoRAs loaded via `--lora` and their current scales. |
+| POST | `/lora-adapters` | JSON array | Hot-swap which adapters are active. Body: `[{"id": 0, "scale": 0.8}, ...]` — ids index into the `--lora` list. |
 
 Bound when `--enable-audio` is set:
 
@@ -418,8 +456,6 @@ second `Ctrl-C` force-exits — useful if a request is hung.
   in either a multi-megabyte FFmpeg dep or a partial set of single-
   header decoders that still wouldn't cover m4a/webm). Transcode
   client-side with `ffmpeg -i in.<ext> -ar 16000 -ac 1 out.wav`.
-- KV-cache slot save/load (`/slots`). Planned.
-- LoRA hot-swap (`/lora-adapters`). Planned.
 - HTTPS direct serving (use a reverse proxy).
 - The web chat UI shipped with llama-server.
 - Multi-model routing — chimera serve loads one LLM (plus optionally

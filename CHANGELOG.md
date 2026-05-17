@@ -4,6 +4,24 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Added
+
+- KV-cache slot snapshots and LoRA hot-swap routes. Four upstream `server_routes` handlers bound that were previously called out as "deliberately not exposed":
+  - `GET /slots` — per-slot status (id, state, prompt, n_past, ...). Always available; gated upstream by `params.endpoint_slots`, which chimera leaves at its default `true`.
+  - `POST /slots/:id_slot?action={save,restore,erase}` — KV-cache snapshot I/O. `save` and `restore` require the new `--slot-save-path <dir>` flag (501 `not_supported` otherwise, with the upstream hint pointing at the flag); `erase` works without it. Skipping prefill on a multi-thousand-token system prompt / RAG context turns a multi-second first-token latency into a sub-second restore.
+  - `GET /lora-adapters` — lists adapters loaded via `--lora` with current scales.
+  - `POST /lora-adapters` — accepts a JSON array of `{"id": <index>, "scale": <float>}` and changes which adapters apply to subsequent requests without a model reload. Adapters must be on the startup `--lora` list; the route can re-weight (scale 0 effectively disables) but cannot register new files at runtime.
+
+- `--slot-save-path <dir>` and repeatable `--lora <path[:scale]>` flags on `chimera serve`. Scale defaults to 1.0 when omitted. The `path[:scale]` parser uses the rightmost colon and falls back to "treat the whole string as a path" when the suffix doesn't parse as a float, so Windows drive-letter paths with no scale (`C:\foo.gguf`) round-trip cleanly. `--slot-save-path` is normalized to end with a directory separator inside `build_common_params` — common/arg.cpp does this when `slot_save_path` is set through the upstream parser, but chimera bypasses that path and was previously concatenating `<dir><filename>` without a separator.
+
+- Pin-check asserts in `chimera_pin_check.cpp` for `get_slots` / `post_slots` / `get_lora_adapters` / `post_lora_adapters` so a llama.cpp bump that renames or retypes any of the four fails this TU first instead of cascading through `chimera_serve.cpp`.
+
+### Changed
+
+- `scripts/test.sh` end-to-end suite gains 6 new tests for the slots + LoRA routes: GET /slots shape, POST /slots/0 gating without `--slot-save-path` (501), GET /lora-adapters empty-list shape, POST /lora-adapters `[]` no-op (200), and a save→file-on-disk→restore round-trip against a seeded slot. All run against the existing `Llama-3.2-1B-Instruct` fixture; skipped (not failed) when `python3` + `curl` aren't on `$PATH`.
+
+- `doc/serve.md`: the `## What's not supported` list no longer mentions `/slots` and `/lora-adapters` (they're supported now), the endpoint table lists all four new routes, and a new `### KV-cache snapshots` + `### LoRA hot-swap` pair of subsections under `## Opt-in features` documents the flags and the request-shape conventions.
+
 ## [0.1.4]
 
 ### Added

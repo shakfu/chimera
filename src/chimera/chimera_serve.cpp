@@ -27,6 +27,12 @@
 //                                       built-in handler). Stateful within a
 //                                       single chimera serve invocation; state
 //                                       is held in-process and lost on restart.
+//   GET  /slots                         per-slot status (id, state, prompt, ...)
+//   POST /slots/:id_slot                save / restore / erase KV-cache snapshots
+//                                       (write actions require --slot-save-path)
+//   GET  /lora-adapters                 list LoRAs loaded via --lora
+//   POST /lora-adapters                 hot-swap which LoRAs are active and
+//                                       at what scale, without a model reload
 //
 // Audio (only when --enable-audio):
 //   POST /v1/audio/transcriptions       transcribe in source language (whisper.cpp)
@@ -82,11 +88,6 @@
 //   POST /embedding, /embeddings        non-/v1 embeddings variants — redundant.
 //   POST /rerank, /v1/rerank            document reranking via cross-encoder
 //                                       models. Niche; bind on request.
-//   GET  /slots, POST /slots/:id        slot save/load (KV cache snapshots).
-//                                       Bind on request.
-//   GET  /lora-adapters,
-//   POST /lora-adapters                 LoRA hot-swap at request time.
-//                                       Bind on request.
 //   POST /props                         mutating server props at runtime
 //                                       conflicts with chimera serve's
 //                                       "CLI is the config" stance. Read
@@ -251,6 +252,46 @@ common_params build_common_params(const ServeOptions & opts) {
     params.endpoint_metrics     = true;
     if (!opts.api_key.empty()) {
         params.api_keys.push_back(opts.api_key);
+    }
+
+    // KV-cache slot snapshots. Upstream gates POST /slots/:id on this
+    // being non-empty (returns "not supported" otherwise). GET /slots
+    // is independent and controlled by params.endpoint_slots, which
+    // defaults to true. Upstream concatenates this path with the
+    // user-supplied filename without a separator (see handle_slots_save
+    // in server-context.cpp), so we have to ensure the trailing slash
+    // ourselves — common/arg.cpp does it there, but chimera bypasses
+    // common args.
+    params.slot_save_path = opts.slot_save_path;
+    if (!params.slot_save_path.empty() &&
+        params.slot_save_path.back() != '/' &&
+        params.slot_save_path.back() != '\\') {
+        params.slot_save_path += '/';
+    }
+
+    // LoRA adapters: parse "path[:scale]" entries into the upstream
+    // struct. Scale defaults to 1.0 when omitted. The HTTP routes
+    // (GET/POST /lora-adapters) can re-weight or disable adapters at
+    // request time but cannot add new ones — anything callable via
+    // POST must be in this list at startup.
+    for (const auto & spec : opts.lora_adapters) {
+        common_adapter_lora_info lora{};
+        lora.scale = 1.0f;
+        lora.ptr   = nullptr;
+        const auto colon = spec.find_last_of(':');
+        if (colon != std::string::npos) {
+            try {
+                lora.scale = std::stof(spec.substr(colon + 1));
+                lora.path  = spec.substr(0, colon);
+            } catch (const std::exception &) {
+                // No parseable scale suffix — treat the whole string
+                // as a path (handles Windows "C:\..." with no scale).
+                lora.path = spec;
+            }
+        } else {
+            lora.path = spec;
+        }
+        params.lora_adapters.push_back(std::move(lora));
     }
 
     // The next two blocks mirror llama-server's main() defensively-correct
@@ -1741,6 +1782,24 @@ int command_serve(const ServeOptions & opts) {
     ctx_http.get ("/metrics",             ex_wrapper(routes.get_metrics));
     ctx_http.get ("/props",               ex_wrapper(routes.get_props));
 
+    // KV-cache slot management. GET /slots returns slot status (gated
+    // upstream by params.endpoint_slots, which we leave at its default
+    // of true). POST /slots/:id_slot?action={save,restore,erase} drives
+    // snapshot I/O — upstream returns "not supported" with a pointer to
+    // --slot-save-path when that flag is unset, so the route is safe to
+    // bind unconditionally.
+    ctx_http.get ("/slots",               ex_wrapper(routes.get_slots));
+    ctx_http.post("/slots/:id_slot",      ex_wrapper(routes.post_slots));
+
+    // LoRA hot-swap. GET lists the adapters loaded via --lora; POST
+    // takes a JSON array of {"id": <int>, "scale": <float>} and applies
+    // them to subsequent requests. Adapters must be loaded at startup
+    // (the routes can only re-weight; they cannot register new files).
+    // When --lora was not passed the POST handler still works against
+    // the empty adapter list — sending [] is a valid no-op.
+    ctx_http.get ("/lora-adapters",       ex_wrapper(routes.get_lora_adapters));
+    ctx_http.post("/lora-adapters",       ex_wrapper(routes.post_lora_adapters));
+
     // Phase 5: chat persistence shim. When --persist-chats is set we
     // wrap the upstream chat-completions handler so every successful
     // exchange is recorded in the chats + messages tables. The wrapper
@@ -1872,7 +1931,7 @@ int command_serve(const ServeOptions & opts) {
 
     std::cout << "chimera serve: listening on " << ctx_http.listening_address << "\n"
               << "  LLM:   /v1/chat/completions  /v1/completions  /v1/embeddings\n"
-              << "  meta:  /v1/models  /health  /metrics  /props\n"
+              << "  meta:  /v1/models  /health  /metrics  /props  /slots  /lora-adapters\n"
               << "  tools: /infill  /tokenize  /detokenize  /apply-template\n"
               << "  anthropic: /v1/messages  /v1/messages/count_tokens\n";
     if (whisper_ctx) std::cout << "  audio: /v1/audio/transcriptions  /v1/audio/translations\n";

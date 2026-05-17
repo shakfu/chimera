@@ -2276,6 +2276,13 @@ int main(int argc, char ** argv) {
         serve_cmd->add_option("--chat-db", serve_opts.chat_db_path,
             "Path to the SQLite DB used by --persist-chats "
             "(default: $CHIMERA_DB or platform default)");
+        serve_cmd->add_option("--slot-save-path", serve_opts.slot_save_path,
+            "Directory for KV-cache snapshots written/read by "
+            "POST /slots/:id?action={save,restore} (GET /slots works regardless)");
+        serve_cmd->add_option("--lora", serve_opts.lora_adapters,
+            "LoRA adapter to load alongside the base model as path[:scale] "
+            "(scale defaults to 1.0; repeatable). Enables POST /lora-adapters "
+            "to hot-swap which adapters are active without reloading.");
 
         // `chimera db <subcommand>` — embedded SQLite (+ sqlite-vec)
         // management. Phase 1 ships just `status`; future subcommands

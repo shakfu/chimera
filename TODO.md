@@ -1,9 +1,5 @@
 # TODO
 
-Forward-looking work for chimera. Loosely prioritized within each section.
-Detailed rationale and design discussion lives in `doc/dev/server.md`
-(§ 6 issues, § 7 watch-fors, § 8 future work) and `doc/dev/sqlite.md`
-(§ 9 phase 6+, § 10 risks, § 11 open design questions).
 
 ## Validation
 
@@ -18,13 +14,6 @@ Detailed rationale and design discussion lives in `doc/dev/server.md`
       stable enough).
 
 ## Server — deferred routes / features
-
-Medium-term:
-
-- [ ] Bind `GET /slots` + `POST /slots/:id` (KV-cache snapshots) and
-      `GET/POST /lora-adapters` (LoRA hot-swap). Both are one-line
-      `ctx_http.post(...)` calls each; the work is the UX around them
-      (where do slot files live, how is LoRA hotswap parameterized).
 
 Longer-term:
 
