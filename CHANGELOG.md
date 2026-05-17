@@ -4,6 +4,8 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.1.4]
+
 ### Added
 
 - Sentence-aware chunking for `chimera index ingest` and the equivalent serve route. The previous fixed token-window splitter (with overlap measured in tokens) is replaced by `chimera_embed::chunk_by_sentences`: text is split on sentence terminators (`.`, `?`, `!`) and paragraph breaks (blank lines), then greedy-packed into chunks bounded by the collection's `chunk_tokens` budget. Overlap is carried as whole-sentence tails of the previous chunk re-prepended to the next. Pathological inputs (run-on sentences longer than the budget, source code, base64) fall back to `chunk_by_tokens` for the offending span, so ingestion never refuses input. Empirically this improves retrieval quality on prose because the embedded text now corresponds to complete thoughts rather than arbitrary mid-sentence cuts; for structured/non-prose input the behavior degenerates to the old splitter via the fallback.
