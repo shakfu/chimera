@@ -2286,6 +2286,9 @@ int main(int argc, char ** argv) {
         serve_cmd->add_flag("!--no-webui", serve_opts.webui,
             "Disable the embedded web chat UI at GET / (only meaningful in "
             "builds compiled with CHIMERA_WEBUI_EMBED=1; a no-op otherwise)");
+        serve_cmd->add_option("--public-path", serve_opts.public_path,
+            "Directory to serve as static files at GET / (chimera-specific UI). "
+            "Independent of CHIMERA_WEBUI_EMBED; when both apply, --public-path wins");
 
         // `chimera db <subcommand>` — embedded SQLite (+ sqlite-vec)
         // management. Phase 1 ships just `status`; future subcommands

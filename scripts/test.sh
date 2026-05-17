@@ -603,6 +603,148 @@ if [[ -f "$GEN_MODEL" ]]; then
     fi
 fi
 
+# /v1/chats* read endpoints + --public-path static serve. Spawns serve
+# with --persist-chats so the read endpoints are bound, plus a temp
+# directory mounted at /. Seeds two chats via the normal completions
+# path, then verifies:
+#   - GET /v1/chats lists them (object: list, two data entries)
+#   - GET /v1/chats/:id returns chat + ordered messages[]
+#   - GET /v1/chats/search?q=<rare-token> hits the message and returns
+#     an FTS5 [token]-highlighted snippet
+#   - GET /v1/chats/99999 → 400 (cpp-httplib's 404-overwriting quirk;
+#     same convention as the vector store handlers use)
+#   - GET /v1/chats/search without q → 400
+#   - GET / serves the file dropped into --public-path with text/html
+if [[ -f "$GEN_MODEL" ]] && command -v python3 >/dev/null && command -v curl >/dev/null; then
+    CH_DB="$(mktemp -t chimera-ch-XXXXXX).db"
+    CH_PUB="$(mktemp -d -t chimera-ch-pub-XXXXXX)"
+    CH_LOG="$(mktemp -t chimera-ch-log-XXXXXX)"
+    cat > "$CH_PUB/index.html" <<'EOF'
+<!DOCTYPE html><html><body>chimera-pub-marker</body></html>
+EOF
+    CH_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    "$CHIMERA" serve -m "$GEN_MODEL" --persist-chats --chat-db "$CH_DB" \
+        --public-path "$CH_PUB" \
+        --host 127.0.0.1 --port "$CH_PORT" --gpu-layers 0 \
+        > "$CH_LOG" 2>&1 &
+    CH_PID=$!
+
+    ready=0
+    for _ in $(seq 1 40); do
+        if curl -sS -o /dev/null -w '%{http_code}' \
+                "http://127.0.0.1:$CH_PORT/health" 2>/dev/null \
+                | grep -q '^200$'; then
+            ready=1
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [[ "$ready" != "1" ]]; then
+        printf "  ${FAIL_TAG}  %s\n" "/v1/chats + --public-path (server failed to start)"
+        tail -5 "$CH_LOG" | sed 's/^/          /'
+        fail=$((fail + 1))
+        failed_names+=("chats-public-startup")
+    else
+        # Seed two chats with a deliberately rare token so the FTS5
+        # search assertion is unambiguous.
+        for prompt in "tell me about quibblefrond" "explain photosynthesis briefly"; do
+            curl -sS -o /dev/null -X POST \
+                -H 'Content-Type: application/json' \
+                -d "{\"model\":\"any\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":4,\"stream\":false}" \
+                "http://127.0.0.1:$CH_PORT/v1/chat/completions" >/dev/null 2>&1 || true
+        done
+
+        # GET /v1/chats → object:list with >=2 entries.
+        LIST_BODY="$(curl -sS "http://127.0.0.1:$CH_PORT/v1/chats" 2>/dev/null || true)"
+        if printf '%s' "$LIST_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("object")=="list" and len(d.get("data",[]))>=2 else 1)' 2>/dev/null; then
+            printf "  ${PASS_TAG}  %s\n" "GET /v1/chats lists persisted chats"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "GET /v1/chats"
+            printf "        got: %s\n" "$LIST_BODY"
+            fail=$((fail + 1))
+            failed_names+=("chats-list")
+        fi
+
+        # GET /v1/chats/1 → has messages[] with the seeded user content.
+        GET_BODY="$(curl -sS "http://127.0.0.1:$CH_PORT/v1/chats/1" 2>/dev/null || true)"
+        if printf '%s' "$GET_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); ms=d.get("messages",[]); sys.exit(0 if d.get("id")==1 and len(ms)>=1 and ms[0].get("role")=="user" and "quibblefrond" in ms[0].get("content","") else 1)' 2>/dev/null; then
+            printf "  ${PASS_TAG}  %s\n" "GET /v1/chats/:id returns chat + ordered messages"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "GET /v1/chats/:id"
+            printf "        got: %s\n" "$GET_BODY"
+            fail=$((fail + 1))
+            failed_names+=("chats-get")
+        fi
+
+        # GET /v1/chats/search → FTS5 hit on the rare token, snippet
+        # contains the [quibblefrond] marker.
+        SEARCH_BODY="$(curl -sS "http://127.0.0.1:$CH_PORT/v1/chats/search?q=quibblefrond" 2>/dev/null || true)"
+        if printf '%s' "$SEARCH_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); hits=d.get("hits",[]); sys.exit(0 if len(hits)>=1 and "[quibblefrond]" in hits[0].get("snippet","") else 1)' 2>/dev/null; then
+            printf "  ${PASS_TAG}  %s\n" "GET /v1/chats/search returns FTS5-highlighted hit"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "GET /v1/chats/search"
+            printf "        got: %s\n" "$SEARCH_BODY"
+            fail=$((fail + 1))
+            failed_names+=("chats-search")
+        fi
+
+        # Unknown id → 400 (cpp-httplib overwrites 404 bodies).
+        UNK_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:$CH_PORT/v1/chats/99999" 2>/dev/null || true)"
+        if [[ "$UNK_CODE" == "400" ]]; then
+            printf "  ${PASS_TAG}  %s\n" "GET /v1/chats/99999 → 400 (not 404)"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (got HTTP %s)\n" "GET /v1/chats/<unknown>" "$UNK_CODE"
+            fail=$((fail + 1))
+            failed_names+=("chats-get-unknown")
+        fi
+
+        # Missing q → 400.
+        MQ_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:$CH_PORT/v1/chats/search" 2>/dev/null || true)"
+        if [[ "$MQ_CODE" == "400" ]]; then
+            printf "  ${PASS_TAG}  %s\n" "GET /v1/chats/search without q → 400"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (got HTTP %s)\n" "GET /v1/chats/search no-q" "$MQ_CODE"
+            fail=$((fail + 1))
+            failed_names+=("chats-search-no-q")
+        fi
+
+        # --public-path serves the dropped file with text/html content-type.
+        PUB_BODY="$(curl -sS -w "\n%{http_code} %{content_type}" \
+            "http://127.0.0.1:$CH_PORT/" 2>/dev/null || true)"
+        if printf '%s' "$PUB_BODY" | grep -q 'chimera-pub-marker' \
+                && printf '%s' "$PUB_BODY" | grep -q '200 text/html'; then
+            printf "  ${PASS_TAG}  %s\n" "GET / with --public-path serves index.html"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "GET / with --public-path"
+            printf "        got: %s\n" "$PUB_BODY"
+            fail=$((fail + 1))
+            failed_names+=("public-path-serve")
+        fi
+    fi
+
+    if kill -0 "$CH_PID" 2>/dev/null; then
+        kill -TERM "$CH_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$CH_PID" 2>/dev/null || break
+            sleep 0.25
+        done
+        kill -KILL "$CH_PID" 2>/dev/null || true
+    fi
+    wait "$CH_PID" 2>/dev/null || true
+    rm -rf "$CH_DB" "$CH_DB-wal" "$CH_DB-shm" "$CH_PUB" "$CH_LOG"
+else
+    skip_test "/v1/chats + --public-path" "needs $GEN_MODEL + python3 + curl"
+fi
+
 # /slots and /lora-adapters: KV-cache snapshots + LoRA hot-swap routes.
 # Two passes against the same model:
 #   1. serve with no --slot-save-path and no --lora — verifies the routes

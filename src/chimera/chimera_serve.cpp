@@ -34,6 +34,14 @@
 //   POST /lora-adapters                 hot-swap which LoRAs are active and
 //                                       at what scale, without a model reload
 //
+// Chat history (only when --persist-chats):
+//   GET  /v1/chats                      list persisted chats, sorted by
+//                                       updated_at desc; ?limit=N (default 50)
+//   GET  /v1/chats/:id                  chat metadata + ordered messages[]
+//   GET  /v1/chats/search?q=...         FTS5 search over message content,
+//                                       with [word]-highlighted snippets;
+//                                       ?limit=N (default 20)
+//
 // Audio (only when --enable-audio):
 //   POST /v1/audio/transcriptions       transcribe in source language (whisper.cpp)
 //   POST /v1/audio/translations         translate to English regardless of input
@@ -67,6 +75,94 @@
 //   POST /v1/vector_stores/:name/files  ingest text via multipart upload
 //                                       or JSON {"text": "..."} body
 //   POST /v1/vector_stores/:name/search KNN search; body {"query": "...", "k": N}
+//
+// ----------------------------------------------------------------------------
+// llama-server parity vs chimera-owned surface
+// ----------------------------------------------------------------------------
+// On the next llama.cpp bump, the question "which of these routes might
+// silently change shape" has different answers depending on who owns the
+// handler. Three buckets, ordered by upstream-drift risk:
+//
+// (A) UPSTREAM-OWNED — handler bound from `server_routes` (a typed lambda
+//     field on libserver-context). `chimera_pin_check.cpp` static_asserts
+//     each handler_t field so a type change fails to compile here.
+//     Response JSON shape is whatever upstream emits; chimera does NOT
+//     own it. A llama.cpp bump can change a field name / add a key / drop
+//     a key without breaking the pin-check. These are the routes where
+//     `make test-golden` matters.
+//
+//       GET  /health, /v1/health                 server_routes.get_health
+//       GET  /v1/models                          server_routes.get_models
+//       GET  /metrics                            server_routes.get_metrics
+//       GET  /props                              server_routes.get_props
+//       POST /chat/completions
+//            + /v1/chat/completions              server_routes.post_chat_completions
+//                                                (wrapped by chimera's persistence
+//                                                shim when --persist-chats — see
+//                                                make_persisting_chat_handler)
+//       POST /v1/completions                     server_routes.post_completions_oai
+//       POST /v1/embeddings                      server_routes.post_embeddings_oai
+//                                                (or the dedicated emb_ctx variant
+//                                                when --enable-embeddings is set)
+//       POST /v1/messages                        server_routes.post_anthropic_messages
+//       POST /v1/messages/count_tokens           server_routes.post_anthropic_count_tokens
+//       POST /v1/responses                       server_routes.post_responses_oai
+//       POST /infill                             server_routes.post_infill
+//       POST /tokenize, /detokenize              server_routes.post_{tokenize,detokenize}
+//       POST /apply-template                     server_routes.post_apply_template
+//       POST /v1/rerank, /rerank                 rrk_ctx->routes->post_rerank
+//       GET  /slots                              server_routes.get_slots
+//       POST /slots/:id_slot                     server_routes.post_slots
+//       GET  /lora-adapters                      server_routes.get_lora_adapters
+//       POST /lora-adapters                      server_routes.post_lora_adapters
+//
+//     The `--public-path <dir>` CLI flag is also upstream-parity: it
+//     drives `common_params.public_path`, which upstream's
+//     `server_http_context::init` already handles via
+//     cpp-httplib's `set_mount_point`. No chimera-side route binding.
+//
+// (B) CHIMERA-OWNED HANDLER, EXTERNAL-PROTOCOL SHAPE — chimera wrote the
+//     handler, but the request/response JSON is defined by an external
+//     spec (OpenAI's Audio / Images / Vector Stores). Upstream llama.cpp
+//     either doesn't implement the protocol or implements it through a
+//     different pipeline that chimera doesn't want. A llama.cpp bump
+//     cannot change these shapes; OpenAI changing their spec can. Drift
+//     surface = the external spec, not the vendored library.
+//
+//       POST /v1/audio/transcriptions            chimera_whisper, via
+//       POST /v1/audio/translations              make_audio_transcribe_handler
+//                                                (upstream routes audio through
+//                                                mtmd's audio mmproj — different
+//                                                pipeline, intentionally unused)
+//       POST /v1/images/generations              chimera_sd, via
+//       POST /v1/images/edits                    make_image_{generations,edits,
+//       POST /v1/images/variations               variations}_handler
+//                                                (no upstream equivalent — llama.cpp
+//                                                has no SD)
+//       GET  /v1/vector_stores                   chimera_vector_store, via
+//       POST /v1/vector_stores                   make_vs_{list,create,get,delete,
+//       GET  /v1/vector_stores/:name             ingest,search}_handler
+//       POST /v1/vector_stores/:name/{delete,    (OpenAI Vector Stores API shape;
+//            files,search}                       no upstream equivalent — llama.cpp
+//                                                has no RAG)
+//
+// (C) CHIMERA-OWNED, CHIMERA-ONLY SHAPE — no external spec at all. Both
+//     the route paths and the response shapes are chimera's invention.
+//     Stable until *we* change them. The `object: "chimera.<thing>"`
+//     namespace prefix is the marker.
+//
+//       GET  /v1/chats                           make_chats_list_handler
+//       GET  /v1/chats/:id                       make_chats_get_handler
+//       GET  /v1/chats/search?q=...              make_chats_search_handler
+//
+//     (Backed by chimera's SQLite chats + messages + messages_fts tables.
+//     Upstream llama-server has no persistence at all — its `/v1/responses`
+//     state lives in-process and is lost on restart. There is no equivalent
+//     `/v1/chats*` surface upstream.)
+//
+// `X-Chimera-Chat-Id` (request + response header on /v1/chat/completions
+// for multi-turn persistence consolidation) is similarly chimera-only;
+// no upstream equivalent.
 //
 // ----------------------------------------------------------------------------
 // Phase 1 scope — what is DELIBERATELY NOT exposed yet
@@ -264,6 +360,13 @@ common_params build_common_params(const ServeOptions & opts) {
     // this field. In a webui-less build the routes don't exist either
     // way, so the flag is a harmless pass-through.
     params.webui = opts.webui;
+
+    // External static UI directory. server_http_context::init mounts
+    // this at GET / via cpp-httplib's set_mount_point when non-empty.
+    // Independent of the xxd-baked variant above; when both are set,
+    // the mount point is registered first and takes precedence over
+    // the embedded GET / handler.
+    params.public_path = opts.public_path;
 
     // KV-cache slot snapshots. Upstream gates POST /slots/:id on this
     // being non-empty (returns "not supported" otherwise). GET /slots
@@ -1651,6 +1754,155 @@ server_http_context::handler_t make_persisting_chat_handler(
     };
 }
 
+// ====================================================================
+// Chat history read endpoints
+// ====================================================================
+// chimera's persistence write path (--persist-chats wrapper around
+// /v1/chat/completions) lands rows in the chats + messages tables.
+// These three GET endpoints expose the read side over HTTP so a web
+// UI can browse and search persisted conversations without going
+// through the CLI. Bound only when --persist-chats is set so the
+// db_path is known (and pairing the read side with the write side
+// avoids the surprise of "I never asked you to persist anything, why
+// are you exposing my chats?").
+
+struct ChatHistoryContext {
+    std::string db_path;
+};
+
+chimera_db::Connection chat_hist_open_db(ChatHistoryContext * ctx) {
+    return chimera_db::open_and_migrate(
+        ctx->db_path.empty() ? chimera_db::default_path() : ctx->db_path);
+}
+
+server_http_res_ptr chat_hist_err(int code, const std::string & msg) {
+    auto r = std::make_unique<server_http_res>();
+    r->status = code;
+    r->data = json{{ "error",
+        { { "message", msg }, { "code", code }, { "type", "invalid_request_error" } }
+    }}.dump();
+    return r;
+}
+
+json chat_to_json(const chimera_chat_store::Chat & c) {
+    return {
+        { "id",             c.id },
+        { "object",         "chimera.chat" },
+        { "created_at",     c.created_at },
+        { "updated_at",     c.updated_at },
+        { "title",          c.title },
+        { "model_path",     c.model_path },
+        { "model_alias",    c.model_alias },
+        { "system_prompt",  c.system_prompt },
+        { "source",         c.source },
+        { "message_count",  c.message_count },
+        { "partial_count",  c.partial_count },
+    };
+}
+
+json stored_message_to_json(const chimera_chat_store::StoredMessage & m) {
+    return {
+        { "id",          m.id },
+        { "chat_id",     m.chat_id },
+        { "seq",         m.seq },
+        { "role",        m.role },
+        { "content",     m.content },
+        { "reasoning",   m.reasoning },
+        { "media_json",  m.media_json },
+        { "tokens_in",   m.tokens_in },
+        { "tokens_out",  m.tokens_out },
+        { "created_at",  m.created_at },
+        { "partial",     m.partial },
+    };
+}
+
+// GET /v1/chats?limit=N  → { "object": "list", "data": [chat, ...] }
+// Sorted by updated_at desc (most recently active first). Default limit
+// 50, capped at 500 to keep the response bounded.
+server_http_context::handler_t make_chats_list_handler(ChatHistoryContext * ctx) {
+    return [ctx](const server_http_req & req) -> server_http_res_ptr {
+        int limit = 50;
+        const std::string lim = req.get_param("limit");
+        if (!lim.empty()) {
+            try { limit = std::stoi(lim); }
+            catch (const std::exception &) { return chat_hist_err(400, "invalid limit"); }
+            if (limit < 1 || limit > 500) {
+                return chat_hist_err(400, "limit must be in [1, 500]");
+            }
+        }
+        auto conn = chat_hist_open_db(ctx);
+        const auto chats = chimera_chat_store::list_chats(conn.get(), limit);
+        json data = json::array();
+        for (const auto & c : chats) data.push_back(chat_to_json(c));
+        auto res = std::make_unique<server_http_res>();
+        res->data = json{{ "object", "list" }, { "data", std::move(data) }}.dump();
+        return res;
+    };
+}
+
+// GET /v1/chats/:id  → { chat fields ..., "messages": [...] }
+// Messages ordered by seq ascending; includes partial-turn rows.
+server_http_context::handler_t make_chats_get_handler(ChatHistoryContext * ctx) {
+    return [ctx](const server_http_req & req) -> server_http_res_ptr {
+        const std::string id_str = req.get_param("id");
+        if (id_str.empty()) return chat_hist_err(400, "missing :id path param");
+        int64_t id;
+        try { id = std::stoll(id_str); }
+        catch (const std::exception &) { return chat_hist_err(400, "invalid chat id"); }
+        auto conn = chat_hist_open_db(ctx);
+        const auto chat = chimera_chat_store::load_chat(conn.get(), id);
+        if (!chat) {
+            // 400 (not 404): cpp-httplib's default error handler overwrites
+            // 404 bodies with "File Not Found". Same workaround we use in
+            // the vector store handlers.
+            return chat_hist_err(400, "no such chat: " + std::to_string(id));
+        }
+        const auto messages = chimera_chat_store::load_messages(conn.get(), id);
+        json mjson = json::array();
+        for (const auto & m : messages) mjson.push_back(stored_message_to_json(m));
+        json body = chat_to_json(*chat);
+        body["messages"] = std::move(mjson);
+        auto res = std::make_unique<server_http_res>();
+        res->data = body.dump();
+        return res;
+    };
+}
+
+// GET /v1/chats/search?q=...&limit=N
+//   → { "query": "...", "hits": [{chat_id, message_id, seq, role, snippet}, ...] }
+// Hits include FTS5 [word]-highlighted snippets. Default limit 20,
+// capped at 200.
+server_http_context::handler_t make_chats_search_handler(ChatHistoryContext * ctx) {
+    return [ctx](const server_http_req & req) -> server_http_res_ptr {
+        const std::string q = req.get_param("q");
+        if (q.empty()) return chat_hist_err(400, "missing required query param 'q'");
+        int limit = 20;
+        const std::string lim = req.get_param("limit");
+        if (!lim.empty()) {
+            try { limit = std::stoi(lim); }
+            catch (const std::exception &) { return chat_hist_err(400, "invalid limit"); }
+            if (limit < 1 || limit > 200) {
+                return chat_hist_err(400, "limit must be in [1, 200]");
+            }
+        }
+        auto conn = chat_hist_open_db(ctx);
+        const auto hits = chimera_chat_store::search_messages(conn.get(), q, limit);
+        json data = json::array();
+        for (const auto & h : hits) {
+            data.push_back({
+                { "chat_id",    h.chat_id },
+                { "message_id", h.message_id },
+                { "seq",        h.seq },
+                { "role",       h.role },
+                { "snippet",    h.snippet },
+            });
+        }
+        auto res = std::make_unique<server_http_res>();
+        res->data = json{{ "query", q }, { "hits", std::move(data) }}.dump();
+        return res;
+    };
+}
+
 } // namespace
 
 int command_serve(const ServeOptions & opts) {
@@ -1818,9 +2070,11 @@ int command_serve(const ServeOptions & opts) {
     // each chunk into a buffer and parsing on stream end). When the
     // flag is off, we bind the upstream handler unchanged.
     ChatPersistContext chat_persist_ctx;
+    ChatHistoryContext chat_hist_ctx;
     auto chat_handler = routes.post_chat_completions;  // capture by value
     if (opts.persist_chats) {
         chat_persist_ctx.db_path = opts.chat_db_path;
+        chat_hist_ctx.db_path    = opts.chat_db_path;
         // Touch the DB at startup to surface migration failures here
         // rather than mid-request.
         (void) chimera_db::open_and_migrate(
@@ -1901,6 +2155,17 @@ int command_serve(const ServeOptions & opts) {
         ctx_http.post("/v1/vector_stores/:name/search", ex_wrapper(make_vs_search_handler(&rag_ctx)));
     }
 
+    // Chat history read endpoints. Paired with --persist-chats so we
+    // only expose them when there's a write path producing the data.
+    // Order matters: register the literal /v1/chats/search path BEFORE
+    // /v1/chats/:id so cpp-httplib's first-match wins doesn't capture
+    // "search" as an :id value.
+    if (opts.persist_chats) {
+        ctx_http.get("/v1/chats",         ex_wrapper(make_chats_list_handler  (&chat_hist_ctx)));
+        ctx_http.get("/v1/chats/search",  ex_wrapper(make_chats_search_handler(&chat_hist_ctx)));
+        ctx_http.get("/v1/chats/:id",     ex_wrapper(make_chats_get_handler   (&chat_hist_ctx)));
+    }
+
     auto clean_up = [&]() {
         ctx_http.stop();
         ctx_server.terminate();
@@ -1959,7 +2224,11 @@ int command_serve(const ServeOptions & opts) {
         std::cout << "  persistence: --persist-chats ON (DB: "
                   << (chat_persist_ctx.db_path.empty()
                         ? chimera_db::default_path() : chat_persist_ctx.db_path)
-                  << ")\n";
+                  << ")\n"
+                  << "  chats: /v1/chats  /v1/chats/:id  /v1/chats/search\n";
+    }
+    if (!opts.public_path.empty()) {
+        std::cout << "  webui: serving " << opts.public_path << " at GET /\n";
     }
 
     // Blocks on the main thread until the task queue is terminated by the

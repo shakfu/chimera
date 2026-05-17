@@ -197,6 +197,16 @@ struct ServeOptions {
     // (e.g. on production deployments behind a reverse proxy that
     // serves a different UI).
     bool webui = true;                  // --no-webui (only meaningful in webui-embedded builds)
+
+    // External static-file directory for a web UI. When non-empty,
+    // chimera mounts the directory at GET / via cpp-httplib's
+    // set_mount_point — independent of CHIMERA_WEBUI_EMBED. Intended
+    // for a chimera-specific UI shipped as a separate tarball that
+    // surfaces chimera-only routes (/v1/messages, /v1/vector_stores/*,
+    // X-Chimera-Chat-Id, etc.) that the upstream llama.cpp webui has
+    // no UI for. When both are set, --public-path wins (mount_point is
+    // registered before the xxd-baked GET / handler).
+    std::string public_path;            // --public-path <dir>
 };
 
 int command_serve(const ServeOptions & opts);

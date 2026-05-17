@@ -339,73 +339,156 @@ on-disk and over-the-wire size (same change, two wins).
 
 ---
 
-## 6. Future work (Variant B and friends)
+## 6. Variant B — attempted and dumped
 
-Four follow-ups, ordered by usefulness:
+The `--public-path <dir>` flag shipped (see CHANGELOG `[Unreleased]`),
+giving chimera true API parity with llama-server on the static-serve
+side. A chimera-specific UI built against that flag was prototyped and
+dumped. This section records what was tried, why it was abandoned, and
+when (if ever) to revisit.
 
-1. **Variant B — `CHIMERA_WEBUI_PATH=ON` + `--public-path <dir>`.** Wire
-   up upstream's `set_mount_point` branch (the `if (!params.public_path.empty())`
-   sibling of the `#ifdef LLAMA_BUILD_WEBUI` block in `server-http.cpp`).
-   Ship the bundle as a separate tarball. Pros: UI lifecycle decoupled
-   from chimera, smaller default binary, door open to shipping a
-   chimera-specific UI that surfaces RAG / `X-Chimera-Chat-Id`. Cons:
-   two artifacts, runtime flag required. **Recommended next step if the
-   experiment graduates.**
+### 6.1. What was tried
 
-2. **Smoke test in `scripts/test.sh`.** A conditional block that probes
-   whether the current binary has the webui baked in (e.g. `GET /` →
-   200 + `text/html` vs. 404), and asserts the working case when so.
-   No-op when `CHIMERA_WEBUI_EMBED=OFF`. Defends against the
-   "upstream moved the binding" failure mode in § 5.1.
+Stack: vanilla JS + Alpine 3.x + htmx 2.x + Pico 2 CSS + marked +
+highlight.js + KaTeX, with Inter / JetBrains Mono self-hosted webfonts.
+~470 lines of JS in a single `app.js`, ~290 lines of HTML, ~180 lines of
+CSS. Vendored via a `scripts/fetch_webui_vendor.sh` that pulled ~50 pinned
+files (~1.4 MB on disk). Distribution: separate tarball mounted via
+`chimera serve --public-path <dir>` so chimera's default binary stayed
+untouched. Scope: chat with `X-Chimera-Chat-Id` round-trip, chat history
+sidebar (list + FTS5 search via the new `/v1/chats*` endpoints), vector
+store CRUD + ingest + search, markdown + code highlight + math rendering,
+settings (endpoint URL + API key + sampling defaults) in localStorage.
 
-3. **`manage.py build --webui` for rebuilding the bundle from
-   source.** Pulls in Node + npm and runs upstream's
-   `tools/server/webui/` Vite project. Only needed if we ever want to
-   ship a chimera-customized UI instead of upstream's verbatim.
+Make targets `webui-vendor` and `webui-serve` wrapped the workflow. The
+HTML/CSS/JS code lived in `webui/`. None of it ships anymore — see git
+history at the commit that introduced and the commit that removed.
 
-4. **Pre-gzip the bundles + serve with `Content-Encoding: gzip`.**
-   Currently the binary stores the full ~7 MB uncompressed bytes (see
-   the size table in § 2) *and* cpp-httplib serves them uncompressed
-   over the wire. JS/CSS gzip ratio is typically 3-4×, so this would
-   cut the in-binary footprint from ~6 MB stripped to ~2 MB *and* the
-   over-the-wire payload by the same factor. Requires:
-   - A small CMake step to gzip each asset before invoking `xxd.cmake`
-     (or replace `xxd.cmake` with a variant that gzips inline).
+### 6.2. Why it was dumped
+
+Five reasons, ordered by weight:
+
+1. **Identity mismatch.** Chimera's defining property is "one static
+   busybox-style binary that does many things, no extra install steps."
+   Owning a frontend is a different skill set on a different release
+   cadence with a different bug surface. The friction showed up fast:
+   the first manual smoke test of the UI surfaced bugs (sub-stores
+   calling `this.$nextTick` outside Alpine's scope; marked 14's removed
+   options; a MutationObserver feedback loop with KaTeX) that needed
+   browser-driven iteration to confirm fixed. That iteration loop is
+   not where chimera's effort should go.
+2. **Existing UIs already work.** chimera is OpenAI-compatible. Open
+   WebUI, LibreChat, Jan, LM Studio, and the upstream llama.cpp webui
+   (now opt-in via `CHIMERA_WEBUI_EMBED=ON` per § 1–5 of this doc) all
+   work today. The chimera-specific surfacing — RAG panel, persisted
+   chat browsing, `X-Chimera-Chat-Id`, the Anthropic Messages form —
+   is real but narrow value relative to the ongoing maintenance ask.
+3. **Demo code rots fast.** A "lightweight demo" looks small (~470 LOC
+   + vendor) but it gates a permanent tax: each chimera capability
+   becomes optional UI work, each vendor lib bump needs re-testing,
+   each browser API change is a new bug surface. Within 2–3 chimera
+   releases without active UI use, it would be visibly broken.
+4. **A broken demo is worse than no demo.** First user who runs
+   `make webui-serve` and hits a blank page or a stale-API regression
+   forms a "chimera is half-finished" impression. The risk is
+   asymmetric: working UI is "fine, expected"; broken UI is "this
+   project doesn't care about polish."
+5. **The chimera-specific routes don't actually need a UI.** RAG ingest
+   + search is one `chimera index` / `chimera search` invocation. Chat
+   history is `chimera chat --list --search`. The Anthropic Messages
+   shape is what the Anthropic SDK posts; you don't need a UI to use it.
+   Power users have CLIs; casual users have third-party OpenAI UIs.
+
+### 6.3. What stays vs. what went away
+
+Stays (the genuinely valuable byproducts of the experiment):
+
+- `chimera serve --public-path <dir>` flag — parity with llama-server,
+  works for any static directory, useful regardless of whether chimera
+  ever ships its own UI.
+- `GET /v1/chats`, `GET /v1/chats/:id`, `GET /v1/chats/search`
+  endpoints — close the read-side gap on `--persist-chats` for any
+  HTTP client, not just a UI. Useful for scripts, exporters,
+  third-party tools.
+- The 6 new smoke tests covering those endpoints + `--public-path`.
+- The "llama-server parity vs chimera-owned surface" table at the top
+  of `chimera_serve.cpp` — categorizes every route by drift risk.
+
+Removed:
+
+- `webui/` directory (the HTML / JS / CSS).
+- `scripts/fetch_webui_vendor.sh` (vendor fetcher).
+- Makefile targets `webui-vendor` and `webui-serve`.
+
+### 6.4. When (if ever) to revisit
+
+Re-open this **only** if one of these specific signals shows up. Generic
+"a chimera UI would be nice" is not a trigger — see § 6.2 point 5.
+
+- **Concrete user request** for a chimera-specific UI feature that
+  *cannot* be expressed through an existing OpenAI-compatible UI. Bar:
+  the user is currently hitting the gap, not "might want this later."
+- **chimera capability that has no CLI access path.** Today every
+  chimera-only feature is reachable from the CLI; if that ever stops
+  being true (rare modality, multi-modal composition that's awkward
+  in a terminal, etc.), the UI argument strengthens.
+- **External contributor wants to own the UI.** If someone who actually
+  enjoys frontend work shows up and commits to maintaining it, the
+  effort-vs-value math changes. The shipped server-side API (especially
+  the `/v1/chats*` set + `X-Chimera-Chat-Id`) is the launching pad.
+
+Until then: chimera does the server, third-party UIs do the UI.
+
+## 7. Other follow-ups
+
+Two smaller things, kept around because they apply regardless of UI
+decisions:
+
+1. **Smoke test in `scripts/test.sh` for Variant A.** A conditional
+   block that probes whether the current binary has the embedded
+   webui baked in (e.g. `GET /` → 200 + `text/html` vs. 404), and
+   asserts the working case when so. No-op when
+   `CHIMERA_WEBUI_EMBED=OFF`. Defends against the "upstream moved
+   the binding" failure mode in § 5.1.
+
+2. **Pre-gzip the embedded bundles + serve with
+   `Content-Encoding: gzip`.** Currently the binary stores the full
+   ~7 MB uncompressed bytes (see the size table in § 2) *and*
+   cpp-httplib serves them uncompressed over the wire. JS/CSS gzip
+   ratio is typically 3–4×, so this would cut the in-binary footprint
+   from ~6 MB stripped to ~2 MB *and* the over-the-wire payload by
+   the same factor. Requires:
+   - A small CMake step to gzip each asset before invoking
+     `xxd.cmake` (or replace `xxd.cmake` with a variant that gzips
+     inline).
    - A chimera-side patch to `server-http.cpp`'s webui handlers to set
      `Content-Encoding: gzip` on the response. Browsers handle this
      transparently; no UI change.
    - A fallback path for clients that pass `Accept-Encoding: identity`
-     (rare; the patch can just 406 or include an inflated copy — the
-     simpler call is to require gzip support, every browser since 2010
-     sends `Accept-Encoding: gzip` by default).
+     (rare; the patch can just 406, every browser since 2010 sends
+     `Accept-Encoding: gzip` by default).
 
-   Worth doing if size becomes a real concern *and* Variant B doesn't.
-   If Variant B ships, this becomes moot.
-
-The "make the webui understand chimera-specific features" question
-(RAG mode toggle, chat-id surfaced in the UI, `/v1/messages` Anthropic
-compat shown alongside OpenAI) is *only* tractable under Variant B —
-Variant A pins us to upstream's UI source.
+   Worth doing if Variant A users complain about size.
 
 ---
 
-## 7. Testing
+## 8. Testing
 
 There are currently no automated tests for the webui path. The
 `scripts/test.sh` end-to-end suite tests against an `OFF` build (the
 default), so the webui code paths are not exercised by `make test`.
 
 The minimum useful addition would be the conditional smoke test
-sketched in § 6.2: probe whether the binary has the webui, and if so
-assert the three endpoints respond correctly. Keep it short — a full
-browser-driven test (Playwright, etc.) is overkill for an experimental
-feature.
+sketched in § 7 item 1: probe whether the binary has the webui, and if
+so assert the three endpoints respond correctly. Keep it short — a full
+browser-driven test (Playwright, etc.) is overkill for an opt-in
+experimental feature.
 
 Until that lands, the manual verification recipe in § 4 is what we have.
 
 ---
 
-## 8. Useful references
+## 9. Useful references
 
 - `tools/server/server-http.cpp` in the vendored llama.cpp tree — the
   authoritative source for the route binding, the COEP/COOP headers,
@@ -414,10 +497,12 @@ Until that lands, the manual verification recipe in § 4 is what we have.
   how upstream itself invokes `xxd.cmake` for the same assets. Our
   chimera-side CMake mirrors that block.
 - `tools/server/webui/` in the vendored llama.cpp tree — the Svelte
-  source the bundles are built from. Read this only if you're planning
-  Variant B with a chimera-customized UI.
+  source the bundles are built from.
 - [`doc/serve.md`](../serve.md) — user-facing notes (the `--no-webui`
   flag and the build-time opt-in mention).
 - [`doc/dev/server.md`](server.md) — the broader `chimera serve`
   developer guide; § 4 ("Routes") and § 7 ("Things to watch out for")
   pair well with this document.
+- Git history at the commit that removed `webui/` — the only place the
+  prototyped chimera-specific UI source survives. Useful starting point
+  if Variant C ever materializes per § 6.4.
