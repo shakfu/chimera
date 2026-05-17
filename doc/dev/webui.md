@@ -86,6 +86,26 @@ option flips them in. This decouples the staging step from the binary
 flip so toggling on a previously-built tree is a one-line `cmake`
 reconfigure + rebuild, not a full `make deps` cycle.
 
+**Measured binary cost** (Apple Silicon, Release build, May 2026):
+
+| | unstripped | `strip`-ped |
+|---|---:|---:|
+| `CHIMERA_WEBUI_EMBED=OFF` | 34 MB | 31 MB |
+| `CHIMERA_WEBUI_EMBED=ON`  | 41 MB | 37 MB |
+| **net webui cost** | **+7 MB** | **+6 MB** |
+
+The asset bytes (6.6 MB `bundle.js` + 505 KB `bundle.css` + ~7 KB
+`index.html` + ~268 B `loading.html`) sit in the binary's data section
+as plain `unsigned char` arrays, which `strip` cannot touch — so the
+asset payload passes through ~1:1. The strip-recoverable delta (~1 MB)
+is debug info on the surrounding chimera + server-http code, not on the
+xxd'd assets.
+
+Stripped is what gets shipped; the +6 MB figure is the one to quote in
+user-facing material. See § 6.4 for the only viable size-reduction path
+(serve the assets gzip-compressed and skip storing the uncompressed
+copy in the binary).
+
 **No Node toolchain at build time.** The bundles ship pre-built in
 `build/llama.cpp/tools/server/public/`, and `xxd.cmake` is pure CMake.
 Rebuilding the JS bundle (e.g. to ship a chimera-customized UI) would
@@ -121,7 +141,7 @@ ls build/src/chimera/*.hpp
 # expect: bundle.css.hpp  bundle.js.hpp  index.html.hpp  loading.html.hpp
 
 ls -la build/chimera
-# expect: ~7 MB larger than an OFF build
+# expect: ~7 MB larger than an OFF build (~6 MB after `strip`)
 ```
 
 Run-time smoke:
@@ -242,11 +262,14 @@ immutable` + content-hashed filenames, just the static path). Not a
 problem on localhost; might be worth knowing if a user reports "the UI
 takes forever to load over SSH tunnel."
 
+§ 6.4 sketches the gzip-at-build-time fix that would address both the
+on-disk and over-the-wire size (same change, two wins).
+
 ---
 
 ## 6. Future work (Variant B and friends)
 
-Three follow-ups, ordered by usefulness:
+Four follow-ups, ordered by usefulness:
 
 1. **Variant B — `CHIMERA_WEBUI_PATH=ON` + `--public-path <dir>`.** Wire
    up upstream's `set_mount_point` branch (the `if (!params.public_path.empty())`
@@ -267,6 +290,25 @@ Three follow-ups, ordered by usefulness:
    source.** Pulls in Node + npm and runs upstream's
    `tools/server/webui/` Vite project. Only needed if we ever want to
    ship a chimera-customized UI instead of upstream's verbatim.
+
+4. **Pre-gzip the bundles + serve with `Content-Encoding: gzip`.**
+   Currently the binary stores the full ~7 MB uncompressed bytes (see
+   the size table in § 2) *and* cpp-httplib serves them uncompressed
+   over the wire. JS/CSS gzip ratio is typically 3-4×, so this would
+   cut the in-binary footprint from ~6 MB stripped to ~2 MB *and* the
+   over-the-wire payload by the same factor. Requires:
+   - A small CMake step to gzip each asset before invoking `xxd.cmake`
+     (or replace `xxd.cmake` with a variant that gzips inline).
+   - A chimera-side patch to `server-http.cpp`'s webui handlers to set
+     `Content-Encoding: gzip` on the response. Browsers handle this
+     transparently; no UI change.
+   - A fallback path for clients that pass `Accept-Encoding: identity`
+     (rare; the patch can just 406 or include an inflated copy — the
+     simpler call is to require gzip support, every browser since 2010
+     sends `Accept-Encoding: gzip` by default).
+
+   Worth doing if size becomes a real concern *and* Variant B doesn't.
+   If Variant B ships, this becomes moot.
 
 The "make the webui understand chimera-specific features" question
 (RAG mode toggle, chat-id surfaced in the UI, `/v1/messages` Anthropic
