@@ -42,6 +42,16 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 - Privacy documentation for persistence features. New "Privacy / data on disk" section in `doc/serve.md` enumerating exactly what `serve --persist-chats` and `chat --persist` record (message content, reasoning spans, model path, token counts, timestamps, media paths; explicitly *not* client IPs, headers, API keys, or HTTP bodies), where the DB lives per platform, and how to wipe persisted state. A matching summary table in `doc/cheatsheet.md` covers all five write-to-disk surfaces (chat persist, serve persist-chats, RAG ingest, embedding cache, linenoise history). Closes the gap where opt-in persistence shipped without a user-facing privacy note.
 
+### Removed
+
+- `TODO.md` pruned of items that have shipped (sentence-aware chunking, hybrid search, `X-Chimera-Chat-Id`, Ctrl-C partial-turn persistence, privacy notes). Four items moved to a new "Out of scope (wontfix)" section with brief rationale rather than silently deleted, so the same proposals aren't re-litigated from scratch:
+  - `POST /props` runtime config mutation (conflicts with "CLI is the config").
+  - Multi-tenancy / `is_router_server` (wrong deployment shape — one process = one model is core to the busybox identity; users needing multi-model routing should run one chimera per model behind a reverse proxy).
+  - HTTPS direct serving via `--ssl-cert-file` / `--ssl-key-file` (reverse-proxy territory).
+  - Auth beyond `--api-key` — JWT, per-key rate limiting, multi-tenant auth (reverse-proxy / API-gateway territory).
+
+  The web chat UI item remains in TODO but was restructured as two independent opt-in variants (`CHIMERA_WEBUI_EMBED` = xxd-baked single binary; `CHIMERA_WEBUI_PATH` = `--public-path` static-file serving). Both gated on a new `manage.py build --webui` step that pulls in the Node toolchain only when requested.
+
 ## [0.1.3]
 
 ### Added

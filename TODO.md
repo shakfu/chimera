@@ -21,9 +21,6 @@ Detailed rationale and design discussion lives in `doc/dev/server.md`
 
 Medium-term:
 
-- [ ] Bind `POST /props` (mutating server props at runtime). Currently
-      only `GET /props` is bound; the write side conflicts with
-      "CLI is the config" but real deployments may want it.
 - [ ] Bind `GET /slots` + `POST /slots/:id` (KV-cache snapshots) and
       `GET/POST /lora-adapters` (LoRA hot-swap). Both are one-line
       `ctx_http.post(...)` calls each; the work is the UX around them
@@ -31,24 +28,36 @@ Medium-term:
 
 Longer-term:
 
-- [ ] Web chat UI: either re-enable `LLAMA_BUILD_WEBUI=ON` in
-      `manage.py` (binary grows ~11 MB; uses upstream's `xxd.cmake`
-      machinery) or ship assets next to the binary + add a
-      `--public-path` flag.
+- [ ] Web chat UI — opt-in only, **not** in the default release.
+      Two independent variants to wire up; users pick one (or neither)
+      at build time. Mirrors the `CHIMERA_LINENOISE=AUTO|ON|OFF`
+      pattern.
+
+      Variant A — **embedded webui** (`CHIMERA_WEBUI_EMBED=ON`):
+      re-enable `LLAMA_BUILD_WEBUI=ON` in `manage.py`, run upstream's
+      `xxd.cmake` machinery to bake the built bundle into the binary
+      as a C header, bind a `GET /` handler that serves it. Binary
+      grows ~11 MB. Pro: single artifact, drop-and-run. Con: UI is
+      pinned to whatever chimera version was cut; updating the UI
+      requires a chimera rebuild.
+
+      Variant B — **public-path** (`CHIMERA_WEBUI_PATH=ON`): compile in
+      a static-file handler keyed off a new `chimera serve
+      --public-path <dir>` flag. Webui bundle ships as a separate
+      tarball (or the user points at any directory). Pro: UI lifecycle
+      decoupled from chimera; opens a door to shipping a
+      chimera-specific UI later that surfaces RAG mode,
+      `X-Chimera-Chat-Id`, etc. Con: two artifacts to ship, runtime
+      flag required to enable.
+
+      Both need: `manage.py build --webui` to drive the upstream JS
+      toolchain (adds a Node dependency at build time, opt-in only),
+      and a decision on whether the route is auth-gated by `--api-key`
+      like the JSON routes are.
 - [ ] SSE for image generation progress on `/v1/images/*`. Pick a
       client convention; OpenAI's spec doesn't define one. SD already
       reports step-by-step progress to the callback we currently route
       to stderr.
-- [ ] Multi-tenancy: multiple LLMs simultaneously, route by request's
-      `model` field. This is the `is_router_server` path in upstream's
-      `server.cpp`; effectively a rewrite of `command_serve`. Also
-      unlocks multi-model embedding/rerank/audio/SD configurations.
-- [ ] HTTPS direct serving via `--ssl-cert-file` / `--ssl-key-file`.
-      cpp-httplib supports it; needs to be threaded through
-      `server_http_context::init`. Most deployments will continue to
-      front chimera with a reverse proxy.
-- [ ] Authentication beyond `--api-key`: JWT or per-key rate limiting
-      for multi-tenant deployments.
 - [ ] Split `chimera_serve.cpp` into modality-specific files
       (`serve_audio.cpp`, `serve_images.cpp`, ...) when it crosses
       ~1000 LOC. Currently ~600.
@@ -78,7 +87,30 @@ Longer-term:
       have been tested.
 - [ ] Document the model formats each subcommand accepts (and which
       common GGUF variants don't work).
-- [ ] Privacy note in the user-facing docs (`doc/serve.md`,
-      `doc/cheatsheet.md`) about what `--persist` and `--persist-chats`
-      record. The DB lives in user-private XDG paths but this should be
-      called out explicitly.
+
+## Out of scope (wontfix)
+
+Recorded so the same proposals aren't re-litigated from scratch. Each
+was considered, weighed against chimera's "single static busybox-style
+binary" identity, and consciously rejected. Reopen the discussion only
+if a concrete user request shows up.
+
+- **`POST /props`** — runtime mutation of server props. Conflicts with
+  "CLI is the config." Configuration belongs in flags and the DB, not
+  a write API that lets clients reshape the server out from under
+  other clients. Wontfix.
+- **Multi-tenancy / `is_router_server`** — multiple LLMs in one
+  process, routed by the request's `model` field. Effectively a
+  rewrite of `command_serve` for a deployment shape chimera isn't
+  aimed at (one process = one model is core to the busybox identity).
+  Users who need multi-model routing should run one chimera per model
+  behind a real reverse proxy. Wontfix.
+- **HTTPS direct serving** (`--ssl-cert-file` / `--ssl-key-file`) —
+  cpp-httplib supports it but a reverse proxy (nginx, caddy, Cloudflare,
+  etc.) is the right place to terminate TLS for any deployment that
+  cares. Adding it here means rebuilding chimera every time a cert
+  rotates. Wontfix.
+- **Auth beyond `--api-key`** — JWT, per-key rate limiting,
+  multi-tenant auth. Same reasoning as HTTPS: reverse proxies and API
+  gateways solve this an order of magnitude better than chimera can.
+  Wontfix.
