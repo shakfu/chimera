@@ -1,4 +1,4 @@
-.PHONY: deps build build-with-webui rebuild clean reset test smoke install uninstall release-notes bump-check test-db-migrate test-golden combine test-external-smoke
+.PHONY: deps build build-with-webui build-cuda build-rocm build-sycl build-vulkan rebuild clean reset test smoke install uninstall release-notes bump-check test-db-migrate test-golden combine test-external-smoke
 
 # Python interpreter, picked at make-invocation time by probing the host.
 # Order: `python3` (Linux / macOS / Conda / venv), `python` (Windows
@@ -29,6 +29,45 @@ build: deps
 # for the seams. Pass --no-webui at runtime to suppress per-invocation.
 build-with-webui: deps
 	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DCHIMERA_WEBUI_EMBED=ON
+	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
+
+# GPU-backend build targets. Each one builds the third-party deps with the
+# matching GGML_<BACKEND>=1 env var (picked up by scripts/manage.py, which
+# forwards it to llama.cpp / whisper.cpp / stable-diffusion.cpp configures)
+# and then configures chimera with -DGGML_<BACKEND>=ON so the resulting
+# binary links the backend's static archive. Backend toolkit (CUDA Toolkit,
+# ROCm/HIP, oneAPI, Vulkan SDK) must already be installed on the host.
+#
+# Override architectures via env vars:
+#   CMAKE_CUDA_ARCHITECTURES=89          (Ada/RTX 40xx; default builds many)
+#   CMAKE_HIP_ARCHITECTURES=gfx1100      (RDNA3; default builds many — ROCm
+#                                         uses HIP under the hood, so the
+#                                         env var keeps its upstream name)
+# Override toolchains via env vars when not on PATH:
+#   CMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+# CUDA perf knobs (forwarded by manage.py): GGML_CUDA_FORCE_MMQ,
+# GGML_CUDA_FORCE_CUBLAS, GGML_CUDA_FA_ALL_QUANTS, GGML_CUDA_PEER_MAX_BATCH_SIZE.
+# ROCm knob: GGML_HIP_ROCWMMA_FATTN=1 for rocWMMA flash attention.
+#
+# Verify the resulting binary picked up the backend with `./build/chimera info`.
+build-cuda:
+	@GGML_CUDA=1 $(MAKE) deps
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
+	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
+
+build-rocm:
+	@GGML_HIP=1 $(MAKE) deps
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON
+	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
+
+build-sycl:
+	@GGML_SYCL=1 $(MAKE) deps
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_SYCL=ON
+	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
+
+build-vulkan:
+	@GGML_VULKAN=1 $(MAKE) deps
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 rebuild:

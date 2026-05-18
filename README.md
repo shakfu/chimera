@@ -67,15 +67,18 @@ make test     # smoke + end-to-end runs gated on models/ presence
 
 ### Backends
 
-On macOS, Metal is enabled by default. Other backends are opt-in via environment variables when invoking `make deps`:
+On macOS, Metal is enabled by default. For other backends, use the matching one-shot build target — each one rebuilds the third-party deps with the right `GGML_<BACKEND>=1` and configures chimera with `-DGGML_<BACKEND>=ON`:
 
 ```bash
-GGML_CUDA=1   make deps    # NVIDIA CUDA
-GGML_VULKAN=1 make deps    # Vulkan (cross-platform)
-GGML_HIP=1    make deps    # AMD HIP/ROCm
+make build-cuda      # NVIDIA CUDA
+make build-rocm      # AMD ROCm (HIP)
+make build-sycl      # Intel oneAPI / SYCL
+make build-vulkan    # Vulkan (cross-platform)
 ```
 
-Then re-run `cmake` with the matching `-DGGML_<BACKEND>=ON` to pick up the right libraries.
+The backend toolkit (CUDA Toolkit, ROCm, oneAPI, or Vulkan SDK) must already be installed on the host. Override architectures with `CMAKE_CUDA_ARCHITECTURES` (e.g. `89` for Ada/RTX 40xx) or `CMAKE_HIP_ARCHITECTURES` (e.g. `gfx1100` for RDNA3) to avoid the slow default fat-build. CUDA perf knobs (`GGML_CUDA_FORCE_MMQ`, `GGML_CUDA_FORCE_CUBLAS`, `GGML_CUDA_FA_ALL_QUANTS`) and the ROCm `GGML_HIP_ROCWMMA_FATTN` flash-attention switch are picked up from the env. Verify with `./build/chimera info`, which prints the linked backends.
+
+If you'd rather drive the two stages by hand (mixing backends, or staging a deps build separately), set `GGML_<BACKEND>=1` on `make deps` and pass `-DGGML_<BACKEND>=ON` to `cmake` yourself.
 
 ## Usage
 
