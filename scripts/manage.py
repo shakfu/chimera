@@ -10,11 +10,13 @@ usage: manage.py [-h] [-v]  ...
 
 chimera build manager
 
-    build        fetch + build llama.cpp / whisper.cpp / stable-diffusion.cpp
-                 into thirdparty/<project>/{include,lib}
-    download     download a Llama or Whisper model for testing
-    info         show pinned + checked-out dependency versions
-    clean        remove build/ and thirdparty/<project>/{bin,lib,include}
+    build           fetch + build llama.cpp / whisper.cpp / stable-diffusion.cpp
+                    into thirdparty/<project>/{include,lib}
+    build_chimera   end-to-end build: vendor deps + configure + build chimera
+                    (the no-make path; works on Windows without GNU make)
+    download        download a Llama or Whisper model for testing
+    info            show pinned + checked-out dependency versions
+    clean           remove build/ and thirdparty/<project>/{bin,lib,include}
 
 Backend support (via build command flags or environment variables):
     --metal, -m       Enable Metal backend (macOS)
@@ -1421,6 +1423,128 @@ class Application(ShellCmd, metaclass=MetaCommander):
             if isinstance(builder, StableDiffusionCppBuilder) and args.no_sd_examples:
                 kwargs["examples"] = False
             builder.build(**kwargs)
+
+    # ------------------------------------------------------------------------
+    # build_chimera
+    #
+    # One-shot end-to-end build: vendor third-party deps (with the selected
+    # GPU backend, if any), then configure + build the chimera CLI via cmake.
+    # The Makefile's `build` / `build-cuda` / `build-rocm` / `build-sycl` /
+    # `build-vulkan` targets are thin wrappers over the same two phases, but
+    # GNU make isn't always available on Windows. Driving both phases from
+    # Python keeps the build a single command on every platform.
+
+    @opt("--cuda", "-c", "enable CUDA backend (NVIDIA GPUs)")
+    @opt("--rocm", "-r", "enable ROCm/HIP backend (AMD GPUs)")
+    @opt("--sycl", "-y", "enable SYCL backend (Intel GPUs)")
+    @opt("--vulkan", "-V", "enable Vulkan backend (cross-platform)")
+    @opt("--metal", "-m", "enable Metal backend (macOS; default on Darwin)")
+    @opt("--opencl", "-o", "enable OpenCL backend")
+    @opt("--webui", "-W", "embed the upstream llama.cpp prebuilt web UI")
+    @option(
+        "--build-dir",
+        "-B",
+        default="build",
+        help="cmake build directory (default: build)",
+    )
+    @option(
+        "--jobs",
+        "-j",
+        type=int,
+        default=None,
+        help="parallel build jobs (default: cmake --build -j with no limit)",
+    )
+    @option(
+        "--build-type",
+        default="Release",
+        choices=["Release", "Debug", "RelWithDebInfo", "MinSizeRel"],
+        help="cmake build type (default: Release)",
+    )
+    def do_build_chimera(self, args: argparse.Namespace) -> None:
+        """end-to-end build: vendor deps + configure + build chimera"""
+        # Phase 1: pick exactly one GPU backend (or none) and forward it to
+        # the deps build via the env vars LlamaCppBuilder/etc. already read.
+        # Mutually exclusive because a single chimera binary statically links
+        # one GPU backend archive set; mixing CUDA+ROCm at configure time
+        # would only compile, not run.
+        backend_flags = {
+            "cuda": args.cuda,
+            "rocm": args.rocm,
+            "sycl": args.sycl,
+            "vulkan": args.vulkan,
+            "opencl": args.opencl,
+        }
+        selected = [name for name, on in backend_flags.items() if on]
+        if len(selected) > 1:
+            self.log.error(
+                f"select at most one GPU backend; got: {', '.join(selected)}"
+            )
+            sys.exit(1)
+
+        backend_env = {
+            "cuda": "GGML_CUDA",
+            "rocm": "GGML_HIP",
+            "sycl": "GGML_SYCL",
+            "vulkan": "GGML_VULKAN",
+            "opencl": "GGML_OPENCL",
+        }
+        backend_cmake = {
+            "cuda": "GGML_CUDA",
+            "rocm": "GGML_HIP",
+            "sycl": "GGML_SYCL",
+            "vulkan": "GGML_VULKAN",
+            "opencl": "GGML_OPENCL",
+        }
+        for name, env_var in backend_env.items():
+            os.environ[env_var] = "1" if backend_flags[name] else "0"
+        if args.metal:
+            os.environ["GGML_METAL"] = "1"
+
+        # chimera requires sd to share llama.cpp's ggml so we get a single
+        # backend set linked once. Pin it here so users don't have to know.
+        os.environ["SD_USE_VENDORED_GGML"] = "0"
+
+        # Phase 2: run the deps build. Reuse the existing builder pipeline
+        # by directly instantiating + invoking it on each project, mirroring
+        # `do_build` with --all. We can't call do_build() through argparse
+        # without re-parsing, and synthesizing a Namespace is more brittle
+        # than this short explicit loop.
+        for BuilderClass in (
+            LlamaCppBuilder,
+            WhisperCppBuilder,
+            StableDiffusionCppBuilder,
+            LinenoiseBuilder,
+            SqliteBuilder,
+            SqliteVecBuilder,
+        ):
+            BuilderClass().build()
+
+        # Phase 3: configure + build chimera. -DGGML_<BACKEND>=ON lights up
+        # the matching find_package + link block in the top-level CMakeLists.
+        cmake_defs = [
+            "-DSD_USE_VENDORED_GGML=OFF",
+            f"-DCMAKE_BUILD_TYPE={args.build_type}",
+        ]
+        if selected:
+            cmake_defs.append(f"-D{backend_cmake[selected[0]]}=ON")
+        if args.webui:
+            cmake_defs.append("-DCHIMERA_WEBUI_EMBED=ON")
+
+        cwd = self.project.cwd
+        self.cmd(
+            f"cmake -S . -B {args.build_dir} " + " ".join(cmake_defs),
+            cwd=cwd,
+        )
+        jobs_flag = f" -j{args.jobs}" if args.jobs else " -j"
+        self.cmd(
+            f"cmake --build {args.build_dir} --target chimera "
+            f"--config {args.build_type}{jobs_flag}",
+            cwd=cwd,
+        )
+        self.log.info(
+            "chimera build complete: "
+            f"{(cwd / args.build_dir / 'chimera').as_posix()}"
+        )
 
     # ------------------------------------------------------------------------
     # info

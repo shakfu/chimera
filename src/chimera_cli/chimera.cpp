@@ -21,8 +21,10 @@
 
 #ifndef _WIN32
 #include <unistd.h>  // isatty
+#include <sys/ioctl.h>  // TIOCGWINSZ for terminal width in the chat banner
 #else
 #include <io.h>
+#include <windows.h>  // GetConsoleScreenBufferInfo for terminal width
 #define isatty _isatty
 #define STDIN_FILENO _fileno(stdin)
 #define STDOUT_FILENO _fileno(stdout)
@@ -79,7 +81,8 @@ using LlamaContextPtr = std::unique_ptr<llama_context, LlamaContextDeleter>;
 // one switch below, so re-skinning chat is a single-site edit.
 enum class Sem {
     Reset,   // clear any active SGR
-    User,    // the '> ' prompt + user-typed input
+    User,    // the '> ' prompt + user-typed input (bold white)
+    Title,   // "chimera" in the chat banner (bold cyan)
     Cmd,     // slash-command names in banner / help
     Think,   // model reasoning_content (between <think>...</think>)
     Stats,   // per-turn 'Prompt: X t/s | Generation: Y t/s' line
@@ -90,7 +93,14 @@ enum class Sem {
 inline std::ostream & operator<<(std::ostream & os, Sem s) {
     switch (s) {
         case Sem::Reset: return os << rang::style::reset;
-        case Sem::User:  return os << rang::fg::green;
+        // User input renders in bold white. We can't compose rang's
+        // style::bold + fg::reset cleanly into a single ostream insertion
+        // here (each emits its own SGR sequence and rang::fg::reset on
+        // some terminals clears the bold attribute), so emit the SGR
+        // directly: ESC [1;37m (bold + white foreground).
+        case Sem::User:  return os << "\x1b[1;37m";
+        // "chimera" in the banner: bold cyan.
+        case Sem::Title: return os << "\x1b[1;36m";
         case Sem::Cmd:   return os << rang::fg::cyan;
         case Sem::Think: return os << rang::fg::gray;
         case Sem::Stats: return os << rang::fg::magenta;
@@ -521,6 +531,7 @@ std::string run_generation_mtmd(
     // they tend to emit EOG immediately. Falling back to raw text on
     // template-init failure keeps base-model use working.
     std::string final_prompt = augmented_prompt;
+    bool prompt_is_templated = false;
     common_chat_templates_ptr templates = common_chat_templates_init(model, "", "", "");
     if (templates) {
         common_chat_msg msg;
@@ -533,12 +544,17 @@ std::string run_generation_mtmd(
         common_chat_params cp = common_chat_templates_apply(templates.get(), inputs);
         if (!cp.prompt.empty()) {
             final_prompt = cp.prompt;
+            prompt_is_templated = true;
         }
     }
 
     mtmd_input_text input_text;
     input_text.text = final_prompt.c_str();
-    input_text.add_special = true;
+    // When the chat template fired, the prompt already embeds <|begin_of_text|>
+    // (or equivalent BOS); add_special=true would prepend a second BOS and
+    // confuse the model into emitting stray <|start_header_id|>...<|end_header_id|>
+    // tokens. Raw-prompt fallback (no template) still needs the BOS added.
+    input_text.add_special = !prompt_is_templated;
     input_text.parse_special = true;
 
     MtmdInputChunksPtr chunks(mtmd_input_chunks_init());
@@ -812,6 +828,29 @@ std::vector<std::string> expand_glob(const std::string & pattern_in) {
     return out;
 }
 
+// Best-effort terminal width. Used by the chat banner to right-align
+// the model filename against the left-aligned title. Falls back to 80
+// columns when we can't query the terminal (pipe, redirect, weird TTY).
+int terminal_width() {
+#ifndef _WIN32
+    struct winsize ws{};
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+        return ws.ws_col;
+    }
+#else
+    CONSOLE_SCREEN_BUFFER_INFO csbi{};
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(h, &csbi)) {
+        int w = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+        if (w > 0) return w;
+    }
+#endif
+    if (const char * env = std::getenv("COLUMNS")) {
+        try { int w = std::stoi(env); if (w > 0) return w; } catch (...) {}
+    }
+    return 80;
+}
+
 // Best-effort identification of the "modalities" line on the banner.
 std::string describe_modalities(mtmd_context * mctx) {
     std::string s = "text";
@@ -960,17 +999,29 @@ int command_chat(const LlamaCommonOptions & opts,
     const bool can_audio = mctx && mtmd_support_audio(mctx.get());
 
     // ---- banner / startup help -----------------------------------------
-    const std::string modalities = describe_modalities(mctx.get());
+    // Clear the screen on TTY entry so the chat session starts on a clean
+    // canvas. Gated on color_on (which already implies isatty + a sane
+    // terminal) to avoid emitting ANSI to a pipe or a dumb terminal.
+    if (color_on) std::cout << "\x1b[2J\x1b[H";
+
     const std::string model_name = std::filesystem::path(opts.model).filename().string();
-    std::cout << "build      : " << CHIMERA_LLAMACPP_VERSION << "\n"
-              << "model      : " << model_name << "\n"
-              << "modalities : " << modalities << "\n";
+    // Left half of the banner: "chimera vX.Y.Z chat". The width
+    // calculation has to use the *plain* (un-styled) string length so the
+    // padding lands correctly when SGR escapes are present.
+    const std::string title_plain = std::string("chimera ") + CHIMERA_VERSION + " chat";
+    const int cols = terminal_width();
+    int pad = cols - static_cast<int>(title_plain.size()) - static_cast<int>(model_name.size());
+    if (pad < 1) pad = 1;
+    std::cout << Sem::Title << "chimera" << Sem::Reset
+              << " " << CHIMERA_VERSION << " chat"
+              << std::string(static_cast<size_t>(pad), ' ')
+              << model_name << "\n\n";
+    std::cout << "type " << Sem::Cmd << "/help" << Sem::Reset
+              << " to list available commands, or "
+              << Sem::Cmd << "/exit" << Sem::Reset << " to quit\n\n";
     if (!system_prompt.empty()) {
-        std::cout << "using custom system prompt\n";
+        std::cout << Sem::Info << "using custom system prompt" << Sem::Reset << "\n\n";
     }
-    std::cout << "\ntype " << Sem::Cmd << "/help" << Sem::Reset
-              << " for commands; " << Sem::Cmd << "/exit" << Sem::Reset
-              << " or Ctrl-D to quit.\n\n";
 
     auto cmd_line = [](const char * name, const char * desc) {
         std::cout << "  " << Sem::Cmd << name << Sem::Reset << desc << "\n";
@@ -1018,10 +1069,11 @@ int command_chat(const LlamaCommonOptions & opts,
 
     // Plain prompt for linenoise: ANSI escapes inside the prompt string
     // confuse linenoise's width math (it uses utf8_str_width, which counts
-    // ESC bytes as visible columns). Instead we emit the green SGR escape
-    // to stdout right before calling linenoise_read; the SGR state persists
-    // across linenoise's cursor moves so both the prompt characters and the
-    // user's typed input render green. We reset the SGR after the call.
+    // ESC bytes as visible columns). Instead we emit the bold-white SGR
+    // escape to stdout right before calling linenoise_read; the SGR state
+    // persists across linenoise's cursor moves so both the prompt
+    // characters and the user's typed input render bold white. We reset
+    // the SGR after the call.
     const char * const prompt_str = "> ";
 
     auto attach_text_file = [&](const std::string & path) -> bool {
@@ -1078,10 +1130,12 @@ int command_chat(const LlamaCommonOptions & opts,
 
         std::string line;
         bool got_line = false;
-        // Emit the green SGR raw (rang would emit the same bytes; we use the
-        // string form so it's identical to what we reset with below, and so
-        // we can flush without a manipulator dance).
-        if (color_on) std::cout << "\x1b[32m" << std::flush;
+        // Emit the bold-white SGR raw (rang would emit the same bytes; we
+        // use the string form so it's identical to what we reset with
+        // below, and so we can flush without a manipulator dance). The
+        // SGR state persists across linenoise's cursor moves so both the
+        // "> " prompt and the user's typed input render bold white.
+        if (color_on) std::cout << "\x1b[1;37m" << std::flush;
 #ifdef CHIMERA_HAS_LINENOISE
         if (use_linenoise && ln_ctx) {
             char * raw = linenoise_read(ln_ctx.get(), prompt_str);
@@ -1252,7 +1306,11 @@ int command_chat(const LlamaCommonOptions & opts,
 
             mtmd_input_text input_text;
             input_text.text = params.prompt.c_str();
-            input_text.add_special  = true;
+            // See the text-only branch below for the rationale: the chat
+            // template already includes BOS, so add_special=true would
+            // double-BOS the prompt and the model emits a stray
+            // <|start_header_id|>assistant<|end_header_id|> at reply start.
+            input_text.add_special  = false;
             input_text.parse_special = true;
             MtmdInputChunksPtr chunks(mtmd_input_chunks_init());
             if (!chunks) {
@@ -1291,8 +1349,16 @@ int command_chat(const LlamaCommonOptions & opts,
             t_gen = secs(clock::now() - t1);
         } else {
             // Text-only fast path: KV-prefix reuse via token comparison.
-            const bool add_special = kv_tokens.empty();
-            const auto full_tokens = tokenize(vocab, params.prompt, add_special, true);
+            // Chat templates (Jinja or built-in) emit <|begin_of_text|>
+            // themselves; asking llama_tokenize to also add_special would
+            // prepend a second BOS. Llama-3 reacts to the double-BOS by
+            // emitting a stray "<|start_header_id|>assistant<|end_header_id|>"
+            // at the start of its reply and losing track of the user
+            // message. parse_special=true is enough — it maps the
+            // template's BOS literal back to the right token.
+            const auto full_tokens = tokenize(vocab, params.prompt,
+                                              /*add_special=*/false,
+                                              /*parse_special=*/true);
 
             const size_t shared = common_prefix(kv_tokens, full_tokens);
             if (shared < kv_tokens.size()) {

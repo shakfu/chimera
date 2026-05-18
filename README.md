@@ -78,6 +78,18 @@ make build-vulkan    # Vulkan (cross-platform)
 
 The backend toolkit (CUDA Toolkit, ROCm, oneAPI, or Vulkan SDK) must already be installed on the host. Override architectures with `CMAKE_CUDA_ARCHITECTURES` (e.g. `89` for Ada/RTX 40xx) or `CMAKE_HIP_ARCHITECTURES` (e.g. `gfx1100` for RDNA3) to avoid the slow default fat-build. CUDA perf knobs (`GGML_CUDA_FORCE_MMQ`, `GGML_CUDA_FORCE_CUBLAS`, `GGML_CUDA_FA_ALL_QUANTS`) and the ROCm `GGML_HIP_ROCWMMA_FATTN` flash-attention switch are picked up from the env. Verify with `./build/chimera info`, which prints the linked backends.
 
+On Windows (or any host without GNU make), drive the same build directly from `manage.py` — it runs the deps build and the cmake configure + build in one step:
+
+```bash
+python scripts/manage.py build_chimera --cuda      # NVIDIA CUDA
+python scripts/manage.py build_chimera --rocm      # AMD ROCm (HIP)
+python scripts/manage.py build_chimera --sycl      # Intel oneAPI / SYCL
+python scripts/manage.py build_chimera --vulkan    # Vulkan (cross-platform)
+python scripts/manage.py build_chimera             # CPU-only (Metal on macOS)
+```
+
+Pass `--webui` to embed the prebuilt web UI, `--build-dir <dir>` to retarget the cmake build dir, or `--build-type Debug` for an unoptimized build. The same env-var overrides (`CMAKE_CUDA_ARCHITECTURES`, `CMAKE_HIP_ARCHITECTURES`, CUDA perf knobs, `GGML_HIP_ROCWMMA_FATTN`) apply.
+
 If you'd rather drive the two stages by hand (mixing backends, or staging a deps build separately), set `GGML_<BACKEND>=1` on `make deps` and pass `-DGGML_<BACKEND>=ON` to `cmake` yourself.
 
 ## Usage
