@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
-"""combine_archives.py: bundle chimera + all transitive static deps into
-one fat static library.
+"""combine_archives.py: bundle chimera's transitive C++ dependencies
+into two static libraries.
 
-Assumes src/chimera/CMakeLists.txt has been converted from add_executable
-to add_library(chimera_core STATIC ...), producing libchimera_core.a (or
-chimera_core.lib on Windows) somewhere under build/.
+  libchimera_ggml.a        ggml core + per-backend ggml archives. Must
+                           be whole-archived by the consumer (-force_load
+                           on macOS, --whole-archive on Linux,
+                           /WHOLEARCHIVE on Windows) so the backend
+                           static initializers actually run.
 
-Per-platform tool:
-    macOS   - libtool -static       (native, handles dup symbols quietly)
-    Linux   - GNU ar via MRI script (extracts members, repacks one .a)
-    Windows - lib.exe /OUT:...      (MSVC archiver, concatenates .libs)
+  libchimera_thirdparty.a  everything else: llama, llama-common, mtmd,
+                           server-context, cpp-httplib, whisper, sd,
+                           vendored libwebp / libwebm, linenoise.
+                           Linked normally so unused members get pruned.
 
-CRITICAL: three sibling ggml builds exist (one each from llama.cpp,
-whisper.cpp, stable-diffusion.cpp). chimera only links the llama.cpp
-ggml build (see top-level CMakeLists.txt around line 306). Bundling
-more than one ggml will create duplicate symbols. This script only
-references the llama.cpp ggml archives.
+The split mirrors the contract in src/chimera/CMakeLists.txt: that
+build force_loads ggml archives only, and lets the linker prune the
+rest. A single merged deps archive would force-load both copies of
+helpers like trim() that exist in two upstream codebases (server-
+context's util.cpp and whisper-common's common.cpp), producing
+duplicate-symbol link failures. Splitting along the whole-archive
+boundary is what makes the bundling honest.
 
-NOTE: a "bundled" static library does NOT relieve consumers of the
-need to pass platform link flags. ggml's GPU backends self-register
-via static initializers in object files; without -force_load (macOS),
---whole-archive (GNU ld), or /WHOLEARCHIVE (link.exe), the backend
-.o members will be dropped and the backend silently disappears at
-runtime. The bundle just shrinks the archive list from ~15 to 1; it
-does not change the linker contract.
+libchimera.a is NOT included in either output - it is produced by
+`make build` and the consumer links it separately. The full consumer
+link line is:
+
+  libchimera.a libchimera_thirdparty.a -<whole-archive> libchimera_ggml.a
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import platform
 import shutil
 import subprocess
@@ -57,23 +58,21 @@ class Inventory:
     with_opencl: bool = False
     archive_ext: str = ".a"  # ".lib" on Windows
 
-    archives: list[Path] = field(default_factory=list)
+    # Two groups, populated by collect(). The split corresponds to
+    # whether the consumer must whole-archive the group (ggml) or
+    # normal-link it (thirdparty).
+    ggml: list[Path] = field(default_factory=list)
+    thirdparty: list[Path] = field(default_factory=list)
 
-    def collect(self) -> list[Path]:
+    def collect(self) -> None:
         e = self.archive_ext
         llama = self.build_root / "llama.cpp" / "build"
         whisper = self.build_root / "whisper.cpp" / "build"
         sd = self.build_root / "stable-diffusion.cpp" / "build"
         linenoise = self.build_root / "linenoise" / "build"
 
-        # chimera_core first - it has unresolved refs that pull
-        # members from everything below it. (On GNU ld order matters;
-        # on macOS / MSVC the linker iterates so it is cosmetic, but
-        # we keep one canonical order for diff-ability.)
-        out: list[Path] = [self.build_root / f"libchimera_core{e}"]
-
-        # llama.cpp + server frontend + httplib
-        out += [
+        # --- thirdparty: normal-link archives -------------------------
+        tp: list[Path] = [
             llama / "src" / f"libllama{e}",
             llama / "common" / f"libllama-common{e}",
             llama / "common" / f"libllama-common-base{e}",
@@ -81,61 +80,93 @@ class Inventory:
             llama / "tools" / "server" / f"libserver-context{e}",
             llama / "vendor" / "cpp-httplib" / f"libcpp-httplib{e}",
         ]
-
         if self.with_whisper:
-            out += [
+            tp += [
                 whisper / "src" / f"libwhisper{e}",
                 whisper / "examples" / f"libcommon{e}",
             ]
         if self.with_sd:
-            out += [
+            tp += [
                 sd / f"libstable-diffusion{e}",
                 sd / "thirdparty" / "libwebp" / f"libwebp{e}",
                 sd / "thirdparty" / "libwebp" / f"libsharpyuv{e}",
                 sd / "thirdparty" / "libwebp" / f"libwebpmux{e}",
                 sd / "thirdparty" / "libwebm" / f"libwebm{e}",
             ]
+        if self.with_linenoise:
+            tp.append(linenoise / f"liblinenoise{e}")
 
-        # ggml LAST - it satisfies everyone else's refs. llama.cpp
-        # build only.
+        # --- ggml: whole-archive group --------------------------------
+        # llama.cpp ggml build ONLY. The whisper and sd subprojects
+        # produce sibling ggml builds we MUST NOT bundle (would
+        # duplicate every ggml symbol); see assert_single_ggml.
         g = llama / "ggml" / "src"
-        out += [
+        gg: list[Path] = [
             g / f"libggml{e}",
             g / f"libggml-base{e}",
             g / f"libggml-cpu{e}",
         ]
         if self.with_metal:
-            out.append(g / "ggml-metal" / f"libggml-metal{e}")
+            gg.append(g / "ggml-metal" / f"libggml-metal{e}")
         if self.with_blas:
-            out.append(g / "ggml-blas" / f"libggml-blas{e}")
+            gg.append(g / "ggml-blas" / f"libggml-blas{e}")
         if self.with_cuda:
-            out.append(g / "ggml-cuda" / f"libggml-cuda{e}")
+            gg.append(g / "ggml-cuda" / f"libggml-cuda{e}")
         if self.with_vulkan:
-            out.append(g / "ggml-vulkan" / f"libggml-vulkan{e}")
+            gg.append(g / "ggml-vulkan" / f"libggml-vulkan{e}")
         if self.with_hip:
-            out.append(g / "ggml-hip" / f"libggml-hip{e}")
+            gg.append(g / "ggml-hip" / f"libggml-hip{e}")
         if self.with_sycl:
-            out.append(g / "ggml-sycl" / f"libggml-sycl{e}")
+            gg.append(g / "ggml-sycl" / f"libggml-sycl{e}")
         if self.with_opencl:
-            out.append(g / "ggml-opencl" / f"libggml-opencl{e}")
+            gg.append(g / "ggml-opencl" / f"libggml-opencl{e}")
 
-        if self.with_linenoise:
-            out.append(linenoise / f"liblinenoise{e}")
+        self.thirdparty = tp
+        self.ggml = gg
 
-        self.archives = out
-        return out
+    def all_archives(self) -> list[Path]:
+        return self.thirdparty + self.ggml
+
+    def assert_single_ggml(self) -> None:
+        """Guard against the duplicate-ggml footgun. Three sibling ggml
+        builds exist on disk (llama.cpp, whisper.cpp, stable-diffusion.cpp);
+        only llama.cpp's may be bundled. Fails loudly if a future edit
+        accidentally pulls in another."""
+        forbidden_roots = (
+            self.build_root / "whisper.cpp" / "build" / "ggml",
+            self.build_root / "stable-diffusion.cpp" / "build" / "ggml",
+        )
+        offenders: list[Path] = []
+        for p in self.all_archives():
+            rp = p.resolve()
+            for root in forbidden_roots:
+                try:
+                    rp.relative_to(root.resolve())
+                except ValueError:
+                    continue
+                offenders.append(p)
+                break
+        if offenders:
+            print(
+                "FATAL: archive list includes ggml builds from whisper.cpp or\n"
+                "stable-diffusion.cpp. Only the llama.cpp ggml build may be\n"
+                "bundled; mixing them produces duplicate symbols.\n",
+                file=sys.stderr,
+            )
+            for p in offenders:
+                print(f"  forbidden: {p}", file=sys.stderr)
+            sys.exit(2)
 
     def check(self) -> None:
-        missing = [p for p in self.archives if not p.is_file()]
+        self.assert_single_ggml()
+        missing = [p for p in self.all_archives() if not p.is_file()]
         if not missing:
             return
         print("Missing archives:", file=sys.stderr)
         for p in missing:
             print(f"  {p}", file=sys.stderr)
         print(
-            "\nBuild chimera first and ensure libchimera_core (or chimera_core.lib)\n"
-            "has been produced. That requires converting src/chimera/CMakeLists.txt\n"
-            "from add_executable to add_library(chimera_core STATIC ...).",
+            "\nRun `make build` first to produce the transitive dep archives.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -146,18 +177,19 @@ def run(cmd: list[str], **kw) -> None:
     subprocess.run(cmd, check=True, **kw)
 
 
-def combine_macos(inv: Inventory, output: Path) -> None:
+def combine_macos(inputs: list[Path], output: Path) -> None:
     """libtool -static merges archive members natively. Duplicate
-    symbol names produce a warning, not an error - acceptable here
-    because we already filtered the duplicate ggml builds upstream."""
+    symbol names produce a warning, not an error - tolerable inside
+    a group, but the ggml/thirdparty split is what keeps the consumer
+    link line itself free of duplicate-symbol failures."""
     libtool = shutil.which("libtool")
     if libtool is None:
         sys.exit("libtool not found on PATH")
     output.parent.mkdir(parents=True, exist_ok=True)
-    run([libtool, "-static", "-o", str(output), *[str(p) for p in inv.archives]])
+    run([libtool, "-static", "-o", str(output), *[str(p) for p in inputs]])
 
 
-def combine_linux(inv: Inventory, output: Path) -> None:
+def combine_linux(inputs: list[Path], output: Path) -> None:
     """GNU ar has two ways to merge: an MRI script (ADDLIB) or extract
     and repack. MRI is simpler but several distros ship a broken thin-
     archive interaction. The extract-and-repack path below is bullet-
@@ -174,7 +206,7 @@ def combine_linux(inv: Inventory, output: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="chimera-combine-") as tmp:
         tmp_path = Path(tmp)
         all_objs: list[Path] = []
-        for i, archive in enumerate(inv.archives):
+        for i, archive in enumerate(inputs):
             sub = tmp_path / f"{i:02d}_{archive.stem}"
             sub.mkdir()
             # `ar x` extracts into cwd; run with cwd=sub for isolation.
@@ -201,7 +233,7 @@ def combine_linux(inv: Inventory, output: Path) -> None:
         run([ranlib, str(output)])
 
 
-def combine_windows(inv: Inventory, output: Path) -> None:
+def combine_windows(inputs: list[Path], output: Path) -> None:
     """lib.exe accepts multiple input .libs and writes a merged .lib.
     Requires running from an MSVC developer prompt (so lib.exe is on
     PATH and links against the right toolchain)."""
@@ -212,15 +244,18 @@ def combine_windows(inv: Inventory, output: Path) -> None:
             "Prompt for VS, or set the appropriate vcvars."
         )
     output.parent.mkdir(parents=True, exist_ok=True)
-    # /NOLOGO keeps the output diffable; /OUT: takes the target.
-    run(
-        [
-            lib_exe,
-            "/NOLOGO",
-            f"/OUT:{output}",
-            *[str(p) for p in inv.archives],
-        ]
-    )
+    run([lib_exe, "/NOLOGO", f"/OUT:{output}", *[str(p) for p in inputs]])
+
+
+def combine_for(target: str, inputs: list[Path], output: Path) -> None:
+    if target == "macos":
+        combine_macos(inputs, output)
+    elif target == "linux":
+        combine_linux(inputs, output)
+    elif target == "windows":
+        combine_windows(inputs, output)
+    else:
+        sys.exit(f"unknown platform: {target}")
 
 
 def main() -> int:
@@ -229,8 +264,8 @@ def main() -> int:
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build-root", type=Path, default=DEFAULT_BUILD_ROOT)
-    ap.add_argument("--output", "-o", type=Path, default=None,
-                    help="output archive path (default: build/libchimera_bundle.{a,lib})")
+    ap.add_argument("--output-dir", type=Path, default=None,
+                    help="dir to write the two archives (default: build/)")
     ap.add_argument("--platform", choices=("auto", "macos", "linux", "windows"), default="auto")
     ap.add_argument("--no-whisper", action="store_true")
     ap.add_argument("--no-sd", action="store_true")
@@ -243,7 +278,7 @@ def main() -> int:
     ap.add_argument("--sycl", action="store_true")
     ap.add_argument("--opencl", action="store_true")
     ap.add_argument("--list", action="store_true",
-                    help="print the resolved archive list and exit")
+                    help="print the resolved archive groups and exit")
     args = ap.parse_args()
 
     target = args.platform
@@ -268,36 +303,43 @@ def main() -> int:
     inv.collect()
 
     if args.list:
-        for p in inv.archives:
-            marker = " " if p.is_file() else "!"
-            print(f"{marker} {p}")
+        print("# ggml group (consumer must whole-archive):")
+        for p in inv.ggml:
+            print(f"{' ' if p.is_file() else '!'} {p}")
+        print("\n# thirdparty group (normal link):")
+        for p in inv.thirdparty:
+            print(f"{' ' if p.is_file() else '!'} {p}")
         return 0
 
     inv.check()
 
-    output = args.output
-    if output is None:
-        name = "chimera_bundle.lib" if target == "windows" else "libchimera_bundle.a"
-        output = args.build_root / name
-
-    if target == "macos":
-        combine_macos(inv, output)
-    elif target == "linux":
-        combine_linux(inv, output)
-    elif target == "windows":
-        combine_windows(inv, output)
+    out_dir = (args.output_dir or args.build_root).resolve()
+    if target == "windows":
+        ggml_out = out_dir / "chimera_ggml.lib"
+        tp_out = out_dir / "chimera_thirdparty.lib"
+        chimera_a = args.build_root / "chimera.lib"
     else:
-        sys.exit(f"unknown platform: {target}")
+        ggml_out = out_dir / "libchimera_ggml.a"
+        tp_out = out_dir / "libchimera_thirdparty.a"
+        chimera_a = args.build_root / "libchimera.a"
 
-    size_mb = output.stat().st_size / (1024 * 1024)
-    print(f"\nWrote {output} ({size_mb:.1f} MB)")
-    print("\nConsumer link flags (still required - bundle does not change linker contract):")
+    combine_for(target, inv.thirdparty, tp_out)
+    combine_for(target, inv.ggml, ggml_out)
+
+    tp_mb = tp_out.stat().st_size / (1024 * 1024)
+    gg_mb = ggml_out.stat().st_size / (1024 * 1024)
+    print(f"\nWrote {tp_out}   ({tp_mb:.1f} MB)")
+    print(f"Wrote {ggml_out}  ({gg_mb:.1f} MB)")
+
+    print("\nConsumer link line (whole-archive the ggml group only;")
+    print("the thirdparty group must be normal-linked or you will hit")
+    print("duplicate-symbol errors on helpers that exist in two upstream TUs):")
     if target == "macos":
-        print(f"  -Wl,-force_load,{output}    # or omit force_load and lose GPU backends")
+        print(f"  {chimera_a} {tp_out} -Wl,-force_load,{ggml_out}")
     elif target == "linux":
-        print(f"  -Wl,--whole-archive {output} -Wl,--no-whole-archive")
+        print(f"  {chimera_a} {tp_out} -Wl,--whole-archive {ggml_out} -Wl,--no-whole-archive")
     else:
-        print(f"  /WHOLEARCHIVE:{output.name}")
+        print(f"  {chimera_a.name} {tp_out.name} /WHOLEARCHIVE:{ggml_out.name}")
     return 0
 
 

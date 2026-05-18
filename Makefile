@@ -1,4 +1,4 @@
-.PHONY: deps build build-with-webui rebuild clean reset test smoke install uninstall release-notes bump-check test-db-migrate test-golden
+.PHONY: deps build build-with-webui rebuild clean reset test smoke install uninstall release-notes bump-check test-db-migrate test-golden combine test-external-smoke
 
 # Python interpreter, picked at make-invocation time by probing the host.
 # Order: `python3` (Linux / macOS / Conda / venv), `python` (Windows
@@ -92,6 +92,36 @@ bump-check:
 # upgrading old user DBs cleanly. Requires the chimera binary built.
 test-db-migrate: $(BUILD_DIR)/chimera
 	@$(PYTHON) scripts/test_db_migrate.py
+
+# combine: bundle the third-party static archives chimera transitively
+# links into two grouped archives under build/:
+#   build/libchimera_thirdparty.a  (normal-linked by consumer)
+#   build/libchimera_ggml.a        (consumer MUST whole-archive this)
+# Combined with build/libchimera.a (produced by `make build`), these
+# are what a non-CMake external consumer links against. See
+# doc/dev/combine_archives.md for the link contract.
+combine: $(BUILD_DIR)/libchimera.a
+	@$(PYTHON) scripts/combine_archives.py
+
+$(BUILD_DIR)/libchimera_thirdparty.a $(BUILD_DIR)/libchimera_ggml.a: $(BUILD_DIR)/libchimera.a
+	@$(PYTHON) scripts/combine_archives.py
+
+$(BUILD_DIR)/libchimera.a:
+	$(MAKE) build
+
+# test-external-smoke: build and run tests/external/chimera_smoke,
+# which links the three chimera archives the way a non-CMake consumer
+# would and exercises the link contract end-to-end (ggml backend
+# registration, llama + chimera symbol resolution). Set
+# CHIMERA_SMOKE_MODEL=<path/to/.gguf> to additionally run a full
+# tokenize + llama_decode inference probe. See
+# doc/dev/combine_archives.md section 7 for what this validates.
+test-external-smoke: tests/external/build/chimera_smoke
+	@tests/external/build/chimera_smoke
+
+tests/external/build/chimera_smoke: tests/external/smoke.cpp tests/external/CMakeLists.txt $(BUILD_DIR)/libchimera.a $(BUILD_DIR)/libchimera_thirdparty.a $(BUILD_DIR)/libchimera_ggml.a
+	@cmake -S tests/external -B tests/external/build
+	@cmake --build tests/external/build
 
 # test-golden: HTTP response-shape regression tests against fixed
 # models. Spawns `chimera serve` on a free port, hits each route with a

@@ -26,10 +26,6 @@ message(STATUS "sqlite-vec version:     ${SQLITE_VEC_VERSION}")
 # -----------------------------------------------------------------------------
 # Options
 # -----------------------------------------------------------------------------
-# WITH_DYLIB is always OFF for chimera (static-only target). It exists as a
-# variable so the shared src/chimera/CMakeLists.txt slice can early-return.
-set(WITH_DYLIB OFF)
-
 # stable-diffusion.cpp must NOT use its own vendored ggml — it has to share
 # llama.cpp's ggml so the final static link has a single backend set.
 option(SD_USE_VENDORED_GGML "Link stable-diffusion against its own vendored ggml" OFF)

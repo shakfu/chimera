@@ -416,8 +416,12 @@ fi
 # Strip whitespace + lowercase the reply to tolerate the small model's
 # tendency to render answers character-by-character on separate lines.
 if [[ -f "$GEN_MODEL" ]]; then
+    # -n 64 (not 32): the 1B model often pads the recall reply with
+    # preamble ("Your secret password is ...") that can push the
+    # target token past a 32-token cutoff. 64 leaves enough headroom
+    # without meaningfully slowing the test.
     CHAT_REPLY="$(printf "my secret password is zephyrine.\nrepeat my secret password exactly.\n/exit\n" | \
-        "$CHIMERA" chat -m "$GEN_MODEL" -n 32 2>/dev/null || true)"
+        "$CHIMERA" chat -m "$GEN_MODEL" -n 64 2>/dev/null || true)"
     # collapse all whitespace, lowercase
     normalized="$(printf '%s' "$CHAT_REPLY" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
     if printf '%s' "$normalized" | grep -q 'zephyrine'; then
@@ -680,9 +684,13 @@ EOF
         fi
 
         # GET /v1/chats/search → FTS5 hit on the rare token, snippet
-        # contains the [quibblefrond] marker.
+        # contains the [quibblefrond] marker. Check any hit (FTS5 rank
+        # order is implementation-defined and may put the assistant's
+        # echo ahead of the user's question), case-insensitively (FTS5
+        # itself matches case-insensitively, and the model may
+        # capitalize the token in its reply).
         SEARCH_BODY="$(curl -sS "http://127.0.0.1:$CH_PORT/v1/chats/search?q=quibblefrond" 2>/dev/null || true)"
-        if printf '%s' "$SEARCH_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); hits=d.get("hits",[]); sys.exit(0 if len(hits)>=1 and "[quibblefrond]" in hits[0].get("snippet","") else 1)' 2>/dev/null; then
+        if printf '%s' "$SEARCH_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); hits=d.get("hits",[]); sys.exit(0 if any("[quibblefrond]" in h.get("snippet","").lower() for h in hits) else 1)' 2>/dev/null; then
             printf "  ${PASS_TAG}  %s\n" "GET /v1/chats/search returns FTS5-highlighted hit"
             pass=$((pass + 1))
         else

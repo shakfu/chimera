@@ -1891,6 +1891,7 @@ const char * ggml_dev_type_label(enum ggml_backend_dev_type t) {
         case GGML_BACKEND_DEVICE_TYPE_GPU:   return "GPU  ";
         case GGML_BACKEND_DEVICE_TYPE_ACCEL: return "ACCEL";
         case GGML_BACKEND_DEVICE_TYPE_IGPU:  return "IGPU ";
+        case GGML_BACKEND_DEVICE_TYPE_META:  return "META ";
     }
     return "?    ";
 }
