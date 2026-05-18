@@ -25,7 +25,24 @@ if(SD_USE_VENDORED_GGML)
     return()
 endif()
 
-add_executable(chimera "${CMAKE_CURRENT_LIST_DIR}/chimera.cpp")
+add_executable(chimera
+    "${CMAKE_CURRENT_LIST_DIR}/chimera.cpp"
+    # GNU ld is single-pass: libchimera.a is linked ahead of the llama
+    # archives, so when ld scans it, nothing yet references
+    # llama_build_info() / llama_build_target() / llama_commit() /
+    # llama_compiler() / llama_build_number(), and the shim TU inside
+    # libchimera.a is skipped. Later, libllama-common.a (common.cpp) and
+    # libserver-context.a (server-task.cpp) introduce those undefined
+    # symbols, but the shim archive member is already past and not inside
+    # the --start-group/--end-group block. Compiling the shim directly
+    # into the executable puts it on the link line as a plain object,
+    # which always contributes its symbols and satisfies those refs
+    # regardless of archive order. macOS ld iterates archives by default
+    # so it works there even without this, but the duplicate compile is
+    # harmless (archive member is dropped when the symbols are already
+    # defined).
+    "${CMAKE_SOURCE_DIR}/src/chimera/llama_build_info_shim.cpp"
+)
 target_link_libraries(chimera PRIVATE chimera_lib)
 target_compile_options(chimera PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CXX_COMPILE_OPTIONS}>)
 set_target_properties(chimera PROPERTIES
