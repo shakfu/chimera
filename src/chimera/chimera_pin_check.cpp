@@ -101,6 +101,37 @@ static_assert(std::is_same_v<decltype(common_params::n_parallel),    int32_t>,
 static_assert(std::is_same_v<decltype(common_params::pooling_type),  enum llama_pooling_type>,
               "common_params::pooling_type changed type.");
 
+// Fields touched by build_common_params() that were unpinned in earlier
+// releases — each is a llama.cpp-bump blind spot if the type or name
+// shifts upstream. Asserting them here makes the failure fail-fast at
+// chimera-side compile time with a chimera-specific error message,
+// instead of cascading into harder-to-read errors at the call sites
+// in chimera_serve.cpp.
+static_assert(std::is_same_v<decltype(common_params::api_keys),
+                             std::vector<std::string>>,
+              "common_params::api_keys changed type "
+              "(chimera serve --api-key push_back relies on this).");
+static_assert(std::is_same_v<decltype(common_params::webui),         bool>,
+              "common_params::webui changed type "
+              "(chimera serve --no-webui flips this).");
+static_assert(std::is_same_v<decltype(common_params::public_path),   std::string>,
+              "common_params::public_path changed type "
+              "(chimera serve --public-path assigns this).");
+static_assert(std::is_same_v<decltype(common_params::slot_save_path), std::string>,
+              "common_params::slot_save_path changed type "
+              "(chimera serve --slot-save-path assigns + trailing-slash-normalises this).");
+static_assert(std::is_same_v<decltype(common_params::lora_adapters),
+                             std::vector<common_adapter_lora_info>>,
+              "common_params::lora_adapters changed type "
+              "(chimera serve --lora parser push_backs this).");
+static_assert(std::is_same_v<decltype(common_params::model_alias),
+                             std::set<std::string>>,
+              "common_params::model_alias changed type "
+              "(chimera serve's fall-through name copy uses .insert()).");
+static_assert(std::is_same_v<decltype(common_params::kv_unified),    bool>,
+              "common_params::kv_unified changed type "
+              "(chimera serve sets this true on --parallel<0 auto path).");
+
 // ---- llama pooling enum -----------------------------------------------
 //
 // chimera_embed::parse_pooling and bring_up_secondary in

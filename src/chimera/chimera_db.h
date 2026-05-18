@@ -6,10 +6,10 @@
 // RAG handlers). Anything kept private to chimera_db.cpp stays in its
 // own anonymous namespace.
 //
-// Phase-1 scope: connection lifecycle, default-path resolution
-// (XDG-compliant), migration runner, v1 schema. No higher-level
-// query helpers yet — those land with phases 2 (vector store) and 3
-// (chat persistence).
+// Covers: connection lifecycle, default-path resolution (XDG-compliant),
+// migration runner, schema, and the maintenance helpers (backup_to,
+// vacuum). Higher-level query helpers live in chimera_vector_store.* and
+// chimera_chat_store.*.
 #pragma once
 
 #include <cstdint>
@@ -111,5 +111,24 @@ const char * sqlite_vec_version();
 // reports. Returns an empty string if the function does not exist
 // (i.e. sqlite_auto_extension never fired or it fired but failed).
 std::string sqlite_vec_loaded_version(sqlite3 * db);
+
+// --- maintenance ---------------------------------------------------------
+
+// Snapshot the DB to `dst_path` via `VACUUM INTO '<dst_path>'`. The
+// destination file is created (must not exist) and the snapshot is a
+// fully-defragmented copy with the same schema + content. SQLite issues
+// a brief shared lock on the source for the duration; concurrent
+// readers continue, concurrent writers serialize. WAL + SHM siblings
+// are not produced — `VACUUM INTO` rolls them into the destination
+// itself, so a single file is enough to restore from.
+//
+// Throws ChimeraError on any failure (destination already exists,
+// permission denied, source corruption, ...).
+void backup_to(sqlite3 * db, const std::string & dst_path);
+
+// Run plain `VACUUM` on the open DB. Defragments + reclaims free pages
+// in place. Requires no other connections to the DB; SQLite errors
+// otherwise. Throws ChimeraError on failure.
+void vacuum(sqlite3 * db);
 
 }  // namespace chimera_db

@@ -444,4 +444,57 @@ std::string sqlite_vec_loaded_version(sqlite3 * db) {
     return out;
 }
 
+// --- maintenance --------------------------------------------------------
+
+void backup_to(sqlite3 * db, const std::string & dst_path) {
+    if (dst_path.empty()) {
+        fail(ExitCode::BadInput, "backup_to: destination path is empty");
+    }
+    // VACUUM INTO refuses to overwrite an existing file; surface that
+    // with a chimera-shaped message instead of SQLite's generic one.
+    if (std::filesystem::exists(dst_path)) {
+        fail(ExitCode::BadInput,
+             "backup destination already exists: " + dst_path +
+             " (move or delete it first; chimera will not overwrite)");
+    }
+    // VACUUM INTO does not interpolate parameters — the destination
+    // string must be literal SQL. Single-quote it, escaping any
+    // embedded single quote by doubling, so a path like
+    // /tmp/o'reilly.db round-trips cleanly. Path traversal is fine
+    // here because this is a CLI tool: the user already chose the
+    // path with their own UID.
+    std::string quoted;
+    quoted.reserve(dst_path.size() + 2);
+    quoted.push_back('\'');
+    for (char c : dst_path) {
+        if (c == '\'') quoted.push_back('\'');
+        quoted.push_back(c);
+    }
+    quoted.push_back('\'');
+    const std::string sql = "VACUUM INTO " + quoted;
+    char * err = nullptr;
+    const int rc = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &err);
+    if (rc != SQLITE_OK) {
+        const std::string msg = err ? err : "(no message)";
+        sqlite3_free(err);
+        fail(ExitCode::Runtime,
+             "VACUUM INTO '" + dst_path + "' failed: " + msg);
+    }
+}
+
+void vacuum(sqlite3 * db) {
+    char * err = nullptr;
+    const int rc = sqlite3_exec(db, "VACUUM", nullptr, nullptr, &err);
+    if (rc != SQLITE_OK) {
+        const std::string msg = err ? err : "(no message)";
+        sqlite3_free(err);
+        // SQLITE_LOCKED is the typical failure when another connection
+        // (e.g. a running `chimera serve` worker) holds the DB. Spell
+        // it out so the operator knows what to close before retrying.
+        fail(ExitCode::Runtime,
+             "VACUUM failed: " + msg +
+             " (close any other chimera processes that have this DB open and retry)");
+    }
+}
+
 }  // namespace chimera_db

@@ -83,6 +83,16 @@ target_include_directories(chimera PRIVATE
     "${SQLITE_INCLUDE}"
     "${SQLITE_VEC_INCLUDE}"
 )
+
+# Forward the optional per-request payload cap (in bytes) to the locally-
+# compiled server-http.cpp, which uses it to call srv->set_payload_max_length.
+# Without this forwarding, the cache variable would be inert. Default 256 MB
+# is encoded in server-http.cpp itself; this only fires when the user passes
+# `-DCHIMERA_HTTP_PAYLOAD_MAX_BYTES=<bytes>` at configure time.
+if(DEFINED CHIMERA_HTTP_PAYLOAD_MAX_BYTES)
+    target_compile_definitions(chimera PRIVATE
+        CHIMERA_HTTP_PAYLOAD_MAX_BYTES=${CHIMERA_HTTP_PAYLOAD_MAX_BYTES})
+endif()
 if(CHIMERA_LINK_WHISPER)
     target_include_directories(chimera PRIVATE "${WHISPERCPP_INCLUDE}")
 endif()

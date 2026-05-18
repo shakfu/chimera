@@ -127,23 +127,22 @@ struct ServeOptions {
     std::string api_key;            // --api-key; empty disables auth
     bool        embedding = false;  // --embeddings; switches model to embed mode
 
-    // Phase 2: opt-in audio. When non-empty, a whisper.cpp model is loaded
+    // Opt-in audio. When non-empty, a whisper.cpp model is loaded
     // alongside the LLM and POST /v1/audio/transcriptions becomes available.
     std::string audio_model;        // --enable-audio <whisper.gguf>
 
-    // Phase 3: opt-in image. When non-empty, a stable-diffusion.cpp model is
+    // Opt-in image. When non-empty, a stable-diffusion.cpp model is
     // loaded alongside the LLM and POST /v1/images/{generations,edits,
     // variations} become available. The context is built with
     // vae_decode_only=false so the encode path is available for img2img
     // (/edits and /variations).
     std::string sd_model;           // --enable-image <sd.gguf>
 
-    // Phase 4 (RAG): opt-in vector store. When non-empty, the named GGUF
-    // embedding model is loaded alongside the LLM and the
-    // POST/GET /v1/vector_stores/* routes are bound. Ingest and search
-    // requests targeting a collection whose recorded embedding_model does
-    // not match this one are rejected with a 400 (single-model server in
-    // this cut).
+    // Opt-in vector store / RAG. When non-empty, the named GGUF embedding
+    // model is loaded alongside the LLM and the POST/GET /v1/vector_stores/*
+    // routes are bound. Ingest and search requests targeting a collection
+    // whose recorded embedding_model does not match this one are rejected
+    // with a 400 (single-model server in this cut).
     std::string rag_embedding_model;  // --enable-rag <embedding.gguf>
     std::string rag_db_path;          // --rag-db (default: $CHIMERA_DB or platform default)
 
@@ -167,10 +166,12 @@ struct ServeOptions {
     // server-context and isn't cacheable from here).
     bool cache_embeddings = false;    // --cache-embeddings
 
-    // Phase 5 (chat persistence): when true, every /v1/chat/completions
-    // exchange is saved to the chats + messages tables (one new chat row
-    // per request — the OpenAI API doesn't carry a chat id). Uses the
-    // same SQLite DB as the CLI's `chat --persist`.
+    // Chat persistence: when true, every /v1/chat/completions exchange is
+    // saved to the chats + messages tables. Multi-turn requests that echo
+    // back the X-Chimera-Chat-Id response header get folded into a single
+    // chats row; requests without the header produce one chats row each
+    // (the OpenAI API has no chat-id concept). Uses the same SQLite DB
+    // as the CLI's `chat --persist`.
     bool        persist_chats = false; // --persist-chats
     std::string chat_db_path;          // --chat-db (default: $CHIMERA_DB or platform default)
 

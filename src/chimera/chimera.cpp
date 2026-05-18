@@ -215,13 +215,36 @@ std::string token_to_piece(const llama_vocab * vocab, llama_token token) {
 }
 
 LlamaModelPtr load_llama_model(const LlamaCommonOptions & opts) {
+    // Bail out with a precise message when the path doesn't resolve to a
+    // readable file before we even try llama_model_load_from_file. The
+    // upstream error ("failed to load model") doesn't distinguish "wrong
+    // path" from "valid path, wrong format" — a real foot-gun when users
+    // mistype a directory or supply a safetensors path.
+    if (!opts.model.empty()) {
+        std::error_code ec;
+        const auto status = std::filesystem::status(opts.model, ec);
+        if (ec || !std::filesystem::exists(status)) {
+            fail(ExitCode::Load,
+                 "model file not found: " + opts.model +
+                 " (check the path; chimera does not auto-download models)");
+        }
+        if (std::filesystem::is_directory(status)) {
+            fail(ExitCode::Load,
+                 "model path is a directory, not a file: " + opts.model +
+                 " (point -m at a single .gguf file)");
+        }
+    }
+
     llama_model_params params = llama_model_default_params();
     params.n_gpu_layers = opts.gpu_layers;
     params.use_mmap = opts.use_mmap;
 
     LlamaModelPtr model(llama_model_load_from_file(opts.model.c_str(), params));
     if (!model) {
-        fail(ExitCode::Load, "failed to load llama model: " + opts.model);
+        fail(ExitCode::Load,
+             "failed to load llama model: " + opts.model +
+             " (file exists but llama.cpp could not parse it — "
+             "wrong format, corrupt GGUF, or version mismatch)");
     }
     return model;
 }
@@ -1158,7 +1181,8 @@ int command_chat(const LlamaCommonOptions & opts,
             history.push_back(make_chat_msg("user", content));
             // Persistent mode: serialize the just-attached media paths
             // into media_json so a future --resume could in principle
-            // re-attach them. Phase 3 does not auto-reattach on resume.
+            // re-attach them. Current --resume does not auto-reattach;
+            // the column is informational. See TODO.md.
             std::string media_json;
             if (!pending_media.empty()) {
                 media_json = "[";
@@ -2043,6 +2067,32 @@ int command_info() {
 // smoke-testable surface for the phase-1 SQLite vendoring: confirms
 // that sqlite3.c + sqlite-vec.c linked, the file path resolves, the
 // migration runner works end-to-end, and the schema lands.
+int command_db_backup(const std::string & path_override,
+                      const std::string & dst) {
+    const std::string path = path_override.empty()
+        ? chimera_db::default_path()
+        : path_override;
+    auto conn = chimera_db::open_and_migrate(path);
+    chimera_db::backup_to(conn.get(), dst);
+    std::cout << "chimera db backup\n"
+              << "  src: " << path << "\n"
+              << "  dst: " << dst  << "\n"
+              << "  ok\n";
+    return 0;
+}
+
+int command_db_vacuum(const std::string & path_override) {
+    const std::string path = path_override.empty()
+        ? chimera_db::default_path()
+        : path_override;
+    auto conn = chimera_db::open_and_migrate(path);
+    chimera_db::vacuum(conn.get());
+    std::cout << "chimera db vacuum\n"
+              << "  path: " << path << "\n"
+              << "  ok\n";
+    return 0;
+}
+
 int command_db_status(const std::string & path_override) {
     const std::string path = path_override.empty()
         ? chimera_db::default_path()
@@ -2107,6 +2157,8 @@ struct ParsedCli {
 #endif
     CLI::App * serve_cmd        = nullptr;
     CLI::App * db_status_cmd    = nullptr;
+    CLI::App * db_backup_cmd    = nullptr;
+    CLI::App * db_vacuum_cmd    = nullptr;
     CLI::App * info_cmd         = nullptr;
     CLI::App * index_create_cmd = nullptr;
     CLI::App * index_ingest_cmd = nullptr;
@@ -2146,6 +2198,7 @@ struct ParsedCli {
 
     // `db`
     std::string db_path_override;
+    std::string db_backup_dst;
 
     // `index`
     std::string              idx_db_path;
@@ -2395,12 +2448,26 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
 
 void bind_db_cmd(CLI::App & app, ParsedCli & p) {
     auto * db_cmd = app.add_subcommand("db", "Embedded SQLite database management");
-    auto * db_status_cmd = db_cmd->add_subcommand("status",
-        "Open the DB, run pending migrations, print path + version + schema info");
     db_cmd->add_option("--db", p.db_path_override,
         "Path to the DB file (default: $CHIMERA_DB or platform default)");
     db_cmd->require_subcommand(1);
+
+    auto * db_status_cmd = db_cmd->add_subcommand("status",
+        "Open the DB, run pending migrations, print path + version + schema info");
     p.db_status_cmd = db_status_cmd;
+
+    auto * db_backup_cmd = db_cmd->add_subcommand("backup",
+        "Snapshot the DB to another path via `VACUUM INTO`. The destination "
+        "must not already exist. Single self-contained file — no WAL/SHM "
+        "siblings to copy.");
+    db_backup_cmd->add_option("--to", p.db_backup_dst,
+        "Destination path for the snapshot")->required();
+    p.db_backup_cmd = db_backup_cmd;
+
+    auto * db_vacuum_cmd = db_cmd->add_subcommand("vacuum",
+        "Defragment + reclaim free pages in place. No other chimera "
+        "processes may have this DB open (SQLite serializes on the file).");
+    p.db_vacuum_cmd = db_vacuum_cmd;
 }
 
 void bind_info_cmd(CLI::App & app, ParsedCli & p) {
@@ -2581,6 +2648,8 @@ int dispatch_cli(ParsedCli & p) {
 #endif
     if (*p.serve_cmd)        return command_serve       (p.serve_opts);
     if (*p.db_status_cmd)    return command_db_status   (p.db_path_override);
+    if (*p.db_backup_cmd)    return command_db_backup   (p.db_path_override, p.db_backup_dst);
+    if (*p.db_vacuum_cmd)    return command_db_vacuum   (p.db_path_override);
     if (*p.info_cmd)         return command_info        ();
     if (*p.index_create_cmd) {
         return command_index_create(p.idx_db_path, p.idx_name, p.idx_embedding_model,

@@ -671,9 +671,9 @@ int command_serve(const ServeOptions & opts) {
         }
     }
 
-    // Phase 4: opt-in vector store / RAG. One embedding model per server
-    // in this cut. The chimera SQLite DB is shared with the CLI (same
-    // $CHIMERA_DB / platform default); ingest + search hit it via
+    // Opt-in vector store / RAG (--enable-rag). One embedding model per
+    // server in this cut. The chimera SQLite DB is shared with the CLI
+    // (same $CHIMERA_DB / platform default); ingest + search hit it via
     // per-request connections.
     RagContext rag_ctx;
     if (!opts.rag_embedding_model.empty()) {
@@ -737,11 +737,11 @@ int command_serve(const ServeOptions & opts) {
     ctx_http.get ("/lora-adapters",       ex_wrapper(routes.get_lora_adapters));
     ctx_http.post("/lora-adapters",       ex_wrapper(routes.post_lora_adapters));
 
-    // Phase 5: chat persistence shim. When --persist-chats is set we
-    // wrap the upstream chat-completions handler so every successful
-    // exchange is recorded in the chats + messages tables. The wrapper
-    // handles both non-streaming responses and SSE streams (by mirroring
-    // each chunk into a buffer and parsing on stream end). When the
+    // Chat persistence shim. When --persist-chats is set we wrap the
+    // upstream chat-completions handler so every successful exchange is
+    // recorded in the chats + messages tables. The wrapper handles both
+    // non-streaming responses and SSE streams (by mirroring each chunk
+    // into a buffer and parsing on stream end). When the
     // flag is off, we bind the upstream handler unchanged.
     ChatPersistContext chat_persist_ctx;
     ChatHistoryContext chat_hist_ctx;
@@ -773,12 +773,12 @@ int command_serve(const ServeOptions & opts) {
     ctx_http.post("/v1/embeddings",
                   ex_wrapper(emb_ctx ? emb_ctx->routes->post_embeddings_oai
                                      : routes.post_embeddings_oai));
-    // Phase 5: bind /v1/responses (OpenAI Responses API). The upstream
-    // handler holds conversation state in-process — it's *stateful within
-    // one chimera serve invocation* but does not persist across
-    // restarts. With --persist-chats on, the underlying chat-completions
-    // path will still write to the chats table; the Responses API itself
-    // is layered on top of that and inherits the same persistence.
+    // /v1/responses (OpenAI Responses API). The upstream handler holds
+    // conversation state in-process — it's *stateful within one chimera
+    // serve invocation* but does not persist across restarts. With
+    // --persist-chats on, the underlying chat-completions path will still
+    // write to the chats table; the Responses API itself is layered on
+    // top of that and inherits the same persistence.
     ctx_http.post("/v1/responses",        ex_wrapper(routes.post_responses_oai));
 
     // Anthropic Messages API compat — lets the Anthropic Python SDK and

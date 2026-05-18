@@ -10,6 +10,7 @@
 #include "sqlite3.h"
 
 #include <chrono>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -303,9 +304,16 @@ std::vector<StoredMessage> load_messages(sqlite3 * db, int64_t chat_id) {
 // search
 // ===========================================================================
 
-std::vector<SearchHit> search_messages(sqlite3 *           db,
-                                       const std::string & query,
-                                       int                 limit) {
+namespace {
+
+// Run the FTS5 query as-is. Throws on prepare/step failure. Caller
+// (`search_messages` below) catches FTS5 syntax errors and retries with
+// the phrase-quoted form so user queries containing `:`, parens, or
+// reserved words (AND/OR/NOT/NEAR) get matched literally instead of
+// returning 500 / empty.
+std::vector<SearchHit> search_messages_raw(sqlite3 *           db,
+                                           const std::string & query,
+                                           int                 limit) {
     std::vector<SearchHit> out;
     StmtGuard q;
     // snippet(table, col_index, prefix, suffix, ellipsis, token_count)
@@ -323,7 +331,8 @@ std::vector<SearchHit> search_messages(sqlite3 *           db,
     }
     sqlite3_bind_text(q.get(), 1, query.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int (q.get(), 2, limit);
-    while (sqlite3_step(q.get()) == SQLITE_ROW) {
+    int rc;
+    while ((rc = sqlite3_step(q.get())) == SQLITE_ROW) {
         SearchHit h;
         h.chat_id    = sqlite3_column_int64(q.get(), 0);
         h.message_id = sqlite3_column_int64(q.get(), 1);
@@ -332,7 +341,70 @@ std::vector<SearchHit> search_messages(sqlite3 *           db,
         h.snippet    = col_text(q.get(), 4);
         out.push_back(std::move(h));
     }
+    if (rc != SQLITE_DONE) {
+        // FTS5 syntax errors surface here (e.g. unbalanced parens, stray
+        // `:` outside a column filter). The caller distinguishes by
+        // matching the message; everything else propagates as an error.
+        throw ChimeraError(ExitCode::Runtime,
+            std::string("step(search_messages): ") + sqlite3_errmsg(db));
+    }
     return out;
+}
+
+std::optional<std::vector<SearchHit>> try_search_messages(sqlite3 *           db,
+                                                          const std::string & query,
+                                                          int                 limit) {
+    try {
+        return search_messages_raw(db, query, limit);
+    } catch (const std::exception &) {
+        // Any error on the raw query path falls back to phrase-quoted
+        // retry. The retry input is well-formed by construction (any
+        // input becomes a single FTS5 literal phrase), so a second
+        // failure would have to come from something other than a query
+        // syntax issue (corrupted FTS5 index, etc.) and is genuinely
+        // worth propagating — which is what the caller does.
+        //
+        // Earlier versions narrowed this to errors mentioning "fts5",
+        // "syntax error", or "no such column", but FTS5 also raises
+        // "unterminated string" / "malformed MATCH" with different
+        // wording per SQLite release, and the narrower set leaked
+        // 500s through to the client.
+        return std::nullopt;
+    }
+}
+
+// FTS5-safe quoting: escape any embedded `"` by doubling it and wrap
+// the whole string in double quotes. This forces FTS5 to treat the
+// input as a literal phrase — punctuation, parens, and reserved words
+// inside are all neutralised. Same shape as
+// chimera_vector_store::fts5_phrase_quote.
+std::string fts5_phrase_quote(const std::string & s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('"');
+    for (char c : s) {
+        if (c == '"') out.push_back('"');  // double up internal quotes
+        out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+}
+
+}  // namespace
+
+std::vector<SearchHit> search_messages(sqlite3 *           db,
+                                       const std::string & query,
+                                       int                 limit) {
+    if (query.empty()) return {};
+    auto first = try_search_messages(db, query, limit);
+    if (first) return std::move(*first);
+    // FTS5 syntax error: retry with the user's input wrapped as a literal
+    // phrase. Mirrors the chimera_vector_store::search_lexical recovery
+    // path so chat search and document search share the same UX guarantee
+    // — a free-text query containing FTS5 metacharacters never errors,
+    // it just matches the phrase. A second failure here is a real bug
+    // and propagates.
+    return search_messages_raw(db, fts5_phrase_quote(query), limit);
 }
 
 }  // namespace chimera_chat_store

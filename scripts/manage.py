@@ -642,6 +642,49 @@ class LlamaCppBuilder(GgmlBuilder):
                 self.build_dir, f"ggml/src/ggml-{short}", f"ggml-{short}", self.lib
             )
 
+    def _patch_server_http_payload_cap(self, path: Path) -> None:
+        """Insert a `srv->set_payload_max_length(...)` call into the staged
+        server-http.cpp so multipart uploads can't OOM the process.
+
+        cpp-httplib's factory default is unbounded; chimera caps at 256 MB
+        by default (override at configure time with
+        `-DCHIMERA_HTTP_PAYLOAD_MAX_BYTES=<bytes>`). The cap is set inside
+        upstream's `Impl::init` right after the read/write timeout calls
+        because that's where every other `srv->set_*` call already lives.
+        Idempotent: the marker check at the top short-circuits if the
+        file is already patched.
+        """
+        text = path.read_text()
+        marker = "CHIMERA-local patch: cap the per-request payload"
+        if marker in text:
+            return
+        needle = "    srv->set_write_timeout(params.timeout_write);\n"
+        if needle not in text:
+            raise RuntimeError(
+                f"could not patch payload cap into {path}: "
+                "anchor `srv->set_write_timeout(params.timeout_write);` not found "
+                "(upstream may have reorganized Impl::init)."
+            )
+        insertion = (
+            "\n"
+            "    // CHIMERA-local patch: cap the per-request payload at a sensible default\n"
+            "    // so a malicious / accidental gigabyte upload to /v1/audio/transcriptions\n"
+            "    // or /v1/vector_stores/:name/files cannot OOM the process. cpp-httplib's\n"
+            "    // factory default is unbounded; chimera caps at 256 MB which covers ~2\n"
+            "    // hours of 16kHz/16-bit mono WAV (the realistic upper end for ASR) and\n"
+            "    // far exceeds any reasonable text-ingest body. Tunable at compile time:\n"
+            "    //   cmake -DCHIMERA_HTTP_PAYLOAD_MAX_BYTES=<bytes> -S . -B build\n"
+            "    // Reverse-proxied deployments can keep the cap even lower at the proxy.\n"
+            "    // Not driven by common_params because that struct is upstream-owned.\n"
+            "#ifndef CHIMERA_HTTP_PAYLOAD_MAX_BYTES\n"
+            "#  define CHIMERA_HTTP_PAYLOAD_MAX_BYTES (256ull * 1024ull * 1024ull)\n"
+            "#endif\n"
+            "    srv->set_payload_max_length(CHIMERA_HTTP_PAYLOAD_MAX_BYTES);\n"
+        )
+        patched = text.replace(needle, needle + insertion, 1)
+        path.write_text(patched)
+        self.log.info(f"patched payload cap into {path.name}")
+
     def _copy_headers(self) -> None:
         """Copy llama.cpp public headers into the prefix include dir."""
         self.glob_copy(self.src_dir / "common", self.include, patterns=["*.h", "*.hpp"])
@@ -688,6 +731,15 @@ class LlamaCppBuilder(GgmlBuilder):
         self.glob_copy(
             self.src_dir / "tools" / "server", src_aux, patterns=["server-http.cpp"]
         )
+        # CHIMERA-local patch: cap the per-request payload at 256 MB so a
+        # malicious / accidental gigabyte upload to /v1/audio/transcriptions
+        # or /v1/vector_stores/:name/files cannot OOM the process. cpp-httplib's
+        # factory default is unbounded. Compile-time override:
+        #   cmake -DCHIMERA_HTTP_PAYLOAD_MAX_BYTES=<bytes>
+        # Applied via search-replace after staging so the patch survives every
+        # `make deps`. Idempotent: the marker check at the top short-circuits
+        # if the file was already patched in this staging cycle.
+        self._patch_server_http_payload_cap(src_aux / "server-http.cpp")
         # Webui assets + xxd helper. server-http.cpp #includes
         # "index.html.hpp" / "bundle.{js,css}.hpp" / "loading.html.hpp"
         # when compiled with LLAMA_BUILD_WEBUI defined. These .hpp files

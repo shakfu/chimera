@@ -1,8 +1,8 @@
 // chimera_chat_store.h — chat persistence on top of the v1 `chats` +
 // `messages` + `messages_fts` tables (see chimera_db.cpp's MIGRATION_V1).
 //
-// Phase-3 scope: consumed only by `command_chat` (CLI). Phase 5 will
-// add server-side use from chimera_serve.cpp.
+// Consumed by both `chimera chat --persist` (CLI side) and
+// `chimera serve --persist-chats` (HTTP wrapper in chimera_serve_chat_persist.cpp).
 #pragma once
 
 #include <cstdint>

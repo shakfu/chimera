@@ -72,16 +72,19 @@ int64_t create_chat_row_for_request(ChatPersistContext * cpc,
 }
 
 // Verify a client-supplied X-Chimera-Chat-Id refers to an existing row.
-// Returns true on success.
+// Returns true when the row exists, false when it does not.
+//
+// Exceptions from open_and_migrate / load_chat are *not* swallowed: an
+// earlier version did `catch (...) { return false; }` which conflated DB
+// open / migration failures with "no such chat" and surfaced them as
+// 404. Now those propagate so ex_wrapper around the calling handler
+// converts them to a 500 with the underlying error message — which is
+// the correct status for a failed-to-open database.
 bool chat_id_exists(ChatPersistContext * cpc, int64_t chat_id) {
-    try {
-        chimera_db::Connection conn = chimera_db::open_and_migrate(
-            cpc->db_path.empty() ? chimera_db::default_path() : cpc->db_path);
-        std::lock_guard<std::mutex> lk(cpc->mutex);
-        return chimera_chat_store::load_chat(conn.get(), chat_id).has_value();
-    } catch (...) {
-        return false;
-    }
+    chimera_db::Connection conn = chimera_db::open_and_migrate(
+        cpc->db_path.empty() ? chimera_db::default_path() : cpc->db_path);
+    std::lock_guard<std::mutex> lk(cpc->mutex);
+    return chimera_chat_store::load_chat(conn.get(), chat_id).has_value();
 }
 
 // Write a completed exchange to the DB. `chat_id` MUST already exist
@@ -169,8 +172,17 @@ void persist_non_streaming(ChatPersistContext * cpc,
         }
         persist_completed_chat(cpc, chat_id, append_full_history, req_body,
                                 content, reasoning, tokens_in, tokens_out);
+    } catch (const std::exception & e) {
+        // Don't propagate to the client (the response was already sent
+        // successfully) — but log so operators see persistence failures.
+        // Earlier this was a bare `catch (...) {}` which masked malformed
+        // response bodies and any other parse failures.
+        std::fprintf(stderr,
+                     "chimera serve: persist_non_streaming failed: %s\n",
+                     e.what());
     } catch (...) {
-        // Don't propagate.
+        std::fprintf(stderr,
+                     "chimera serve: persist_non_streaming failed: unknown error\n");
     }
 }
 
@@ -223,8 +235,18 @@ void persist_streaming(ChatPersistContext * cpc,
                 tokens_in  = j["usage"].value("prompt_tokens",     tokens_in);
                 tokens_out = j["usage"].value("completion_tokens", tokens_out);
             }
+        } catch (const std::exception & e) {
+            // Skip malformed event; keep parsing. Log because protocol
+            // drift (e.g. an upstream change that emits a new field shape)
+            // surfaces here first; without a log the only symptom is
+            // "chats table missing assistant content" which is hard to
+            // trace back. Rare in normal traffic — one line per bad event.
+            std::fprintf(stderr,
+                         "chimera serve: persist_streaming event parse failed: %s\n",
+                         e.what());
         } catch (...) {
-            // Skip malformed event; keep parsing.
+            std::fprintf(stderr,
+                         "chimera serve: persist_streaming event parse failed: unknown error\n");
         }
     }
     if (!content.empty() || !reasoning.empty()) {
