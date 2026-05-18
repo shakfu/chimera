@@ -11,10 +11,6 @@ jobs:
   build:
     name: build (${{ matrix.os }}, ${{ matrix.backend }})
     runs-on: ${{ matrix.os }}
-    # Don't block macOS/Linux on Windows -- the Windows path is new and
-    # likely to surface issues (OpenSSL, MSVC quirks, manage.py shell
-    # assumptions). Flip experimental off once Windows is reliably green.
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -22,15 +18,12 @@ jobs:
           - os: macos-14        # Apple silicon
             backend: metal
             artifact: chimera-macos-arm64
-            experimental: false
           - os: ubuntu-latest   # x86_64
             backend: cpu
             artifact: chimera-linux-x86_64
-            experimental: false
           - os: windows-latest  # x86_64 MSVC
             backend: cpu
             artifact: chimera-windows-x86_64.exe
-            experimental: true
     env:
       # macOS binary stays portable to this minimum OS.
       MACOSX_DEPLOYMENT_TARGET: "12.0"
