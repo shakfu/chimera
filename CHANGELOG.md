@@ -4,6 +4,8 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.1.5]
+
 ### Added
 
 - KV-cache slot snapshots and LoRA hot-swap routes. Four upstream `server_routes` handlers bound that were previously called out as "deliberately not exposed":
