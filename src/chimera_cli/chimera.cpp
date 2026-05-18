@@ -358,7 +358,13 @@ std::string chat_sample_loop(
 
     std::string raw;
     std::string content;
-    common_chat_msg prev;
+    // Seed `prev` from a parse of the empty string. For chat formats that
+    // carry a fixed assistant-turn preamble (Llama-3 stamps
+    // "<|start_header_id|>assistant<|end_header_id|>\n\n" into the parsed
+    // content even when raw is empty), this anchors the diff at the
+    // preamble so the first real delta is only the model's actual output
+    // — without it, the preamble leaks into the displayed stream.
+    common_chat_msg prev = common_chat_parse("", /*is_partial=*/true, parser_params);
 
     for (int i = 0; i < n_predict; ++i) {
         if (g_chat_interrupt_requested.load(std::memory_order_relaxed)) {
@@ -1357,7 +1363,7 @@ int command_chat(const LlamaCommonOptions & opts,
             // message. parse_special=true is enough — it maps the
             // template's BOS literal back to the right token.
             const auto full_tokens = tokenize(vocab, params.prompt,
-                                              /*add_special=*/false,
+                                              /*add_special=*/true,
                                               /*parse_special=*/true);
 
             const size_t shared = common_prefix(kv_tokens, full_tokens);
