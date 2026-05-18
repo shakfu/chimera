@@ -439,8 +439,11 @@ else()
 endif()
 
 # -----------------------------------------------------------------------------
-# chimera target (shared source layout with cyllama)
+# chimera targets: library (src/chimera/) and CLI executable (src/chimera_cli/).
+# The library subdirectory must be added first so chimera_lib is defined
+# before the executable target tries to link against it.
 # -----------------------------------------------------------------------------
 set(CHIMERA_STB_IMPL "${CMAKE_SOURCE_DIR}/src/chimera/stb_impl.cpp")
 
 add_subdirectory(src/chimera)
+add_subdirectory(src/chimera_cli)

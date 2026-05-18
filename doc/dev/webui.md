@@ -129,7 +129,7 @@ current experiment.
 | `src/chimera/CMakeLists.txt` | When `CHIMERA_LINK_WEBUI` is ON: runs xxd, adds `.hpp` to sources, sets include dir, defines `LLAMA_BUILD_WEBUI`. |
 | `src/chimera/chimera_serve.cpp` | Sets `params.webui = opts.webui`. The actual route binding is in our locally-compiled `server-http.cpp`. |
 | `src/chimera/chimera.h` :: `ServeOptions::webui` | Default true; flipped by `--no-webui`. |
-| `src/chimera/chimera.cpp` | `--no-webui` CLI flag declaration. |
+| `src/chimera_cli/chimera.cpp` | `--no-webui` CLI flag declaration. |
 | `build/<chimera-build>/src/chimera/<asset>.hpp` | Generated at build time; one `unsigned char[]` + length per asset. |
 
 ---

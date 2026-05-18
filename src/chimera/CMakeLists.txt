@@ -1,15 +1,12 @@
 # -----------------------------------------------------------------------------
-# chimera - statically linked llama.cpp / whisper.cpp / stable-diffusion.cpp
-# multitool, exposed as both a CLI executable and a static library.
+# chimera_lib - the chimera STATIC library target (OUTPUT_NAME=chimera, so
+# the file on disk is libchimera.a). Every TU in this directory is library
+# code. The CLI shell (chimera.cpp + main()) lives in the sibling
+# src/chimera_cli/ directory and is built from there.
 #
-# Targets:
-#   chimera_lib  - STATIC library, OUTPUT_NAME=chimera (-> libchimera.a)
-#                  All TUs except chimera.cpp. Carries INTERFACE link options
-#                  and PUBLIC link libraries so any consumer (including the
-#                  chimera executable below) inherits the full ggml whole-
-#                  archive wrapping and the transitive archive list.
-#   chimera      - executable. Just chimera.cpp linked against chimera_lib.
-#                  Gated on CHIMERA_BUILD_EXECUTABLE (ON by default).
+# Library carries INTERFACE link options and PUBLIC link libraries so any
+# consumer (including the chimera executable in src/chimera_cli/) inherits
+# the full ggml whole-archive wrapping and the transitive archive list.
 #
 # Inputs (must be defined by the including CMakeLists.txt):
 #   SD_USE_VENDORED_GGML  - build mode toggle (must be OFF)
@@ -27,8 +24,6 @@
 # stb_impl.cpp is sourced from cyllama; standalone builds should ship their
 # own copy and override CHIMERA_STB_IMPL before including this file.
 # -----------------------------------------------------------------------------
-
-option(CHIMERA_BUILD_EXECUTABLE "Build the chimera CLI executable on top of libchimera.a" ON)
 
 if(SD_USE_VENDORED_GGML)
     message(STATUS "chimera disabled: requires SD_USE_VENDORED_GGML=OFF")
@@ -356,21 +351,4 @@ endif()
 
 if(CHIMERA_LINK_LINENOISE)
     target_link_libraries(chimera_lib PUBLIC ${LIB_LINENOISE})
-endif()
-
-# -----------------------------------------------------------------------------
-# Executable target. Just the CLI shell (chimera.cpp) linked against the
-# library. PUBLIC link properties on chimera_lib propagate the full
-# transitive archive list and the platform whole-archive wrappers, so this
-# block stays trivially small.
-# -----------------------------------------------------------------------------
-if(CHIMERA_BUILD_EXECUTABLE)
-    add_executable(chimera "${CMAKE_CURRENT_LIST_DIR}/chimera.cpp")
-    target_link_libraries(chimera PRIVATE chimera_lib)
-    target_compile_options(chimera PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CXX_COMPILE_OPTIONS}>)
-    set_target_properties(chimera PROPERTIES
-        CXX_STANDARD 17
-        CXX_STANDARD_REQUIRED ON
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-    )
 endif()

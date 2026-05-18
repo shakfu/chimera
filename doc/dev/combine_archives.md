@@ -95,7 +95,11 @@ the library API. So no source-splitting was required - `chimera.cpp`
 becomes the executable's only source, and every other TU goes into
 the library.
 
-`src/chimera/CMakeLists.txt` was rewritten to produce two targets:
+The work is split across two CMakeLists files. `src/chimera/`
+contains the library code and produces the `chimera_lib` STATIC
+target; `src/chimera_cli/` was added as a sibling that contains just
+`chimera.cpp` and produces the `chimera` executable target linked
+against `chimera_lib`. Two targets total:
 
 | CMake target | Output filename       | Purpose                                                                 |
 |--------------|-----------------------|-------------------------------------------------------------------------|
@@ -286,16 +290,13 @@ archive's own metadata.
 
 ## 6. Open questions
 
-1. **Should `chimera.cpp` move out of `src/chimera/`?** Pure
-   layering would put the CLI under `src/chimera_cli/`. Probably
-   overkill for one file; flag it if the CLI grows.
-2. **Should the sqlite3 / sqlite-vec / server-http amalgamations
+1. **Should the sqlite3 / sqlite-vec / server-http amalgamations
    stay inside `libchimera.a`?** Fine for single-consumer use. If a
    consumer also links its own SQLite or its own llama-server, they
    will hit duplicate-symbol errors. If multi-consumer use becomes
    real, split each into an `OBJECT` library so consumers can opt
    out.
-3. **Do we want a CMake `install()` target that calls
+2. **Do we want a CMake `install()` target that calls
    `combine_archives.py` as a post-build step?** Or keep it a
    manual `python3 scripts/combine_archives.py` invocation?
 
