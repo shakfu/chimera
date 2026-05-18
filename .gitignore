@@ -67,6 +67,7 @@ __pycache__/
 *.pyc
 .*_cache
 .cache
+REVIEW.md
 
 # vcpkg
 vcpkg_installed/

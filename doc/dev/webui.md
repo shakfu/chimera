@@ -10,9 +10,11 @@ flag, what the UI is) live in [`doc/serve.md`](../serve.md). The wider
 [`doc/dev/server.md`](server.md); this file is the webui-specific
 addendum.
 
-> **Status — experimental.** Variant A (embedded) only. Variant B
-> (`--public-path <dir>` for an external bundle) is not implemented; see
-> [§ 6](#6-future-work-variant-b-and-friends).
+> **Status — experimental.** Variant A (embedded) is the shipped path
+> documented here. The `--public-path <dir>` flag also shipped (parity
+> with llama-server) but the chimera-specific UI prototyped against it
+> was abandoned; see [§ 6](#6-variant-b--attempted-and-dumped) for the
+> post-mortem and re-open conditions.
 
 ---
 

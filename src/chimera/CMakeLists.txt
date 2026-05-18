@@ -43,6 +43,11 @@ add_executable(chimera
     "${CMAKE_CURRENT_LIST_DIR}/chimera_whisper.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_sd.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_serve.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_audio.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_images.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_rag.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_chat_persist.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_chats_read.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/llama_build_info_shim.cpp"
     "${CHIMERA_STB_IMPL}"
     # server-http.cpp is the HTTP-frontend half of llama-server. Upstream

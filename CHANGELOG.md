@@ -29,6 +29,28 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Changed
 
+- `chimera_serve.cpp` split into per-modality translation units (2249 LOC -> 871). The per-modality handler factories now live in sibling TUs and only `command_serve`, `ex_wrapper`, signal handling, `build_common_params`, and the `SecondaryServerCtx` / `bring_up_secondary` helpers for `--enable-embeddings` / `--reranking` stay in `chimera_serve.cpp`. The split is mechanical (no behaviour change; all 43 end-to-end tests still pass, all 8/9 golden routes byte-identical aside from a date-injection diff in `apply_template`):
+  - `chimera_serve_audio.cpp` (256 LOC) — `make_audio_transcribe_handler` + the SRT/VTT/verbose-JSON formatters.
+  - `chimera_serve_images.cpp` (367 LOC) — three `make_image_*_handler` factories + the `coerce_{int,int64,float,string}` JSON-field helpers (also linked from the RAG search handler) + the inline base64 encoder.
+  - `chimera_serve_rag.cpp` (317 LOC) — six `make_vs_*_handler` factories + the `RagContext`-bound DB-open helper.
+  - `chimera_serve_chat_persist.cpp` (356 LOC) — `make_persisting_chat_handler` and its streaming/non-streaming SSE-parse + DB-write helpers, plus the case-insensitive header lookup.
+  - `chimera_serve_chats_read.cpp` (156 LOC) — three `make_chats_*_handler` factories for the `GET /v1/chats*` read endpoints.
+  - `chimera_serve_internal.h` (134 LOC) — declares the seams: `ex_wrapper`, the `coerce_*` helpers, the three context structs (`RagContext`, `ChatPersistContext`, `ChatHistoryContext`), the `X_CHAT_ID_HEADER` constant, and every `make_*_handler` factory, all in `namespace chimera_serve`. Per-TU internal helpers stay in nested anonymous namespaces.
+
+  Closes the self-prescribed TODO from earlier releases (which had a stale "currently ~600 LOC" estimate that was actually 2249 by this release). File naming follows the existing `chimera_*` convention used by every other TU in `src/chimera/`.
+
+- `chimera.cpp::main()` extracted from 475 LOC inline CLI11 wiring to a 46-LOC parse-and-dispatch driver. The new shape:
+  - A `ParsedCli` struct holds every subcommand's CLI11 pointer + every option block + every cross-cutting local (prompt text, chat resume id, db path overrides, ...).
+  - Eleven `bind_*_cmd(app, p)` helpers (`bind_gen_cmd`, `bind_chat_cmd`, `bind_tokenize_cmd`, ..., `bind_search_cmd`) each create one subcommand and add its options. `bind_subcommands(app, p)` calls all eleven in order.
+  - `dispatch_cli(p)` runs the if-elseif chain that maps the activated subcommand to its `command_*` entry point, and contains the `--resume` model-resolution + system-prompt-file logic that was previously inlined.
+  - `main()` itself is now `silence_all_logging` -> CLI11 app setup -> `bind_subcommands` -> `app.parse` -> `llama_backend_init` -> `dispatch_cli` -> three-arm catch.
+
+  Mechanical; no behaviour or `--help` change.
+
+- Documentation cleanup of stale "Phase N" labels left over from the original roadmap. Every audio/image/RAG/chat-persist feature labelled "(Phase 2/3/4/5)" has shipped; the labels were noise to fresh readers. Stripped from `doc/dev/server.md` (`### 4.2 Opt-in via --enable-audio (Phase 2)` -> `(shipped)`, same for `--enable-image`, `--enable-rag`, `--persist-chats`). Also fixed: `doc/dev/server.md` § 4.2b "Phase 6+ may add an X-Chimera-Chat-Id header" was wrong (the header shipped in 0.1.4) and is now a pointer to the implementation; the "Web UI assets size" subsection no longer references the abandoned "Phase 4-ish" speculation about how to add a webui (both Variant A and `--public-path` shipped). `doc/dev/webui.md` status note at the top is corrected to reflect that `--public-path` shipped (it previously claimed Variant B was "not implemented" while § 6 of the same doc documented the post-mortem of the variant that built against it).
+
+- `TODO.md`: webui-deferred bullet removed (Variant A, Variant B post-mortem, Variant C re-open conditions, and the auth-gating decision are all treated in `doc/dev/webui.md` §§ 1-6.4 + § 5.3). `chimera_serve.cpp` split-when-it-crosses-1000-LOC bullet removed (the split is done). Stale "currently ~600 LOC" estimate retired with it.
+
 - `scripts/test.sh` end-to-end suite gains 6 new tests for the slots + LoRA routes: GET /slots shape, POST /slots/0 gating without `--slot-save-path` (501), GET /lora-adapters empty-list shape, POST /lora-adapters `[]` no-op (200), and a save→file-on-disk→restore round-trip against a seeded slot. All run against the existing `Llama-3.2-1B-Instruct` fixture; skipped (not failed) when `python3` + `curl` aren't on `$PATH`.
 
 - `scripts/test.sh` gains 6 further tests for the chat history endpoints + `--public-path`: spawns serve with `--persist-chats` + a temp directory mounted at `/`, seeds two chats via the normal completions path with a deliberately rare token (`quibblefrond`) for unambiguous FTS5 assertions, then checks that GET /v1/chats returns the list, GET /v1/chats/:id returns ordered messages, GET /v1/chats/search returns a `[quibblefrond]`-highlighted snippet, GET /v1/chats/&lt;unknown&gt; → 400, GET /v1/chats/search without `q` → 400, and GET / serves the dropped index.html with `text/html`. Total smoke + e2e suite is now 44 tests.

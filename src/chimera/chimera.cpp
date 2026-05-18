@@ -2060,6 +2060,514 @@ std::string version_string() {
         + "  sqlite-vec:           " + chimera_db::sqlite_vec_version();
 }
 
+// ----------------------------------------------------------------------------
+// CLI wiring
+// ----------------------------------------------------------------------------
+//
+// CLI11 binding lived inline in main() until the try-block grew past 470
+// lines. The blocks below extract each subcommand's option wiring into a
+// small `bind_*_cmd` helper so the file reads as "one subcommand per
+// helper" instead of one giant call list. ParsedCli holds the CLI11
+// subcommand pointers + every option struct + every local string/int
+// that's filled by parsing. dispatch_cli() runs the matched subcommand
+// and returns its exit code.
+//
+// The split is mechanical — no behaviour change. Each helper still owns
+// the same options the inline block owned, in the same order, with the
+// same defaults and help strings.
+
+struct ParsedCli {
+    // Subcommand pointers, set by the bind_*_cmd helpers and read back
+    // in dispatch_cli to decide which subcommand was activated.
+    CLI::App * prompt_cmd       = nullptr;
+    CLI::App * chat_cmd         = nullptr;
+    CLI::App * tokenize_cmd     = nullptr;
+    CLI::App * embed_cmd        = nullptr;
+    CLI::App * whisper_cmd      = nullptr;
+    CLI::App * sd_cmd           = nullptr;
+    CLI::App * serve_cmd        = nullptr;
+    CLI::App * db_status_cmd    = nullptr;
+    CLI::App * info_cmd         = nullptr;
+    CLI::App * index_create_cmd = nullptr;
+    CLI::App * index_ingest_cmd = nullptr;
+    CLI::App * index_list_cmd   = nullptr;
+    CLI::App * index_stats_cmd  = nullptr;
+    CLI::App * index_drop_cmd   = nullptr;
+    CLI::App * search_cmd       = nullptr;
+
+    // `gen`
+    LlamaCommonOptions prompt_opts;
+    std::string        prompt_text;
+    std::string        prompt_file;
+
+    // `chat`
+    LlamaCommonOptions chat_opts;
+    std::string        system_prompt;
+    std::string        system_prompt_file;
+    std::string        template_override;
+    std::string        color_arg          = "auto";
+    bool               chat_persist       = false;
+    bool               chat_list          = false;
+    std::string        chat_search;
+    std::string        chat_resume;
+    std::string        chat_db_path;
+    int                chat_list_limit    = 20;
+
+    // `tokenize`, `embed`, `whisper`, `sd`, `serve`
+    TokenizeOptions tokenize_opts;
+    EmbedOptions    embed_opts;
+    WhisperOptions  whisper_opts;
+    SdOptions       sd_opts;
+    ServeOptions    serve_opts;
+
+    // `db`
+    std::string db_path_override;
+
+    // `index`
+    std::string              idx_db_path;
+    std::string              idx_name;
+    std::string              idx_embedding_model;
+    int                      idx_ctx_size              = 0;
+    int                      idx_threads               = -1;
+    int                      idx_gpu_layers            = 0;
+    std::string              idx_pooling               = "mean";
+    std::vector<std::string> idx_files;
+    std::string              idx_glob;
+    std::string              idx_distance              = "cosine";
+    int                      idx_chunk_tokens          = 512;
+    int                      idx_chunk_overlap         = 64;
+    int                      idx_chunk_tokens_override  = 0;
+    int                      idx_chunk_overlap_override = -1;
+    bool                     idx_cache_embeddings      = false;
+
+    // `search`
+    std::string srch_db_path;
+    std::string srch_name;
+    std::string srch_query;
+    int         srch_k                = 5;
+    int         srch_ctx_size         = 0;
+    int         srch_threads          = -1;
+    int         srch_gpu_layers       = 0;
+    std::string srch_pooling          = "mean";
+    bool        srch_cache_embeddings = false;
+    std::string srch_mode             = "hybrid";
+};
+
+void bind_gen_cmd(CLI::App & app, ParsedCli & p) {
+    auto * cmd = app.add_subcommand("gen", "One-shot llama text generation");
+    cmd->add_option("-m,--model", p.prompt_opts.model, "GGUF model")->required();
+    cmd->add_option("-p,--prompt", p.prompt_text, "Prompt text");
+    cmd->add_option("-f,--prompt-file", p.prompt_file,
+        "Read prompt from file (use - for stdin)");
+    cmd->add_option("-n,--n-predict", p.prompt_opts.n_predict, "Tokens to generate");
+    cmd->add_option("-c,--ctx-size", p.prompt_opts.n_ctx, "Context size");
+    cmd->add_option("-b,--batch-size", p.prompt_opts.n_batch, "Prompt batch size");
+    cmd->add_option("-t,--threads", p.prompt_opts.threads, "CPU threads");
+    cmd->add_option("--gpu-layers", p.prompt_opts.gpu_layers, "Layers to offload");
+    cmd->add_option("--seed", p.prompt_opts.seed, "Sampler seed");
+    cmd->add_option("--temp", p.prompt_opts.temp, "Temperature");
+    cmd->add_option("--top-k", p.prompt_opts.top_k, "Top-k");
+    cmd->add_option("--top-p", p.prompt_opts.top_p, "Top-p");
+    cmd->add_option("--min-p", p.prompt_opts.min_p, "Min-p");
+    cmd->add_option("--repeat-penalty", p.prompt_opts.repeat_penalty, "Repeat penalty");
+    cmd->add_option("--mmproj", p.prompt_opts.mmproj,
+        "Multimodal projector (mmproj GGUF) for vision/audio input");
+    cmd->add_option("--image", p.prompt_opts.images,
+        "Image to feed alongside the prompt (repeatable; requires --mmproj)");
+    p.prompt_cmd = cmd;
+}
+
+void bind_chat_cmd(CLI::App & app, ParsedCli & p) {
+    auto * cmd = app.add_subcommand("chat", "Minimal interactive llama chat");
+    // --model is required for an interactive session but NOT for
+    // --list / --search / --resume (which can read the model name
+    // from the saved chat row). We enforce it after parse instead
+    // of via CLI11's ->required() so the print-and-exit paths work
+    // without a model argument.
+    cmd->add_option("-m,--model", p.chat_opts.model, "GGUF model");
+    cmd->add_option("-n,--n-predict", p.chat_opts.n_predict, "Tokens to generate per turn");
+    cmd->add_option("-c,--ctx-size", p.chat_opts.n_ctx, "Context size");
+    cmd->add_option("-b,--batch-size", p.chat_opts.n_batch, "Prompt batch size");
+    cmd->add_option("-t,--threads", p.chat_opts.threads, "CPU threads");
+    cmd->add_option("--gpu-layers", p.chat_opts.gpu_layers, "Layers to offload");
+    cmd->add_option("--seed", p.chat_opts.seed, "Sampler seed");
+    cmd->add_option("--temp", p.chat_opts.temp, "Temperature");
+    cmd->add_option("--top-k", p.chat_opts.top_k, "Top-k");
+    cmd->add_option("--top-p", p.chat_opts.top_p, "Top-p");
+    cmd->add_option("--min-p", p.chat_opts.min_p, "Min-p");
+    cmd->add_option("--repeat-penalty", p.chat_opts.repeat_penalty, "Repeat penalty");
+    cmd->add_option("--system", p.system_prompt, "System prompt");
+    cmd->add_option("--system-prompt-file", p.system_prompt_file,
+        "Read system prompt from file");
+    cmd->add_option("--chat-template", p.template_override, "Chat template override");
+
+    // Persistence flags. `--list` and `--search` are print-and-exit;
+    // they don't load a model. `--persist` opts a live session into
+    // per-turn DB writes; `--resume <id|last>` loads a saved
+    // conversation and continues from where it ended.
+    cmd->add_flag("--persist",  p.chat_persist,
+        "Save this chat to the embedded SQLite DB (off by default)");
+    cmd->add_option("--resume",  p.chat_resume,
+        "Resume a saved chat by id, or 'last' for the most recent");
+    cmd->add_flag("--list",     p.chat_list,
+        "List saved chats and exit (no model load)");
+    cmd->add_option("--search",  p.chat_search,
+        "Full-text-search saved messages and exit (no model load)");
+    cmd->add_option("--list-limit", p.chat_list_limit,
+        "Cap for --list / --search results");
+    cmd->add_option("--db",      p.chat_db_path,
+        "Path to the DB file (default: $CHIMERA_DB or platform default)");
+    cmd->add_option("--mmproj", p.chat_opts.mmproj,
+        "Multimodal projector (mmproj GGUF) enabling /image and /audio");
+    cmd->add_option("--color", p.color_arg,
+        "Colorize input/output: auto | always | never")
+        ->check(CLI::IsMember({"auto", "always", "never"}));
+    p.chat_cmd = cmd;
+}
+
+void bind_tokenize_cmd(CLI::App & app, ParsedCli & p) {
+    auto * cmd = app.add_subcommand("tokenize", "Tokenize text via a GGUF vocab");
+    cmd->add_option("-m,--model", p.tokenize_opts.model, "GGUF model")->required();
+    cmd->add_option("-p,--prompt", p.tokenize_opts.input, "Text to tokenize");
+    cmd->add_option("-f,--prompt-file", p.tokenize_opts.input_file,
+        "Read text from file (use - for stdin)");
+    cmd->add_flag("!--no-bos", p.tokenize_opts.add_special,
+        "Do not prepend BOS / model-special tokens");
+    cmd->add_flag("!--no-special", p.tokenize_opts.parse_special,
+        "Do not parse <|special|> tokens in the input");
+    cmd->add_flag("--pieces", p.tokenize_opts.show_pieces,
+        "Also print the decoded piece next to each id");
+    p.tokenize_cmd = cmd;
+}
+
+void bind_embed_cmd(CLI::App & app, ParsedCli & p) {
+    auto * cmd = app.add_subcommand("embed", "Emit an embedding vector for text");
+    cmd->add_option("-m,--model", p.embed_opts.model, "GGUF embedding model")->required();
+    cmd->add_option("-p,--prompt", p.embed_opts.input, "Text to embed");
+    cmd->add_option("-f,--prompt-file", p.embed_opts.input_file,
+        "Read text from file (use - for stdin)");
+    cmd->add_option("-o,--output", p.embed_opts.output,
+        "Output file (default: stdout)");
+    cmd->add_option("--pooling", p.embed_opts.pooling,
+        "Pooling: mean | cls | last | none");
+    cmd->add_option("-c,--ctx-size", p.embed_opts.n_ctx,
+        "Context size (0 = model's training context)");
+    cmd->add_option("-b,--batch-size", p.embed_opts.n_batch, "Batch size");
+    cmd->add_option("-t,--threads", p.embed_opts.threads, "CPU threads");
+    cmd->add_option("--gpu-layers", p.embed_opts.gpu_layers, "Layers to offload");
+    cmd->add_flag("--cache-embeddings", p.embed_opts.cache_embeddings,
+        "Memoize embed(text) -> vector in SQLite so repeats skip the model");
+    cmd->add_option("--cache-db", p.embed_opts.cache_db,
+        "Path to the SQLite DB used by --cache-embeddings "
+        "(default: $CHIMERA_DB or platform default)");
+    cmd->add_flag("!--no-normalize", p.embed_opts.normalize,
+        "Do not L2-normalize the output vector");
+    p.embed_cmd = cmd;
+}
+
+void bind_whisper_cmd(CLI::App & app, ParsedCli & p) {
+    auto * cmd = app.add_subcommand("whisper", "Minimal whisper transcription");
+    cmd->add_option("-m,--model", p.whisper_opts.model, "Whisper model")->required();
+    cmd->add_option("-i,--input", p.whisper_opts.input, "Input WAV file")->required();
+    cmd->add_option("-o,--output", p.whisper_opts.output, "Output text file");
+    cmd->add_option("-t,--threads", p.whisper_opts.threads, "CPU threads");
+    cmd->add_option("-l,--language", p.whisper_opts.language, "Language or auto");
+    cmd->add_flag("--translate", p.whisper_opts.translate, "Translate to English");
+    cmd->add_flag("--timestamps", p.whisper_opts.timestamps, "Print segment timestamps");
+    cmd->add_flag("--no-context", p.whisper_opts.no_context, "Disable previous-text conditioning");
+    p.whisper_cmd = cmd;
+}
+
+void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
+    auto * cmd = app.add_subcommand("sd", "Minimal stable-diffusion text-to-image");
+    cmd->add_option("-m,--model", p.sd_opts.model, "Diffusion model")->required();
+    cmd->add_option("-p,--prompt", p.sd_opts.prompt, "Prompt")->required();
+    cmd->add_option("-o,--output", p.sd_opts.output, "Output PNG path");
+    cmd->add_option("--negative-prompt", p.sd_opts.negative_prompt, "Negative prompt");
+    cmd->add_option("-W,--width", p.sd_opts.width, "Image width");
+    cmd->add_option("-H,--height", p.sd_opts.height, "Image height");
+    cmd->add_option("-s,--steps", p.sd_opts.steps, "Sampling steps");
+    cmd->add_option("-b,--batch-count", p.sd_opts.batch_count, "Image count");
+    cmd->add_option("-t,--threads", p.sd_opts.threads, "CPU threads");
+    cmd->add_option("--seed", p.sd_opts.seed, "Seed");
+    cmd->add_option("--cfg-scale", p.sd_opts.cfg_scale, "CFG scale");
+    cmd->add_option("--clip-skip", p.sd_opts.clip_skip, "CLIP skip");
+    cmd->add_option("--sample-method", p.sd_opts.sample_method, "Sampling method");
+    cmd->add_option("--scheduler", p.sd_opts.scheduler, "Scheduler");
+    cmd->add_option("--init-image", p.sd_opts.init_image,
+        "Initial image for img2img / inpaint (must match -W,-H)");
+    cmd->add_option("--mask-image", p.sd_opts.mask_image,
+        "Inpaint mask (single-channel; requires --init-image)");
+    cmd->add_option("--strength", p.sd_opts.strength,
+        "img2img denoising strength (0=preserve init, 1=full noise)");
+    p.sd_cmd = cmd;
+}
+
+void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
+    auto * cmd = app.add_subcommand("serve",
+        "OpenAI-compatible HTTP server (LLM only for now)");
+    cmd->add_option("-m,--model", p.serve_opts.model, "GGUF model")->required();
+    cmd->add_option("--mmproj", p.serve_opts.mmproj,
+        "Multimodal projector for vision/audio inputs in chat completions");
+    cmd->add_option("--host", p.serve_opts.host, "Bind address");
+    cmd->add_option("--port", p.serve_opts.port, "Bind port");
+    cmd->add_option("-c,--ctx-size", p.serve_opts.n_ctx,
+        "Context size (0 = model's training context)");
+    cmd->add_option("-b,--batch-size", p.serve_opts.n_batch,
+        "Logical batch size for prompt processing");
+    cmd->add_option("--ubatch-size", p.serve_opts.n_ubatch,
+        "Physical batch size (auto-clamped to batch when --embeddings)");
+    cmd->add_option("-t,--threads", p.serve_opts.threads, "CPU threads");
+    cmd->add_option("--gpu-layers", p.serve_opts.gpu_layers, "Layers to offload");
+    cmd->add_option("--parallel", p.serve_opts.parallel,
+        "Number of concurrent request slots");
+    cmd->add_option("--api-key", p.serve_opts.api_key,
+        "Bearer token required on /v1/* requests (empty = no auth)");
+    cmd->add_flag("--embeddings", p.serve_opts.embedding,
+        "Load the model in embedding mode (enables /v1/embeddings)");
+    cmd->add_option("--enable-audio", p.serve_opts.audio_model,
+        "Whisper GGUF to load alongside the LLM (enables /v1/audio/transcriptions)");
+    cmd->add_option("--enable-image", p.serve_opts.sd_model,
+        "Stable-diffusion GGUF to load alongside the LLM (enables /v1/images/*)");
+    cmd->add_option("--enable-rag", p.serve_opts.rag_embedding_model,
+        "Embedding GGUF to load alongside the LLM (enables /v1/vector_stores/*)");
+    cmd->add_option("--enable-embeddings", p.serve_opts.embed_model,
+        "Embedding GGUF to load alongside the LLM (routes /v1/embeddings to it)");
+    cmd->add_option("--reranking", p.serve_opts.rerank_model,
+        "Cross-encoder reranker GGUF to load alongside the LLM (enables /v1/rerank)");
+    cmd->add_flag("--cache-embeddings", p.serve_opts.cache_embeddings,
+        "Memoize RAG embeddings in --rag-db (no-op unless --enable-rag is set)");
+    cmd->add_option("--rag-db", p.serve_opts.rag_db_path,
+        "Path to the SQLite DB used by /v1/vector_stores/* "
+        "(default: $CHIMERA_DB or platform default)");
+    cmd->add_flag("--persist-chats", p.serve_opts.persist_chats,
+        "Save every /v1/chat/completions exchange to the chats table");
+    cmd->add_option("--chat-db", p.serve_opts.chat_db_path,
+        "Path to the SQLite DB used by --persist-chats "
+        "(default: $CHIMERA_DB or platform default)");
+    cmd->add_option("--slot-save-path", p.serve_opts.slot_save_path,
+        "Directory for KV-cache snapshots written/read by "
+        "POST /slots/:id?action={save,restore} (GET /slots works regardless)");
+    cmd->add_option("--lora", p.serve_opts.lora_adapters,
+        "LoRA adapter to load alongside the base model as path[:scale] "
+        "(scale defaults to 1.0; repeatable). Enables POST /lora-adapters "
+        "to hot-swap which adapters are active without reloading.");
+    cmd->add_flag("!--no-webui", p.serve_opts.webui,
+        "Disable the embedded web chat UI at GET / (only meaningful in "
+        "builds compiled with CHIMERA_WEBUI_EMBED=1; a no-op otherwise)");
+    cmd->add_option("--public-path", p.serve_opts.public_path,
+        "Directory to serve as static files at GET / (chimera-specific UI). "
+        "Independent of CHIMERA_WEBUI_EMBED; when both apply, --public-path wins");
+    p.serve_cmd = cmd;
+}
+
+void bind_db_cmd(CLI::App & app, ParsedCli & p) {
+    auto * db_cmd = app.add_subcommand("db", "Embedded SQLite database management");
+    auto * db_status_cmd = db_cmd->add_subcommand("status",
+        "Open the DB, run pending migrations, print path + version + schema info");
+    db_cmd->add_option("--db", p.db_path_override,
+        "Path to the DB file (default: $CHIMERA_DB or platform default)");
+    db_cmd->require_subcommand(1);
+    p.db_status_cmd = db_status_cmd;
+}
+
+void bind_info_cmd(CLI::App & app, ParsedCli & p) {
+    p.info_cmd = app.add_subcommand("info", "Print versions of bundled component");
+}
+
+void bind_index_cmd(CLI::App & app, ParsedCli & p) {
+    auto * index_cmd = app.add_subcommand("index", "Vector store management");
+    index_cmd->require_subcommand(1);
+    index_cmd->add_option("--db", p.idx_db_path,
+        "Path to the DB file (default: $CHIMERA_DB or platform default)");
+
+    auto * create_cmd = index_cmd->add_subcommand("create",
+        "Create a collection (sized to the embedding model's dim)");
+    create_cmd->add_option("-n,--name", p.idx_name, "Collection name")->required();
+    create_cmd->add_option("-e,--embedding-model", p.idx_embedding_model,
+        "GGUF embedding model (recorded on the collection)")->required();
+    create_cmd->add_option("-c,--ctx-size", p.idx_ctx_size, "Context size");
+    create_cmd->add_option("-t,--threads", p.idx_threads, "CPU threads");
+    create_cmd->add_option("--gpu-layers", p.idx_gpu_layers, "Layers to offload");
+    create_cmd->add_option("--pooling", p.idx_pooling,
+        "Pooling: mean | cls | last | none");
+    create_cmd->add_option("--distance", p.idx_distance,
+        "Distance metric on the vec0 table: cosine | l2 | l1 "
+        "(default cosine; right for L2-normalized embeddings)");
+    create_cmd->add_option("--chunk-tokens", p.idx_chunk_tokens,
+        "Default tokens per chunk for this collection (default 512). "
+        "Token units of the embedding model's vocab; not characters.");
+    create_cmd->add_option("--chunk-overlap", p.idx_chunk_overlap,
+        "Default token overlap between chunks (default 64)");
+    p.index_create_cmd = create_cmd;
+
+    auto * ingest_cmd = index_cmd->add_subcommand("ingest",
+        "Chunk + embed + insert one or more text files into a collection");
+    ingest_cmd->add_option("-n,--name", p.idx_name, "Collection name")->required();
+    ingest_cmd->add_option("-f,--file", p.idx_files,
+        "File to ingest (repeatable)");
+    ingest_cmd->add_option("-g,--glob", p.idx_glob,
+        "Glob pattern relative to cwd (e.g. 'docs/**/*.md')");
+    ingest_cmd->add_option("-c,--ctx-size", p.idx_ctx_size, "Context size");
+    ingest_cmd->add_option("-t,--threads", p.idx_threads, "CPU threads");
+    ingest_cmd->add_option("--gpu-layers", p.idx_gpu_layers, "Layers to offload");
+    ingest_cmd->add_option("--pooling", p.idx_pooling,
+        "Pooling: mean | cls | last | none");
+    ingest_cmd->add_option("--chunk-tokens", p.idx_chunk_tokens_override,
+        "Tokens per chunk for this ingest call (overrides the collection's "
+        "recorded chunk_tokens; 0 = use the collection default)");
+    ingest_cmd->add_option("--chunk-overlap", p.idx_chunk_overlap_override,
+        "Token overlap between chunks for this ingest call (overrides the "
+        "collection's recorded chunk_overlap; -1 = use the collection default)");
+    ingest_cmd->add_flag("--cache-embeddings", p.idx_cache_embeddings,
+        "Memoize per-chunk embed(text) -> vector in --db so re-ingesting "
+        "the same content skips the model");
+    p.index_ingest_cmd = ingest_cmd;
+
+    p.index_list_cmd  = index_cmd->add_subcommand("list",
+        "List collections and their document counts");
+
+    auto * stats_cmd = index_cmd->add_subcommand("stats",
+        "Show details for one collection");
+    stats_cmd->add_option("-n,--name", p.idx_name, "Collection name")->required();
+    p.index_stats_cmd = stats_cmd;
+
+    auto * drop_cmd  = index_cmd->add_subcommand("drop",
+        "Drop a collection and all its documents");
+    drop_cmd->add_option("-n,--name", p.idx_name, "Collection name")->required();
+    p.index_drop_cmd = drop_cmd;
+}
+
+void bind_search_cmd(CLI::App & app, ParsedCli & p) {
+    auto * cmd = app.add_subcommand("search",
+        "Search a vector-store collection by similarity");
+    cmd->add_option("--db", p.srch_db_path,
+        "Path to the DB file (default: $CHIMERA_DB or platform default)");
+    cmd->add_option("-n,--name", p.srch_name, "Collection name")->required();
+    cmd->add_option("-q,--query", p.srch_query, "Search query text")->required();
+    cmd->add_option("-k,--top-k", p.srch_k, "Number of hits to return");
+    cmd->add_option("-c,--ctx-size", p.srch_ctx_size, "Context size");
+    cmd->add_option("-t,--threads", p.srch_threads, "CPU threads");
+    cmd->add_option("--gpu-layers", p.srch_gpu_layers, "Layers to offload");
+    cmd->add_option("--pooling", p.srch_pooling,
+        "Pooling: mean | cls | last | none");
+    cmd->add_flag("--cache-embeddings", p.srch_cache_embeddings,
+        "Memoize embed(query) -> vector in --db so repeated searches "
+        "with the same query skip the model");
+    cmd->add_option("--mode", p.srch_mode,
+        "Retrieval mode: semantic | lexical | hybrid (default: hybrid)");
+    p.search_cmd = cmd;
+}
+
+void bind_subcommands(CLI::App & app, ParsedCli & p) {
+    bind_gen_cmd     (app, p);
+    bind_chat_cmd    (app, p);
+    bind_tokenize_cmd(app, p);
+    bind_embed_cmd   (app, p);
+    bind_whisper_cmd (app, p);
+    bind_sd_cmd      (app, p);
+    bind_serve_cmd   (app, p);
+    bind_db_cmd      (app, p);
+    bind_info_cmd    (app, p);
+    bind_index_cmd   (app, p);
+    bind_search_cmd  (app, p);
+}
+
+// Resolve the activated subcommand and invoke its command_* entry
+// point. Mutating chat_opts.model for `--resume` and resolving the
+// prompt for `gen` happen here rather than inside command_chat /
+// command_prompt to keep the entry points free of CLI11 dependencies.
+int dispatch_cli(ParsedCli & p) {
+    if (*p.prompt_cmd) {
+        const std::string resolved = resolve_prompt(p.prompt_text, p.prompt_file);
+        return command_prompt(p.prompt_opts, resolved);
+    }
+    if (*p.chat_cmd) {
+        // Print-and-exit branches first: --list and --search never
+        // load the model and don't need --model on the command line.
+        if (p.chat_list) {
+            return command_chat_list(p.chat_db_path, p.chat_list_limit);
+        }
+        if (!p.chat_search.empty()) {
+            return command_chat_search(p.chat_db_path, p.chat_search, p.chat_list_limit);
+        }
+        if (p.chat_opts.model.empty() && p.chat_resume.empty()) {
+            fail(ExitCode::BadInput,
+                 "chat: -m/--model is required (or --resume <id|last>)");
+        }
+        // --resume without --model: pick up the model path
+        // recorded on the saved chat. The user can override by
+        // passing -m explicitly.
+        if (!p.chat_resume.empty() && p.chat_opts.model.empty()) {
+            auto conn = chimera_db::open_and_migrate(
+                p.chat_db_path.empty()
+                    ? chimera_db::default_path() : p.chat_db_path);
+            std::optional<chimera_chat_store::Chat> existing;
+            if (p.chat_resume == "last" || p.chat_resume == "latest") {
+                existing = chimera_chat_store::latest_chat(conn.get());
+            } else {
+                try {
+                    existing = chimera_chat_store::load_chat(
+                        conn.get(), std::stoll(p.chat_resume));
+                } catch (const std::exception &) {
+                    fail(ExitCode::BadInput,
+                         "invalid --resume value: '" + p.chat_resume + "'");
+                }
+            }
+            if (!existing) {
+                fail(ExitCode::BadInput,
+                     "no such chat: '" + p.chat_resume + "'");
+            }
+            p.chat_opts.model = existing->model_path;
+        }
+        std::string resolved_system = p.system_prompt;
+        if (!p.system_prompt_file.empty()) {
+            if (!p.system_prompt.empty()) {
+                fail(ExitCode::BadInput,
+                    "use only one of --system / --system-prompt-file");
+            }
+            resolved_system = read_file(p.system_prompt_file);
+        }
+        ChatPersistence persist_cfg;
+        persist_cfg.persist  = p.chat_persist;
+        persist_cfg.resume   = p.chat_resume;
+        persist_cfg.db_path  = p.chat_db_path;
+        return command_chat(p.chat_opts, resolved_system, p.template_override,
+                            parse_color_mode(p.color_arg), persist_cfg);
+    }
+    if (*p.tokenize_cmd)     return command_tokenize    (p.tokenize_opts);
+    if (*p.embed_cmd)        return command_embed       (p.embed_opts);
+    if (*p.whisper_cmd)      return command_whisper     (p.whisper_opts);
+    if (*p.sd_cmd)           return command_sd          (p.sd_opts);
+    if (*p.serve_cmd)        return command_serve       (p.serve_opts);
+    if (*p.db_status_cmd)    return command_db_status   (p.db_path_override);
+    if (*p.info_cmd)         return command_info        ();
+    if (*p.index_create_cmd) {
+        return command_index_create(p.idx_db_path, p.idx_name, p.idx_embedding_model,
+                                     p.idx_ctx_size, p.idx_threads, p.idx_gpu_layers,
+                                     p.idx_pooling, p.idx_distance,
+                                     p.idx_chunk_tokens, p.idx_chunk_overlap);
+    }
+    if (*p.index_ingest_cmd) {
+        return command_index_ingest(p.idx_db_path, p.idx_name, p.idx_files, p.idx_glob,
+                                     p.idx_ctx_size, p.idx_threads, p.idx_gpu_layers,
+                                     p.idx_pooling,
+                                     p.idx_chunk_tokens_override,
+                                     p.idx_chunk_overlap_override,
+                                     p.idx_cache_embeddings);
+    }
+    if (*p.index_list_cmd)   return command_index_list  (p.idx_db_path);
+    if (*p.index_stats_cmd)  return command_index_stats (p.idx_db_path, p.idx_name);
+    if (*p.index_drop_cmd)   return command_index_drop  (p.idx_db_path, p.idx_name);
+    if (*p.search_cmd) {
+        return command_search(p.srch_db_path, p.srch_name, p.srch_query, p.srch_k,
+                               p.srch_ctx_size, p.srch_threads, p.srch_gpu_layers,
+                               p.srch_pooling, p.srch_cache_embeddings, p.srch_mode);
+    }
+    // app.require_subcommand(1) guarantees one of the above matched.
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -2079,461 +2587,33 @@ int main(int argc, char ** argv) {
     app.add_flag("-v,--verbose", verbose, "Enable native-backend logging");
     app.set_version_flag("-V,--version", &version_string,
         "Show version and bundled library versions");
+    app.require_subcommand(1);
+
+    ParsedCli parsed;
+    bind_subcommands(app, parsed);
 
     bool backend_initialized = false;
     try {
-        app.require_subcommand(1);
-
-        LlamaCommonOptions prompt_opts;
-        std::string prompt_text;
-        std::string prompt_file;
-        auto * prompt_cmd = app.add_subcommand("gen", "One-shot llama text generation");
-        prompt_cmd->add_option("-m,--model", prompt_opts.model, "GGUF model")->required();
-        prompt_cmd->add_option("-p,--prompt", prompt_text, "Prompt text");
-        prompt_cmd->add_option("-f,--prompt-file", prompt_file,
-            "Read prompt from file (use - for stdin)");
-        prompt_cmd->add_option("-n,--n-predict", prompt_opts.n_predict, "Tokens to generate");
-        prompt_cmd->add_option("-c,--ctx-size", prompt_opts.n_ctx, "Context size");
-        prompt_cmd->add_option("-b,--batch-size", prompt_opts.n_batch, "Prompt batch size");
-        prompt_cmd->add_option("-t,--threads", prompt_opts.threads, "CPU threads");
-        prompt_cmd->add_option("--gpu-layers", prompt_opts.gpu_layers, "Layers to offload");
-        prompt_cmd->add_option("--seed", prompt_opts.seed, "Sampler seed");
-        prompt_cmd->add_option("--temp", prompt_opts.temp, "Temperature");
-        prompt_cmd->add_option("--top-k", prompt_opts.top_k, "Top-k");
-        prompt_cmd->add_option("--top-p", prompt_opts.top_p, "Top-p");
-        prompt_cmd->add_option("--min-p", prompt_opts.min_p, "Min-p");
-        prompt_cmd->add_option("--repeat-penalty", prompt_opts.repeat_penalty, "Repeat penalty");
-        prompt_cmd->add_option("--mmproj", prompt_opts.mmproj,
-            "Multimodal projector (mmproj GGUF) for vision/audio input");
-        prompt_cmd->add_option("--image", prompt_opts.images,
-            "Image to feed alongside the prompt (repeatable; requires --mmproj)");
-
-        LlamaCommonOptions chat_opts;
-        std::string system_prompt;
-        std::string system_prompt_file;
-        std::string template_override;
-        std::string color_arg = "auto";
-        auto * chat_cmd = app.add_subcommand("chat", "Minimal interactive llama chat");
-        // --model is required for an interactive session but NOT for
-        // --list / --search / --resume (which can read the model name
-        // from the saved chat row). We enforce it after parse instead
-        // of via CLI11's ->required() so the print-and-exit paths work
-        // without a model argument.
-        chat_cmd->add_option("-m,--model", chat_opts.model, "GGUF model");
-        chat_cmd->add_option("-n,--n-predict", chat_opts.n_predict, "Tokens to generate per turn");
-        chat_cmd->add_option("-c,--ctx-size", chat_opts.n_ctx, "Context size");
-        chat_cmd->add_option("-b,--batch-size", chat_opts.n_batch, "Prompt batch size");
-        chat_cmd->add_option("-t,--threads", chat_opts.threads, "CPU threads");
-        chat_cmd->add_option("--gpu-layers", chat_opts.gpu_layers, "Layers to offload");
-        chat_cmd->add_option("--seed", chat_opts.seed, "Sampler seed");
-        chat_cmd->add_option("--temp", chat_opts.temp, "Temperature");
-        chat_cmd->add_option("--top-k", chat_opts.top_k, "Top-k");
-        chat_cmd->add_option("--top-p", chat_opts.top_p, "Top-p");
-        chat_cmd->add_option("--min-p", chat_opts.min_p, "Min-p");
-        chat_cmd->add_option("--repeat-penalty", chat_opts.repeat_penalty, "Repeat penalty");
-        chat_cmd->add_option("--system", system_prompt, "System prompt");
-        chat_cmd->add_option("--system-prompt-file", system_prompt_file,
-            "Read system prompt from file");
-        chat_cmd->add_option("--chat-template", template_override, "Chat template override");
-
-        // Phase-3 chat persistence flags. `--list` and `--search` are
-        // print-and-exit; they don't load a model. `--persist` opts a
-        // live session into per-turn DB writes; `--resume <id|last>`
-        // loads a saved conversation and continues from where it ended.
-        bool        chat_persist  = false;
-        bool        chat_list     = false;
-        std::string chat_search;
-        std::string chat_resume;
-        std::string chat_db_path;
-        int         chat_list_limit = 20;
-        chat_cmd->add_flag("--persist",  chat_persist,
-            "Save this chat to the embedded SQLite DB (off by default)");
-        chat_cmd->add_option("--resume",  chat_resume,
-            "Resume a saved chat by id, or 'last' for the most recent");
-        chat_cmd->add_flag("--list",     chat_list,
-            "List saved chats and exit (no model load)");
-        chat_cmd->add_option("--search",  chat_search,
-            "Full-text-search saved messages and exit (no model load)");
-        chat_cmd->add_option("--list-limit", chat_list_limit,
-            "Cap for --list / --search results");
-        chat_cmd->add_option("--db",      chat_db_path,
-            "Path to the DB file (default: $CHIMERA_DB or platform default)");
-        chat_cmd->add_option("--mmproj", chat_opts.mmproj,
-            "Multimodal projector (mmproj GGUF) enabling /image and /audio");
-        chat_cmd->add_option("--color", color_arg,
-            "Colorize input/output: auto | always | never")
-            ->check(CLI::IsMember({"auto", "always", "never"}));
-
-        TokenizeOptions tokenize_opts;
-        auto * tokenize_cmd = app.add_subcommand("tokenize", "Tokenize text via a GGUF vocab");
-        tokenize_cmd->add_option("-m,--model", tokenize_opts.model, "GGUF model")->required();
-        tokenize_cmd->add_option("-p,--prompt", tokenize_opts.input, "Text to tokenize");
-        tokenize_cmd->add_option("-f,--prompt-file", tokenize_opts.input_file,
-            "Read text from file (use - for stdin)");
-        tokenize_cmd->add_flag("!--no-bos", tokenize_opts.add_special,
-            "Do not prepend BOS / model-special tokens");
-        tokenize_cmd->add_flag("!--no-special", tokenize_opts.parse_special,
-            "Do not parse <|special|> tokens in the input");
-        tokenize_cmd->add_flag("--pieces", tokenize_opts.show_pieces,
-            "Also print the decoded piece next to each id");
-
-        EmbedOptions embed_opts;
-        auto * embed_cmd = app.add_subcommand("embed", "Emit an embedding vector for text");
-        embed_cmd->add_option("-m,--model", embed_opts.model, "GGUF embedding model")->required();
-        embed_cmd->add_option("-p,--prompt", embed_opts.input, "Text to embed");
-        embed_cmd->add_option("-f,--prompt-file", embed_opts.input_file,
-            "Read text from file (use - for stdin)");
-        embed_cmd->add_option("-o,--output", embed_opts.output,
-            "Output file (default: stdout)");
-        embed_cmd->add_option("--pooling", embed_opts.pooling,
-            "Pooling: mean | cls | last | none");
-        embed_cmd->add_option("-c,--ctx-size", embed_opts.n_ctx,
-            "Context size (0 = model's training context)");
-        embed_cmd->add_option("-b,--batch-size", embed_opts.n_batch, "Batch size");
-        embed_cmd->add_option("-t,--threads", embed_opts.threads, "CPU threads");
-        embed_cmd->add_option("--gpu-layers", embed_opts.gpu_layers, "Layers to offload");
-        embed_cmd->add_flag("--cache-embeddings", embed_opts.cache_embeddings,
-            "Memoize embed(text) -> vector in SQLite so repeats skip the model");
-        embed_cmd->add_option("--cache-db", embed_opts.cache_db,
-            "Path to the SQLite DB used by --cache-embeddings "
-            "(default: $CHIMERA_DB or platform default)");
-        embed_cmd->add_flag("!--no-normalize", embed_opts.normalize,
-            "Do not L2-normalize the output vector");
-
-        WhisperOptions whisper_opts;
-        auto * whisper_cmd = app.add_subcommand("whisper", "Minimal whisper transcription");
-        whisper_cmd->add_option("-m,--model", whisper_opts.model, "Whisper model")->required();
-        whisper_cmd->add_option("-i,--input", whisper_opts.input, "Input WAV file")->required();
-        whisper_cmd->add_option("-o,--output", whisper_opts.output, "Output text file");
-        whisper_cmd->add_option("-t,--threads", whisper_opts.threads, "CPU threads");
-        whisper_cmd->add_option("-l,--language", whisper_opts.language, "Language or auto");
-        whisper_cmd->add_flag("--translate", whisper_opts.translate, "Translate to English");
-        whisper_cmd->add_flag("--timestamps", whisper_opts.timestamps, "Print segment timestamps");
-        whisper_cmd->add_flag("--no-context", whisper_opts.no_context, "Disable previous-text conditioning");
-
-        SdOptions sd_opts;
-        auto * sd_cmd = app.add_subcommand("sd", "Minimal stable-diffusion text-to-image");
-        sd_cmd->add_option("-m,--model", sd_opts.model, "Diffusion model")->required();
-        sd_cmd->add_option("-p,--prompt", sd_opts.prompt, "Prompt")->required();
-        sd_cmd->add_option("-o,--output", sd_opts.output, "Output PNG path");
-        sd_cmd->add_option("--negative-prompt", sd_opts.negative_prompt, "Negative prompt");
-        sd_cmd->add_option("-W,--width", sd_opts.width, "Image width");
-        sd_cmd->add_option("-H,--height", sd_opts.height, "Image height");
-        sd_cmd->add_option("-s,--steps", sd_opts.steps, "Sampling steps");
-        sd_cmd->add_option("-b,--batch-count", sd_opts.batch_count, "Image count");
-        sd_cmd->add_option("-t,--threads", sd_opts.threads, "CPU threads");
-        sd_cmd->add_option("--seed", sd_opts.seed, "Seed");
-        sd_cmd->add_option("--cfg-scale", sd_opts.cfg_scale, "CFG scale");
-        sd_cmd->add_option("--clip-skip", sd_opts.clip_skip, "CLIP skip");
-        sd_cmd->add_option("--sample-method", sd_opts.sample_method, "Sampling method");
-        sd_cmd->add_option("--scheduler", sd_opts.scheduler, "Scheduler");
-        sd_cmd->add_option("--init-image", sd_opts.init_image,
-            "Initial image for img2img / inpaint (must match -W,-H)");
-        sd_cmd->add_option("--mask-image", sd_opts.mask_image,
-            "Inpaint mask (single-channel; requires --init-image)");
-        sd_cmd->add_option("--strength", sd_opts.strength,
-            "img2img denoising strength (0=preserve init, 1=full noise)");
-
-        ServeOptions serve_opts;
-        auto * serve_cmd = app.add_subcommand("serve",
-            "OpenAI-compatible HTTP server (LLM only for now)");
-        serve_cmd->add_option("-m,--model", serve_opts.model, "GGUF model")->required();
-        serve_cmd->add_option("--mmproj", serve_opts.mmproj,
-            "Multimodal projector for vision/audio inputs in chat completions");
-        serve_cmd->add_option("--host", serve_opts.host, "Bind address");
-        serve_cmd->add_option("--port", serve_opts.port, "Bind port");
-        serve_cmd->add_option("-c,--ctx-size", serve_opts.n_ctx,
-            "Context size (0 = model's training context)");
-        serve_cmd->add_option("-b,--batch-size", serve_opts.n_batch,
-            "Logical batch size for prompt processing");
-        serve_cmd->add_option("--ubatch-size", serve_opts.n_ubatch,
-            "Physical batch size (auto-clamped to batch when --embeddings)");
-        serve_cmd->add_option("-t,--threads", serve_opts.threads, "CPU threads");
-        serve_cmd->add_option("--gpu-layers", serve_opts.gpu_layers, "Layers to offload");
-        serve_cmd->add_option("--parallel", serve_opts.parallel,
-            "Number of concurrent request slots");
-        serve_cmd->add_option("--api-key", serve_opts.api_key,
-            "Bearer token required on /v1/* requests (empty = no auth)");
-        serve_cmd->add_flag("--embeddings", serve_opts.embedding,
-            "Load the model in embedding mode (enables /v1/embeddings)");
-        serve_cmd->add_option("--enable-audio", serve_opts.audio_model,
-            "Whisper GGUF to load alongside the LLM (enables /v1/audio/transcriptions)");
-        serve_cmd->add_option("--enable-image", serve_opts.sd_model,
-            "Stable-diffusion GGUF to load alongside the LLM (enables /v1/images/*)");
-        serve_cmd->add_option("--enable-rag", serve_opts.rag_embedding_model,
-            "Embedding GGUF to load alongside the LLM (enables /v1/vector_stores/*)");
-        serve_cmd->add_option("--enable-embeddings", serve_opts.embed_model,
-            "Embedding GGUF to load alongside the LLM (routes /v1/embeddings to it)");
-        serve_cmd->add_option("--reranking", serve_opts.rerank_model,
-            "Cross-encoder reranker GGUF to load alongside the LLM (enables /v1/rerank)");
-        serve_cmd->add_flag("--cache-embeddings", serve_opts.cache_embeddings,
-            "Memoize RAG embeddings in --rag-db (no-op unless --enable-rag is set)");
-        serve_cmd->add_option("--rag-db", serve_opts.rag_db_path,
-            "Path to the SQLite DB used by /v1/vector_stores/* "
-            "(default: $CHIMERA_DB or platform default)");
-        serve_cmd->add_flag("--persist-chats", serve_opts.persist_chats,
-            "Save every /v1/chat/completions exchange to the chats table");
-        serve_cmd->add_option("--chat-db", serve_opts.chat_db_path,
-            "Path to the SQLite DB used by --persist-chats "
-            "(default: $CHIMERA_DB or platform default)");
-        serve_cmd->add_option("--slot-save-path", serve_opts.slot_save_path,
-            "Directory for KV-cache snapshots written/read by "
-            "POST /slots/:id?action={save,restore} (GET /slots works regardless)");
-        serve_cmd->add_option("--lora", serve_opts.lora_adapters,
-            "LoRA adapter to load alongside the base model as path[:scale] "
-            "(scale defaults to 1.0; repeatable). Enables POST /lora-adapters "
-            "to hot-swap which adapters are active without reloading.");
-        serve_cmd->add_flag("!--no-webui", serve_opts.webui,
-            "Disable the embedded web chat UI at GET / (only meaningful in "
-            "builds compiled with CHIMERA_WEBUI_EMBED=1; a no-op otherwise)");
-        serve_cmd->add_option("--public-path", serve_opts.public_path,
-            "Directory to serve as static files at GET / (chimera-specific UI). "
-            "Independent of CHIMERA_WEBUI_EMBED; when both apply, --public-path wins");
-
-        // `chimera db <subcommand>` — embedded SQLite (+ sqlite-vec)
-        // management. Phase 1 ships just `status`; future subcommands
-        // (backup, vacuum, prune) land here.
-        std::string db_path_override;
-        auto * db_cmd = app.add_subcommand("db", "Embedded SQLite database management");
-        auto * db_status_cmd = db_cmd->add_subcommand("status",
-            "Open the DB, run pending migrations, print path + version + schema info");
-        db_cmd->add_option("--db", db_path_override,
-            "Path to the DB file (default: $CHIMERA_DB or platform default)");
-        db_cmd->require_subcommand(1);
-
-        auto * info_cmd = app.add_subcommand("info",
-            "Print versions of bundled component");
-
-        // `chimera index <subcommand>` — vector-store (RAG) management.
-        std::string idx_db_path;
-        std::string idx_name;
-        std::string idx_embedding_model;
-        int         idx_ctx_size   = 0;
-        int         idx_threads    = -1;
-        int         idx_gpu_layers = 0;
-        std::string idx_pooling    = "mean";
-        std::vector<std::string> idx_files;
-        std::string idx_glob;
-        // Defaults baked into the collection at create-time. The ingest
-        // CLI accepts overrides; 0 / -1 means "use whatever the
-        // collection row recorded". Chunking is token-based: 512-token
-        // window with 64-token overlap is a reasonable starting point
-        // for bge-small / gte-small (max input = 512).
-        std::string idx_distance       = "cosine";
-        int         idx_chunk_tokens   = 512;
-        int         idx_chunk_overlap  = 64;
-        // Per-ingest-call overrides; default 0/-1 = use the collection's
-        // recorded values.
-        int         idx_chunk_tokens_override   = 0;
-        int         idx_chunk_overlap_override  = -1;
-
-        auto * index_cmd = app.add_subcommand("index",
-            "Vector store management");
-        index_cmd->require_subcommand(1);
-        index_cmd->add_option("--db", idx_db_path,
-            "Path to the DB file (default: $CHIMERA_DB or platform default)");
-
-        auto * index_create_cmd = index_cmd->add_subcommand("create",
-            "Create a collection (sized to the embedding model's dim)");
-        index_create_cmd->add_option("-n,--name", idx_name, "Collection name")->required();
-        index_create_cmd->add_option("-e,--embedding-model", idx_embedding_model,
-            "GGUF embedding model (recorded on the collection)")->required();
-        index_create_cmd->add_option("-c,--ctx-size", idx_ctx_size, "Context size");
-        index_create_cmd->add_option("-t,--threads", idx_threads, "CPU threads");
-        index_create_cmd->add_option("--gpu-layers", idx_gpu_layers, "Layers to offload");
-        index_create_cmd->add_option("--pooling", idx_pooling,
-            "Pooling: mean | cls | last | none");
-        index_create_cmd->add_option("--distance", idx_distance,
-            "Distance metric on the vec0 table: cosine | l2 | l1 "
-            "(default cosine; right for L2-normalized embeddings)");
-        index_create_cmd->add_option("--chunk-tokens", idx_chunk_tokens,
-            "Default tokens per chunk for this collection (default 512). "
-            "Token units of the embedding model's vocab; not characters.");
-        index_create_cmd->add_option("--chunk-overlap", idx_chunk_overlap,
-            "Default token overlap between chunks (default 64)");
-
-        auto * index_ingest_cmd = index_cmd->add_subcommand("ingest",
-            "Chunk + embed + insert one or more text files into a collection");
-        index_ingest_cmd->add_option("-n,--name", idx_name, "Collection name")->required();
-        index_ingest_cmd->add_option("-f,--file", idx_files,
-            "File to ingest (repeatable)");
-        index_ingest_cmd->add_option("-g,--glob", idx_glob,
-            "Glob pattern relative to cwd (e.g. 'docs/**/*.md')");
-        index_ingest_cmd->add_option("-c,--ctx-size", idx_ctx_size, "Context size");
-        index_ingest_cmd->add_option("-t,--threads", idx_threads, "CPU threads");
-        index_ingest_cmd->add_option("--gpu-layers", idx_gpu_layers, "Layers to offload");
-        index_ingest_cmd->add_option("--pooling", idx_pooling,
-            "Pooling: mean | cls | last | none");
-        index_ingest_cmd->add_option("--chunk-tokens", idx_chunk_tokens_override,
-            "Tokens per chunk for this ingest call (overrides the collection's "
-            "recorded chunk_tokens; 0 = use the collection default)");
-        index_ingest_cmd->add_option("--chunk-overlap", idx_chunk_overlap_override,
-            "Token overlap between chunks for this ingest call (overrides the "
-            "collection's recorded chunk_overlap; -1 = use the collection default)");
-        bool idx_cache_embeddings = false;
-        index_ingest_cmd->add_flag("--cache-embeddings", idx_cache_embeddings,
-            "Memoize per-chunk embed(text) -> vector in --db so re-ingesting "
-            "the same content skips the model");
-
-        auto * index_list_cmd  = index_cmd->add_subcommand("list",
-            "List collections and their document counts");
-        auto * index_stats_cmd = index_cmd->add_subcommand("stats",
-            "Show details for one collection");
-        index_stats_cmd->add_option("-n,--name", idx_name, "Collection name")->required();
-        auto * index_drop_cmd  = index_cmd->add_subcommand("drop",
-            "Drop a collection and all its documents");
-        index_drop_cmd->add_option("-n,--name", idx_name, "Collection name")->required();
-
-        // `chimera search` — KNN against one collection.
-        std::string srch_db_path;
-        std::string srch_name;
-        std::string srch_query;
-        int         srch_k          = 5;
-        int         srch_ctx_size   = 0;
-        int         srch_threads    = -1;
-        int         srch_gpu_layers = 0;
-        std::string srch_pooling    = "mean";
-        auto * search_cmd = app.add_subcommand("search",
-            "Search a vector-store collection by similarity");
-        search_cmd->add_option("--db", srch_db_path,
-            "Path to the DB file (default: $CHIMERA_DB or platform default)");
-        search_cmd->add_option("-n,--name", srch_name, "Collection name")->required();
-        search_cmd->add_option("-q,--query", srch_query, "Search query text")->required();
-        search_cmd->add_option("-k,--top-k", srch_k, "Number of hits to return");
-        search_cmd->add_option("-c,--ctx-size", srch_ctx_size, "Context size");
-        search_cmd->add_option("-t,--threads", srch_threads, "CPU threads");
-        search_cmd->add_option("--gpu-layers", srch_gpu_layers, "Layers to offload");
-        search_cmd->add_option("--pooling", srch_pooling,
-            "Pooling: mean | cls | last | none");
-        bool srch_cache_embeddings = false;
-        search_cmd->add_flag("--cache-embeddings", srch_cache_embeddings,
-            "Memoize embed(query) -> vector in --db so repeated searches "
-            "with the same query skip the model");
-        std::string srch_mode = "hybrid";
-        search_cmd->add_option("--mode", srch_mode,
-            "Retrieval mode: semantic | lexical | hybrid (default: hybrid)");
-
         app.parse(argc, argv);
-
         if (verbose) {
             restore_default_logging();
         }
-
         llama_backend_init();
         backend_initialized = true;
-
-        int rc = 0;
-        if (*prompt_cmd) {
-            const std::string resolved = resolve_prompt(prompt_text, prompt_file);
-            rc = command_prompt(prompt_opts, resolved);
-        } else if (*chat_cmd) {
-            // Print-and-exit branches first: --list and --search never
-            // load the model and don't need --model on the command line.
-            if (chat_list) {
-                rc = command_chat_list(chat_db_path, chat_list_limit);
-            } else if (!chat_search.empty()) {
-                rc = command_chat_search(chat_db_path, chat_search, chat_list_limit);
-            } else {
-                if (chat_opts.model.empty() && chat_resume.empty()) {
-                    fail(ExitCode::BadInput,
-                         "chat: -m/--model is required (or --resume <id|last>)");
-                }
-                // --resume without --model: pick up the model path
-                // recorded on the saved chat. The user can override by
-                // passing -m explicitly.
-                if (!chat_resume.empty() && chat_opts.model.empty()) {
-                    auto conn = chimera_db::open_and_migrate(
-                        chat_db_path.empty()
-                            ? chimera_db::default_path() : chat_db_path);
-                    std::optional<chimera_chat_store::Chat> existing;
-                    if (chat_resume == "last" || chat_resume == "latest") {
-                        existing = chimera_chat_store::latest_chat(conn.get());
-                    } else {
-                        try {
-                            existing = chimera_chat_store::load_chat(
-                                conn.get(), std::stoll(chat_resume));
-                        } catch (const std::exception &) {
-                            fail(ExitCode::BadInput,
-                                 "invalid --resume value: '" + chat_resume + "'");
-                        }
-                    }
-                    if (!existing) {
-                        fail(ExitCode::BadInput,
-                             "no such chat: '" + chat_resume + "'");
-                    }
-                    chat_opts.model = existing->model_path;
-                }
-                std::string resolved_system = system_prompt;
-                if (!system_prompt_file.empty()) {
-                    if (!system_prompt.empty()) {
-                        fail(ExitCode::BadInput,
-                            "use only one of --system / --system-prompt-file");
-                    }
-                    resolved_system = read_file(system_prompt_file);
-                }
-                ChatPersistence persist_cfg;
-                persist_cfg.persist  = chat_persist;
-                persist_cfg.resume   = chat_resume;
-                persist_cfg.db_path  = chat_db_path;
-                rc = command_chat(chat_opts, resolved_system, template_override,
-                                  parse_color_mode(color_arg), persist_cfg);
-            }
-        } else if (*tokenize_cmd) {
-            rc = command_tokenize(tokenize_opts);
-        } else if (*embed_cmd) {
-            rc = command_embed(embed_opts);
-        } else if (*whisper_cmd) {
-            rc = command_whisper(whisper_opts);
-        } else if (*sd_cmd) {
-            rc = command_sd(sd_opts);
-        } else if (*serve_cmd) {
-            rc = command_serve(serve_opts);
-        } else if (*db_status_cmd) {
-            rc = command_db_status(db_path_override);
-        } else if (*info_cmd) {
-            rc = command_info();
-        } else if (*index_create_cmd) {
-            rc = command_index_create(idx_db_path, idx_name, idx_embedding_model,
-                                       idx_ctx_size, idx_threads, idx_gpu_layers,
-                                       idx_pooling, idx_distance,
-                                       idx_chunk_tokens, idx_chunk_overlap);
-        } else if (*index_ingest_cmd) {
-            rc = command_index_ingest(idx_db_path, idx_name, idx_files, idx_glob,
-                                       idx_ctx_size, idx_threads, idx_gpu_layers,
-                                       idx_pooling,
-                                       idx_chunk_tokens_override,
-                                       idx_chunk_overlap_override,
-                                       idx_cache_embeddings);
-        } else if (*index_list_cmd) {
-            rc = command_index_list(idx_db_path);
-        } else if (*index_stats_cmd) {
-            rc = command_index_stats(idx_db_path, idx_name);
-        } else if (*index_drop_cmd) {
-            rc = command_index_drop(idx_db_path, idx_name);
-        } else if (*search_cmd) {
-            rc = command_search(srch_db_path, srch_name, srch_query, srch_k,
-                                 srch_ctx_size, srch_threads, srch_gpu_layers,
-                                 srch_pooling, srch_cache_embeddings, srch_mode);
-        }
-
+        const int rc = dispatch_cli(parsed);
         llama_backend_free();
         return rc;
     } catch (const CLI::ParseError & e) {
-        if (backend_initialized) {
-            llama_backend_free();
-        }
+        if (backend_initialized) llama_backend_free();
         return app.exit(e);
     } catch (const ChimeraError & e) {
         std::cerr << "error: " << e.what() << '\n';
-        if (backend_initialized) {
-            llama_backend_free();
-        }
+        if (backend_initialized) llama_backend_free();
         return static_cast<int>(e.code());
     } catch (const std::exception & e) {
         std::cerr << "error: " << e.what() << '\n';
-        if (backend_initialized) {
-            llama_backend_free();
-        }
+        if (backend_initialized) llama_backend_free();
         return static_cast<int>(ExitCode::Runtime);
     }
 }
+

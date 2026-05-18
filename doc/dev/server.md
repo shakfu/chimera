@@ -178,7 +178,7 @@ lived in anonymous namespaces inside the `.cpp` files.
 | `POST /apply-template` | `routes.post_apply_template` | Renders the chat template against a `messages[]` array without generating. Pure debugging value. |
 | `POST /v1/responses` | `routes.post_responses_oai` | OpenAI Responses API. **Stateful within a single chimera serve invocation** — server-context holds the conversation thread state in-process; lost on restart. With `--persist-chats` the underlying chat-completions traffic is still saved to the chats table. |
 
-### 4.2 Opt-in via `--enable-audio` (Phase 2)
+### 4.2 Opt-in via `--enable-audio` (shipped)
 
 | Route | Handler | Notes |
 |-------|---------|-------|
@@ -198,7 +198,7 @@ different things — both have a place; one chooses based on the model.
 We expose the ASR pipeline; the mtmd path is reachable via
 `/v1/chat/completions` with an audio mmproj-aware model.
 
-### 4.3 Opt-in via `--enable-image` (Phase 3)
+### 4.3 Opt-in via `--enable-image` (shipped)
 
 | Route | Handler | Notes |
 |-------|---------|-------|
@@ -206,7 +206,7 @@ We expose the ASR pipeline; the mtmd path is reachable via
 | `POST /v1/images/edits` | `make_image_edits_handler` | multipart (`image` + optional `mask` + form fields). img2img / inpaint. |
 | `POST /v1/images/variations` | `make_image_variations_handler` | multipart (`image`). img2img with no prompt. |
 
-### 4.2b Opt-in via `--persist-chats` (Phase 5)
+### 4.2b Opt-in via `--persist-chats` (shipped)
 
 `--persist-chats` doesn't add new routes; it **wraps** the upstream
 chat-completions handler. `make_persisting_chat_handler` decorates the
@@ -231,10 +231,12 @@ Mechanics:
 
 One chat row per request — the OpenAI API has no chat-id concept, so
 multi-turn clients (which resend the full conversation each request)
-produce N rows with overlapping content. Phase 6+ may add an
-`X-Chimera-Chat-Id` header.
+produce N rows with overlapping content. The `X-Chimera-Chat-Id`
+request/response header (shipped) consolidates a multi-turn exchange
+into a single row when the client threads it through; see
+`chimera_serve.cpp` around the `X-Chimera-Chat-Id` block.
 
-### 4.3a Opt-in via `--enable-rag` (Phase 4)
+### 4.3a Opt-in via `--enable-rag` (shipped)
 
 | Route | Handler | Notes |
 |-------|---------|-------|
@@ -462,11 +464,12 @@ shows unbounded memory growth, it is *likely* a server-context issue
 rather than a chimera one — file upstream first.
 
 **Web UI assets size.** `LLAMA_BUILD_WEBUI=OFF` keeps the chimera
-binary ~11 MB smaller than `llama-server`. If someone adds the Web UI
-later (Phase 4-ish), the bundle either gets baked into the binary via
-the upstream `xxd.cmake` machinery (binary size up) or shipped as
-separate files and located at runtime via a `--public-path` flag
-(installer complexity up).
+binary ~11 MB smaller than `llama-server` by default. Both Web UI
+delivery paths now ship as opt-in: the bundle can be baked into the
+binary via `-DCHIMERA_WEBUI_EMBED=ON` (upstream's `xxd.cmake`
+machinery; binary size up ~6 MB stripped) or served from any static
+directory at runtime via `--public-path <dir>`. See
+[`doc/dev/webui.md`](webui.md) for the full picture.
 
 **Single SD context per process.** Loading multiple SD models at once
 would multiply VRAM. For now the design is "one image model per
