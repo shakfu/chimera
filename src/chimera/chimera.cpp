@@ -153,16 +153,24 @@ void silence_all_logging() {
     common_log_set_verbosity_thold(-1);
     // mtmd-helper.log_set also forwards to mtmd_log_set internally.
     mtmd_helper_log_set(silent_ggml_log, nullptr);
+#ifdef CHIMERA_HAS_WHISPER
     chimera_silence_whisper_log();
+#endif
+#ifdef CHIMERA_HAS_SD
     chimera_silence_sd_log();
+#endif
 }
 
 void restore_default_logging() {
     llama_log_set(nullptr, nullptr);
     ggml_log_set(nullptr, nullptr);
     mtmd_helper_log_set(nullptr, nullptr);
+#ifdef CHIMERA_HAS_WHISPER
     chimera_restore_whisper_log();
+#endif
+#ifdef CHIMERA_HAS_SD
     chimera_restore_sd_log();
+#endif
 }
 
 std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string & text, bool add_special, bool parse_special) {
@@ -1978,6 +1986,7 @@ int command_info() {
     // whisper, and sd, so the backends line mirrors the registry list
     // above (minus the duplicate-printing-as-CPU). The CPU features
     // come from each library's own probe of its (linked) ggml.
+#ifdef CHIMERA_HAS_WHISPER
     const auto whisper_parsed = parse_sys_info(chimera_whisper::whisper_system_info_raw());
     std::cout << "\nwhisper.cpp:\n"
               << "  version:       " << CHIMERA_WHISPERCPP_VERSION                  << "\n"
@@ -1986,8 +1995,12 @@ int command_info() {
               << "  loaded:        " << primary_backend_label()                     << "\n"
               << "  backends:      " << join_csv(backend_registry_names())          << "\n"
               << "  CPU features:  " << join_csv(whisper_parsed.cpu_features)       << "\n";
+#else
+    std::cout << "\nwhisper.cpp:    not linked (built with CHIMERA_WITH_WHISPER=OFF)\n";
+#endif
 
     // ---- stable-diffusion.cpp ---------------------------------------
+#ifdef CHIMERA_HAS_SD
     const auto sd_parsed = parse_sys_info(chimera_sd::sd_system_info_raw());
     std::cout << "\nstable-diffusion.cpp:\n"
               << "  version:       " << CHIMERA_SDCPP_VERSION                  << "\n"
@@ -1996,6 +2009,9 @@ int command_info() {
               << "  loaded:        " << primary_backend_label()                << "\n"
               << "  backends:      " << join_csv(backend_registry_names())     << "\n"
               << "  CPU features:  " << join_csv(sd_parsed.cpu_features)       << "\n";
+#else
+    std::cout << "\nstable-diffusion.cpp: not linked (built with CHIMERA_WITH_SD=OFF)\n";
+#endif
 
     // ---- SQLite + sqlite-vec ----------------------------------------
     std::cout << "\nsqlite:\n"
@@ -2083,8 +2099,12 @@ struct ParsedCli {
     CLI::App * chat_cmd         = nullptr;
     CLI::App * tokenize_cmd     = nullptr;
     CLI::App * embed_cmd        = nullptr;
+#ifdef CHIMERA_HAS_WHISPER
     CLI::App * whisper_cmd      = nullptr;
+#endif
+#ifdef CHIMERA_HAS_SD
     CLI::App * sd_cmd           = nullptr;
+#endif
     CLI::App * serve_cmd        = nullptr;
     CLI::App * db_status_cmd    = nullptr;
     CLI::App * info_cmd         = nullptr;
@@ -2116,8 +2136,12 @@ struct ParsedCli {
     // `tokenize`, `embed`, `whisper`, `sd`, `serve`
     TokenizeOptions tokenize_opts;
     EmbedOptions    embed_opts;
+#ifdef CHIMERA_HAS_WHISPER
     WhisperOptions  whisper_opts;
+#endif
+#ifdef CHIMERA_HAS_SD
     SdOptions       sd_opts;
+#endif
     ServeOptions    serve_opts;
 
     // `db`
@@ -2265,6 +2289,7 @@ void bind_embed_cmd(CLI::App & app, ParsedCli & p) {
     p.embed_cmd = cmd;
 }
 
+#ifdef CHIMERA_HAS_WHISPER
 void bind_whisper_cmd(CLI::App & app, ParsedCli & p) {
     auto * cmd = app.add_subcommand("whisper", "Minimal whisper transcription");
     cmd->add_option("-m,--model", p.whisper_opts.model, "Whisper model")->required();
@@ -2277,7 +2302,9 @@ void bind_whisper_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_flag("--no-context", p.whisper_opts.no_context, "Disable previous-text conditioning");
     p.whisper_cmd = cmd;
 }
+#endif
 
+#ifdef CHIMERA_HAS_SD
 void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
     auto * cmd = app.add_subcommand("sd", "Minimal stable-diffusion text-to-image");
     cmd->add_option("-m,--model", p.sd_opts.model, "Diffusion model")->required();
@@ -2302,6 +2329,7 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "img2img denoising strength (0=preserve init, 1=full noise)");
     p.sd_cmd = cmd;
 }
+#endif
 
 void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
     auto * cmd = app.add_subcommand("serve",
@@ -2325,10 +2353,14 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "Bearer token required on /v1/* requests (empty = no auth)");
     cmd->add_flag("--embeddings", p.serve_opts.embedding,
         "Load the model in embedding mode (enables /v1/embeddings)");
+#ifdef CHIMERA_HAS_WHISPER
     cmd->add_option("--enable-audio", p.serve_opts.audio_model,
         "Whisper GGUF to load alongside the LLM (enables /v1/audio/transcriptions)");
+#endif
+#ifdef CHIMERA_HAS_SD
     cmd->add_option("--enable-image", p.serve_opts.sd_model,
         "Stable-diffusion GGUF to load alongside the LLM (enables /v1/images/*)");
+#endif
     cmd->add_option("--enable-rag", p.serve_opts.rag_embedding_model,
         "Embedding GGUF to load alongside the LLM (enables /v1/vector_stores/*)");
     cmd->add_option("--enable-embeddings", p.serve_opts.embed_model,
@@ -2464,8 +2496,12 @@ void bind_subcommands(CLI::App & app, ParsedCli & p) {
     bind_chat_cmd    (app, p);
     bind_tokenize_cmd(app, p);
     bind_embed_cmd   (app, p);
+#ifdef CHIMERA_HAS_WHISPER
     bind_whisper_cmd (app, p);
+#endif
+#ifdef CHIMERA_HAS_SD
     bind_sd_cmd      (app, p);
+#endif
     bind_serve_cmd   (app, p);
     bind_db_cmd      (app, p);
     bind_info_cmd    (app, p);
@@ -2537,8 +2573,12 @@ int dispatch_cli(ParsedCli & p) {
     }
     if (*p.tokenize_cmd)     return command_tokenize    (p.tokenize_opts);
     if (*p.embed_cmd)        return command_embed       (p.embed_opts);
+#ifdef CHIMERA_HAS_WHISPER
     if (*p.whisper_cmd)      return command_whisper     (p.whisper_opts);
+#endif
+#ifdef CHIMERA_HAS_SD
     if (*p.sd_cmd)           return command_sd          (p.sd_opts);
+#endif
     if (*p.serve_cmd)        return command_serve       (p.serve_opts);
     if (*p.db_status_cmd)    return command_db_status   (p.db_path_override);
     if (*p.info_cmd)         return command_info        ();

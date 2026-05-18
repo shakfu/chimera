@@ -185,6 +185,30 @@ Notes:
 
 `--strength` ranges 0..1 (0 preserves the init image, 1 = full noise = text-to-image). The SD context is automatically built with `vae_decode_only=false` whenever `--init-image` is supplied.
 
+### Dropping modalities at build time
+
+llama.cpp is required (it is the LLM engine + slot scheduler + HTTP server context). whisper.cpp and stable-diffusion.cpp are modular: drop either to get a smaller binary, faster link, and zero dependency on that project's churn.
+
+```bash
+# default: link both modalities if the static libs are present, skip otherwise
+cmake -S . -B build -DCHIMERA_WITH_WHISPER=AUTO -DCHIMERA_WITH_SD=AUTO
+
+# require whisper.cpp (configure fails if libwhisper.a is missing)
+cmake -S . -B build -DCHIMERA_WITH_WHISPER=ON
+
+# text + RAG only — drop both audio and image (Apple-silicon Metal: ~34 MB -> ~12 MB)
+cmake -S . -B build -DCHIMERA_WITH_WHISPER=OFF -DCHIMERA_WITH_SD=OFF
+```
+
+What disappears when a modality is OFF:
+
+| Off | Removed |
+|---|---|
+| `WHISPER=OFF` | `chimera whisper` subcommand; `chimera serve --enable-audio`; `POST /v1/audio/{transcriptions,translations}`; `whisper.cpp` link surface |
+| `SD=OFF` | `chimera sd` subcommand; `chimera serve --enable-image`; `POST /v1/images/{generations,edits,variations}`; stable-diffusion.cpp + stb_image_write link surface |
+
+`gen --mmproj --image` (LLM vision pipeline) is **unaffected** by either flag — it routes through libmtmd (llama.cpp's vision pipeline), not chimera_sd.
+
 ### Line editing in `chat` (linenoise)
 
 If [linenoise](https://github.com/shakfu/linenoise) is present under `thirdparty/`, interactive `chat` sessions get readline-style line editing, history (↑/↓, `Ctrl-R`), and basic editing keys. History persists at `$CHIMERA_HISTORY` (override) or `$HOME/.chimera_chat_history`. The integration is opt-out:

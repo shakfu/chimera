@@ -16,9 +16,13 @@
 #include "chimera_db.h"
 #include "chimera_embed.h"
 #include "chimera_embed_cache.h"
-#include "chimera_sd.h"
 #include "chimera_vector_store.h"
-#include "chimera_whisper.h"
+#ifdef CHIMERA_HAS_WHISPER
+#  include "chimera_whisper.h"
+#endif
+#ifdef CHIMERA_HAS_SD
+#  include "chimera_sd.h"
+#endif
 
 #include "server-context.h"
 #include "server-http.h"
@@ -58,24 +62,32 @@ float       coerce_float (const json & v, float dflt);
 std::string coerce_string(const json & v, const std::string & dflt = "");
 
 // ----------------------------------------------------------------------------
-// Audio — POST /v1/audio/{transcriptions,translations}
+// Audio — POST /v1/audio/{transcriptions,translations}. Compiled only when
+// the build linked whisper.cpp; chimera_serve_audio.cpp is dropped from
+// the source list when CHIMERA_HAS_WHISPER is undefined.
 // ----------------------------------------------------------------------------
 
+#ifdef CHIMERA_HAS_WHISPER
 server_http_context::handler_t make_audio_transcribe_handler(
     whisper_context * ctx,
     std::mutex      & ctx_mutex,
     bool              translate);
+#endif
 
 // ----------------------------------------------------------------------------
-// Images — POST /v1/images/{generations,edits,variations}
+// Images — POST /v1/images/{generations,edits,variations}. Compiled only
+// when the build linked stable-diffusion.cpp; chimera_serve_images.cpp is
+// dropped from the source list when CHIMERA_HAS_SD is undefined.
 // ----------------------------------------------------------------------------
 
+#ifdef CHIMERA_HAS_SD
 server_http_context::handler_t make_image_generations_handler(
     sd_ctx_t * ctx, std::mutex & ctx_mutex);
 server_http_context::handler_t make_image_edits_handler(
     sd_ctx_t * ctx, std::mutex & ctx_mutex);
 server_http_context::handler_t make_image_variations_handler(
     sd_ctx_t * ctx, std::mutex & ctx_mutex);
+#endif
 
 // ----------------------------------------------------------------------------
 // Vector store / RAG — /v1/vector_stores[/...]

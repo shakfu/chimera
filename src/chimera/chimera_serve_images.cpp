@@ -57,46 +57,6 @@ std::string base64_encode(const unsigned char * data, size_t size) {
 
 }  // namespace
 
-// JSON-field coercion helpers. multipart text fields arrive as strings in
-// the JSON body built by server-http.cpp (everything is `field.content`),
-// while application/json bodies preserve their original numeric types.
-// These helpers accept either form so the same field-reading code can
-// drive both routes. Declared in chimera_serve_internal.h so the RAG search
-// handler can reuse them.
-int coerce_int(const json & v, int dflt) {
-    if (v.is_number_integer())  return v.get<int>();
-    if (v.is_number_unsigned()) return static_cast<int>(v.get<unsigned>());
-    if (v.is_number_float())    return static_cast<int>(v.get<double>());
-    if (v.is_string()) {
-        try { return std::stoi(v.get<std::string>()); } catch (...) {}
-    }
-    return dflt;
-}
-
-int64_t coerce_int64(const json & v, int64_t dflt) {
-    if (v.is_number_integer())  return v.get<int64_t>();
-    if (v.is_number_unsigned()) return static_cast<int64_t>(v.get<uint64_t>());
-    if (v.is_number_float())    return static_cast<int64_t>(v.get<double>());
-    if (v.is_string()) {
-        try { return std::stoll(v.get<std::string>()); } catch (...) {}
-    }
-    return dflt;
-}
-
-float coerce_float(const json & v, float dflt) {
-    if (v.is_number())  return v.get<float>();
-    if (v.is_string()) {
-        try { return std::stof(v.get<std::string>()); } catch (...) {}
-    }
-    return dflt;
-}
-
-std::string coerce_string(const json & v, const std::string & dflt) {
-    if (v.is_string()) return v.get<std::string>();
-    if (v.is_null())   return dflt;
-    return v.dump();
-}
-
 namespace {
 
 // Parse OpenAI's `size` field ("256x256", "512x512", "1024x1024", or

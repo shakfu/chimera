@@ -40,16 +40,11 @@ add_executable(chimera
     "${CMAKE_CURRENT_LIST_DIR}/chimera_embed_cache.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_pin_check.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_vector_store.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/chimera_whisper.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/chimera_sd.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_serve.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_audio.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_images.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_rag.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_chat_persist.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_chats_read.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/llama_build_info_shim.cpp"
-    "${CHIMERA_STB_IMPL}"
     # server-http.cpp is the HTTP-frontend half of llama-server. Upstream
     # compiles it directly into the llama-server executable rather than into
     # libserver-context.a; we do the same, pulling the source out of the
@@ -61,14 +56,39 @@ add_executable(chimera
     "${SQLITE_VEC_SRC_AUX}/sqlite-vec.c"
 )
 
+# Optional modality sources. When the parent scope dropped a modality,
+# its TUs are not compiled and the related routes/subcommands disappear
+# (gated by CHIMERA_HAS_WHISPER / CHIMERA_HAS_SD compile defines that
+# this block also sets). stb_image_write is only used by chimera_sd's
+# PNG encoder, so the stb_impl TU follows SD on/off.
+if(CHIMERA_LINK_WHISPER)
+    target_sources(chimera PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/chimera_whisper.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_audio.cpp"
+    )
+    target_compile_definitions(chimera PRIVATE CHIMERA_HAS_WHISPER)
+endif()
+if(CHIMERA_LINK_SD)
+    target_sources(chimera PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/chimera_sd.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_images.cpp"
+        "${CHIMERA_STB_IMPL}"
+    )
+    target_compile_definitions(chimera PRIVATE CHIMERA_HAS_SD)
+endif()
+
 target_include_directories(chimera PRIVATE
     "${CMAKE_SOURCE_DIR}/thirdparty"
     "${LLAMACPP_INCLUDE}"
-    "${WHISPERCPP_INCLUDE}"
-    "${SDCPP_INCLUDE}"
     "${SQLITE_INCLUDE}"
     "${SQLITE_VEC_INCLUDE}"
 )
+if(CHIMERA_LINK_WHISPER)
+    target_include_directories(chimera PRIVATE "${WHISPERCPP_INCLUDE}")
+endif()
+if(CHIMERA_LINK_SD)
+    target_include_directories(chimera PRIVATE "${SDCPP_INCLUDE}")
+endif()
 
 # SQLite compile-time tuning. The flags trim ~50 KB of dead code we don't
 # use, force WAL-friendly defaults, and pre-enable FTS5 (needed by the chat
@@ -199,6 +219,13 @@ if(UNIX AND NOT APPLE)
     # iterate the inner archives until they reach a fixed point, which
     # is exactly the case for archives with bidirectional references.
     # macOS's linker iterates by default so this is GNU-ld-only.
+    set(_CHIMERA_MODALITY_LIBS "")
+    if(CHIMERA_LINK_WHISPER)
+        list(APPEND _CHIMERA_MODALITY_LIBS ${LIB_WHISPER_COMMON} ${LIB_WHISPER})
+    endif()
+    if(CHIMERA_LINK_SD)
+        list(APPEND _CHIMERA_MODALITY_LIBS ${LIB_SD})
+    endif()
     target_link_libraries(chimera PRIVATE
         -Wl,--start-group
         ${LIB_LLAMA}
@@ -206,27 +233,32 @@ if(UNIX AND NOT APPLE)
         ${LIB_MTMD}
         ${LIB_SERVER_CONTEXT}
         ${LIB_CPP_HTTPLIB}
-        ${LIB_WHISPER_COMMON}
-        ${LIB_WHISPER}
-        ${LIB_SD}
+        ${_CHIMERA_MODALITY_LIBS}
         -Wl,--end-group
         -Wl,--whole-archive
         ${_CHIMERA_GGML_LIBS}
         -Wl,--no-whole-archive
         ${SYSTEM_LIBS}
     )
+    unset(_CHIMERA_MODALITY_LIBS)
 elseif(APPLE)
+    set(_CHIMERA_MODALITY_LIBS "")
+    if(CHIMERA_LINK_WHISPER)
+        list(APPEND _CHIMERA_MODALITY_LIBS ${LIB_WHISPER_COMMON} ${LIB_WHISPER})
+    endif()
+    if(CHIMERA_LINK_SD)
+        list(APPEND _CHIMERA_MODALITY_LIBS ${LIB_SD})
+    endif()
     target_link_libraries(chimera PRIVATE
         ${LIB_LLAMA}
         ${LIB_LLAMA_COMMON}
         ${LIB_MTMD}
         ${LIB_SERVER_CONTEXT}
         ${LIB_CPP_HTTPLIB}
-        ${LIB_WHISPER_COMMON}
-        ${LIB_WHISPER}
-        ${LIB_SD}
+        ${_CHIMERA_MODALITY_LIBS}
         ${SYSTEM_LIBS}
     )
+    unset(_CHIMERA_MODALITY_LIBS)
 
     set(_CHIMERA_FORCE_LOAD_FLAGS
         "-Wl,-force_load,${LIB_GGML}"
@@ -256,6 +288,13 @@ elseif(APPLE)
     endif()
     target_link_options(chimera PRIVATE ${_CHIMERA_FORCE_LOAD_FLAGS})
 else()
+    set(_CHIMERA_MODALITY_LIBS "")
+    if(CHIMERA_LINK_WHISPER)
+        list(APPEND _CHIMERA_MODALITY_LIBS ${LIB_WHISPER_COMMON} ${LIB_WHISPER})
+    endif()
+    if(CHIMERA_LINK_SD)
+        list(APPEND _CHIMERA_MODALITY_LIBS ${LIB_SD})
+    endif()
     target_link_libraries(chimera PRIVATE
         ${LIB_LLAMA}
         ${LIB_LLAMA_COMMON}
@@ -265,11 +304,10 @@ else()
         ${LIB_MTMD}
         ${LIB_SERVER_CONTEXT}
         ${LIB_CPP_HTTPLIB}
-        ${LIB_WHISPER_COMMON}
-        ${LIB_WHISPER}
-        ${LIB_SD}
+        ${_CHIMERA_MODALITY_LIBS}
         ${SYSTEM_LIBS}
     )
+    unset(_CHIMERA_MODALITY_LIBS)
 endif()
 
 if(CHIMERA_LINK_LINENOISE)

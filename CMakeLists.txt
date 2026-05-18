@@ -132,9 +132,71 @@ endif()
 unset(_webui_probe)
 message(STATUS "webui:                  ${CHIMERA_WEBUI_EMBED} -> link=${CHIMERA_LINK_WEBUI}")
 
+# -----------------------------------------------------------------------------
+# Optional modality libraries: whisper.cpp + stable-diffusion.cpp
+# -----------------------------------------------------------------------------
+# CHIMERA_WITH_WHISPER / CHIMERA_WITH_SD:
+#   ON   = require the static lib (fail configure if missing)
+#   OFF  = drop the modality completely. Without WHISPER the `whisper`
+#          subcommand and `serve --enable-audio` flag + /v1/audio/* routes
+#          disappear. Without SD the `sd` subcommand, `serve --enable-image`
+#          flag, and /v1/images/* routes disappear. `gen --mmproj --image`
+#          stays available regardless because it routes through libmtmd
+#          (llama.cpp's vision pipeline), not chimera_sd.
+#   AUTO = link if the lib is present, else skip.
+# Defaults to AUTO so a stock `make build` keeps every modality wired up
+# (libwhisper.a + libstable-diffusion.a are produced by manage.py's default
+# `--all`). Toggle a modality off when you want a smaller binary, faster
+# link, or zero dependency on whisper/SD upstream churn.
+set(CHIMERA_WITH_WHISPER "AUTO" CACHE STRING "Link whisper.cpp (ON / OFF / AUTO)")
+set_property(CACHE CHIMERA_WITH_WHISPER PROPERTY STRINGS "AUTO" "ON" "OFF")
+set(CHIMERA_WITH_SD      "AUTO" CACHE STRING "Link stable-diffusion.cpp (ON / OFF / AUTO)")
+set_property(CACHE CHIMERA_WITH_SD      PROPERTY STRINGS "AUTO" "ON" "OFF")
+
+set(_whisper_probe "${CMAKE_SOURCE_DIR}/thirdparty/whisper.cpp/lib/libwhisper.a")
+if(WIN32)
+    set(_whisper_probe "${CMAKE_SOURCE_DIR}/thirdparty/whisper.cpp/lib/whisper.lib")
+endif()
+set(CHIMERA_LINK_WHISPER OFF)
+if("${CHIMERA_WITH_WHISPER}" STREQUAL "ON")
+    if(NOT EXISTS "${_whisper_probe}")
+        message(FATAL_ERROR
+            "CHIMERA_WITH_WHISPER=ON but ${_whisper_probe} not found.\n"
+            "Run: python scripts/manage.py build -w  (or --all)")
+    endif()
+    set(CHIMERA_LINK_WHISPER ON)
+elseif("${CHIMERA_WITH_WHISPER}" STREQUAL "AUTO")
+    if(EXISTS "${_whisper_probe}")
+        set(CHIMERA_LINK_WHISPER ON)
+    endif()
+endif()
+unset(_whisper_probe)
+message(STATUS "whisper.cpp:            ${CHIMERA_WITH_WHISPER} -> link=${CHIMERA_LINK_WHISPER}")
+
+set(_sd_probe "${CMAKE_SOURCE_DIR}/thirdparty/stable-diffusion.cpp/lib/libstable-diffusion.a")
+if(WIN32)
+    set(_sd_probe "${CMAKE_SOURCE_DIR}/thirdparty/stable-diffusion.cpp/lib/stable-diffusion.lib")
+endif()
+set(CHIMERA_LINK_SD OFF)
+if("${CHIMERA_WITH_SD}" STREQUAL "ON")
+    if(NOT EXISTS "${_sd_probe}")
+        message(FATAL_ERROR
+            "CHIMERA_WITH_SD=ON but ${_sd_probe} not found.\n"
+            "Run: python scripts/manage.py build -s  (or --all)")
+    endif()
+    set(CHIMERA_LINK_SD ON)
+elseif("${CHIMERA_WITH_SD}" STREQUAL "AUTO")
+    if(EXISTS "${_sd_probe}")
+        set(CHIMERA_LINK_SD ON)
+    endif()
+endif()
+unset(_sd_probe)
+message(STATUS "stable-diffusion.cpp:   ${CHIMERA_WITH_SD} -> link=${CHIMERA_LINK_SD}")
+
 # stable-diffusion.cpp requires GGML_MAX_NAME=128 for long tensor names.
-# When SD shares llama.cpp's ggml, both must use the same value.
-if(NOT SD_USE_VENDORED_GGML)
+# When SD shares llama.cpp's ggml, both must use the same value. Only
+# needed when SD is actually linked in.
+if(CHIMERA_LINK_SD AND NOT SD_USE_VENDORED_GGML)
     add_definitions(-DGGML_MAX_NAME=128)
 endif()
 

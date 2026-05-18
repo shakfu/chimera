@@ -235,9 +235,13 @@
 #include "chimera_db.h"
 #include "chimera_embed.h"
 #include "chimera_embed_cache.h"
-#include "chimera_sd.h"
 #include "chimera_vector_store.h"
-#include "chimera_whisper.h"
+#ifdef CHIMERA_HAS_WHISPER
+#  include "chimera_whisper.h"
+#endif
+#ifdef CHIMERA_HAS_SD
+#  include "chimera_sd.h"
+#endif
 
 #include "arg.h"      // common_init
 #include "common.h"   // common_params
@@ -304,6 +308,47 @@ server_http_context::handler_t ex_wrapper(server_http_context::handler_t func) {
         res->data = body.dump();
         return res;
     };
+}
+
+// JSON-field coercion helpers. multipart text fields arrive as strings in
+// the JSON body built by server-http.cpp (everything is `field.content`),
+// while application/json bodies preserve their original numeric types.
+// These helpers accept either form so the same field-reading code can
+// drive both routes. Live here (always compiled) rather than in
+// chimera_serve_images.cpp because chimera_serve_rag.cpp also uses them,
+// and the RAG handler must keep working when CHIMERA_HAS_SD is undefined.
+int coerce_int(const json & v, int dflt) {
+    if (v.is_number_integer())  return v.get<int>();
+    if (v.is_number_unsigned()) return static_cast<int>(v.get<unsigned>());
+    if (v.is_number_float())    return static_cast<int>(v.get<double>());
+    if (v.is_string()) {
+        try { return std::stoi(v.get<std::string>()); } catch (...) {}
+    }
+    return dflt;
+}
+
+int64_t coerce_int64(const json & v, int64_t dflt) {
+    if (v.is_number_integer())  return v.get<int64_t>();
+    if (v.is_number_unsigned()) return static_cast<int64_t>(v.get<uint64_t>());
+    if (v.is_number_float())    return static_cast<int64_t>(v.get<double>());
+    if (v.is_string()) {
+        try { return std::stoll(v.get<std::string>()); } catch (...) {}
+    }
+    return dflt;
+}
+
+float coerce_float(const json & v, float dflt) {
+    if (v.is_number())  return v.get<float>();
+    if (v.is_string()) {
+        try { return std::stof(v.get<std::string>()); } catch (...) {}
+    }
+    return dflt;
+}
+
+std::string coerce_string(const json & v, const std::string & dflt) {
+    if (v.is_string()) return v.get<std::string>();
+    if (v.is_null())   return dflt;
+    return v.dump();
 }
 
 namespace {
@@ -548,10 +593,13 @@ int command_serve(const ServeOptions & opts) {
 
     server_routes routes(params, ctx_server);
 
-    // Phase 2: opt-in audio. The whisper context and its serializing mutex
-    // live for as long as command_serve runs; the route handler captures
-    // them by reference. If --enable-audio was not passed, the context
-    // stays null and we don't bind the route.
+#ifdef CHIMERA_HAS_WHISPER
+    // Opt-in audio. The whisper context and its serializing mutex live for
+    // as long as command_serve runs; the route handler captures them by
+    // reference. If --enable-audio was not passed, the context stays null
+    // and we don't bind the route. With CHIMERA_HAS_WHISPER undefined the
+    // whole block is compiled out, and --enable-audio doesn't even exist
+    // on the CLI (see bind_serve_cmd).
     WhisperContextPtr whisper_ctx;
     std::mutex        whisper_mutex;
     if (!opts.audio_model.empty()) {
@@ -565,10 +613,13 @@ int command_serve(const ServeOptions & opts) {
             return static_cast<int>(ExitCode::Load);
         }
     }
+#endif
 
-    // Phase 3: opt-in image. vae_decode_only=false because /edits and
-    // /variations need img2img (the VAE encode path). On txt2img-only
-    // workloads this trades some memory for path uniformity.
+#ifdef CHIMERA_HAS_SD
+    // Opt-in image. vae_decode_only=false because /edits and /variations
+    // need img2img (the VAE encode path). On txt2img-only workloads this
+    // trades some memory for path uniformity. Compiled out entirely when
+    // CHIMERA_HAS_SD is undefined.
     SdContextPtr sd_ctx;
     std::mutex   sd_mutex;
     if (!opts.sd_model.empty()) {
@@ -582,6 +633,7 @@ int command_serve(const ServeOptions & opts) {
             return static_cast<int>(ExitCode::Load);
         }
     }
+#endif
 
     // Opt-in dedicated embedding model. When --enable-embeddings is set
     // a second server_context is brought up in embedding mode and bound
@@ -743,6 +795,7 @@ int command_serve(const ServeOptions & opts) {
     ctx_http.post("/tokenize",        ex_wrapper(routes.post_tokenize));
     ctx_http.post("/detokenize",      ex_wrapper(routes.post_detokenize));
     ctx_http.post("/apply-template",  ex_wrapper(routes.post_apply_template));
+#ifdef CHIMERA_HAS_WHISPER
     if (whisper_ctx) {
         ctx_http.post("/v1/audio/transcriptions",
                       ex_wrapper(make_audio_transcribe_handler(
@@ -751,6 +804,8 @@ int command_serve(const ServeOptions & opts) {
                       ex_wrapper(make_audio_transcribe_handler(
                           whisper_ctx.get(), whisper_mutex, /*translate=*/true)));
     }
+#endif
+#ifdef CHIMERA_HAS_SD
     if (sd_ctx) {
         ctx_http.post("/v1/images/generations",
                       ex_wrapper(make_image_generations_handler(sd_ctx.get(), sd_mutex)));
@@ -759,6 +814,7 @@ int command_serve(const ServeOptions & opts) {
         ctx_http.post("/v1/images/variations",
                       ex_wrapper(make_image_variations_handler(sd_ctx.get(), sd_mutex)));
     }
+#endif
     // /v1/rerank takes {"query": "...", "documents": ["..."]} and returns
     // OpenAI-Cohere-shaped scored results. The handler is implemented by
     // upstream server_routes; we just bind it. Also bound on the legacy
@@ -837,8 +893,12 @@ int command_serve(const ServeOptions & opts) {
                     : "  webui: built in but disabled by --no-webui\n")
 #endif
               << "  anthropic: /v1/messages  /v1/messages/count_tokens\n";
+#ifdef CHIMERA_HAS_WHISPER
     if (whisper_ctx) std::cout << "  audio: /v1/audio/transcriptions  /v1/audio/translations\n";
+#endif
+#ifdef CHIMERA_HAS_SD
     if (sd_ctx)      std::cout << "  image: /v1/images/generations  /v1/images/edits  /v1/images/variations\n";
+#endif
     if (rag_ctx.embedder) std::cout << "  rag:   /v1/vector_stores  /v1/vector_stores/:name{,/delete,/files,/search}\n";
     if (emb_ctx)     std::cout << "  embed: /v1/embeddings (dedicated model: " << opts.embed_model << ")\n";
     if (rrk_ctx)     std::cout << "  rerank: /v1/rerank (model: " << opts.rerank_model << ")\n";

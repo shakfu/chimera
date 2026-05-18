@@ -71,6 +71,7 @@ struct TokenizeOptions {
     bool use_mmap = true;
 };
 
+#ifdef CHIMERA_HAS_WHISPER
 struct WhisperOptions {
     std::string model;
     std::string input;
@@ -81,7 +82,10 @@ struct WhisperOptions {
     bool timestamps = false;
     bool no_context = false;
 };
+int command_whisper(const WhisperOptions & opts);
+#endif
 
+#ifdef CHIMERA_HAS_SD
 struct SdOptions {
     std::string model;
     std::string prompt;
@@ -101,9 +105,8 @@ struct SdOptions {
     float cfg_scale = 7.0f;
     float strength = 0.75f;  // img2img denoising strength (0 = preserve, 1 = full noise)
 };
-
-int command_whisper(const WhisperOptions & opts);
 int command_sd(const SdOptions & opts);
+#endif
 
 // OpenAI-compatible HTTP server backed by llama.cpp's server-context engine.
 // First-cut scope is text generation only; audio/image endpoints are planned
@@ -211,10 +214,14 @@ struct ServeOptions {
 
 int command_serve(const ServeOptions & opts);
 
+#ifdef CHIMERA_HAS_WHISPER
 void chimera_silence_whisper_log();
 void chimera_restore_whisper_log();
+#endif
+#ifdef CHIMERA_HAS_SD
 void chimera_silence_sd_log();
 void chimera_restore_sd_log();
+#endif
 
 // Shared utility helpers, inlined here so all three TUs (chimera.cpp,
 // chimera_whisper.cpp, chimera_sd.cpp) get one definition without needing
