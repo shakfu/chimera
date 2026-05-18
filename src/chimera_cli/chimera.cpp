@@ -24,6 +24,13 @@
 #include <sys/ioctl.h>  // TIOCGWINSZ for terminal width in the chat banner
 #else
 #include <io.h>
+// windows.h defines min/max as macros, which then collide with
+// std::numeric_limits<T>::max() and std::min/max usages reached through
+// llama.cpp's common.h and our own templates. Define NOMINMAX before the
+// include so the macros are suppressed; WIN32_LEAN_AND_MEAN trims headers
+// we don't need (winsock, GDI, ...) and shaves the TU's parse time.
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>  // GetConsoleScreenBufferInfo for terminal width
 #define isatty _isatty
 #define STDIN_FILENO _fileno(stdin)
