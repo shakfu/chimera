@@ -114,18 +114,38 @@ sd_image_t pixel_image_to_sd(const chimera_sd::PixelImage & p) {
 
 namespace chimera_sd {
 
-SdContextPtr load_model(const std::string & path, bool vae_decode_only, int threads) {
+SdContextPtr load_model(const LoadParams & params) {
     sd_set_log_callback(sd_log_callback, nullptr);
 
     sd_ctx_params_t ctx_params;
     sd_ctx_params_init(&ctx_params);
-    ctx_params.model_path       = path.c_str();
-    ctx_params.n_threads        = threads;
-    ctx_params.enable_mmap      = true;
-    ctx_params.vae_decode_only  = vae_decode_only;
+    // Empty-string -> nullptr so sd.cpp's "is this component present?"
+    // checks (which compare against nullptr) behave correctly.
+    auto cstr = [](const std::string & s) -> const char * {
+        return s.empty() ? nullptr : s.c_str();
+    };
+    ctx_params.model_path            = cstr(params.model);
+    ctx_params.diffusion_model_path  = cstr(params.diffusion_model);
+    ctx_params.vae_path              = cstr(params.vae);
+    ctx_params.clip_l_path           = cstr(params.clip_l);
+    ctx_params.t5xxl_path            = cstr(params.t5xxl);
+    ctx_params.llm_path              = cstr(params.llm);
+    ctx_params.n_threads             = params.threads;
+    ctx_params.enable_mmap           = true;
+    ctx_params.vae_decode_only       = params.vae_decode_only;
+    ctx_params.offload_params_to_cpu = params.offload_to_cpu;
+    ctx_params.diffusion_flash_attn  = params.diffusion_flash_attn;
 
     SdContextPtr ctx(new_sd_ctx(&ctx_params));
     return ctx;
+}
+
+SdContextPtr load_model(const std::string & path, bool vae_decode_only, int threads) {
+    LoadParams p;
+    p.model            = path;
+    p.vae_decode_only  = vae_decode_only;
+    p.threads          = threads;
+    return load_model(p);
 }
 
 PixelImage decode_image_bytes(const void * data, size_t size, int channels) {
@@ -328,15 +348,32 @@ void clear_log_buffer() {
 // ---- CLI subcommand ----------------------------------------------------
 
 int command_sd(const SdOptions & opts) {
-    if (opts.model.empty() || opts.prompt.empty()) {
-        fail(ExitCode::BadInput, "sd requires --model and --prompt");
+    if (opts.prompt.empty()) {
+        fail(ExitCode::BadInput, "sd requires --prompt");
+    }
+    if (opts.model.empty() && opts.diffusion_model.empty()) {
+        fail(ExitCode::BadInput,
+             "sd requires --model (combined checkpoint) or --diffusion-model "
+             "(split layout, e.g. Z-Image / Flux)");
     }
 
     // VAE encode path is only needed for img2img / inpaint.
     const bool need_encode = !opts.init_image.empty();
-    auto ctx = chimera_sd::load_model(opts.model, /*vae_decode_only=*/!need_encode, opts.threads);
+    chimera_sd::LoadParams lp;
+    lp.model                = opts.model;
+    lp.diffusion_model      = opts.diffusion_model;
+    lp.vae                  = opts.vae;
+    lp.clip_l               = opts.clip_l;
+    lp.t5xxl                = opts.t5xxl;
+    lp.llm                  = opts.llm;
+    lp.vae_decode_only      = !need_encode;
+    lp.offload_to_cpu       = opts.offload_to_cpu;
+    lp.diffusion_flash_attn = opts.diffusion_fa;
+    lp.threads              = opts.threads;
+    auto ctx = chimera_sd::load_model(lp);
     if (!ctx) {
-        fail(ExitCode::Load, "failed to load stable diffusion model: " + opts.model);
+        const std::string & shown = opts.model.empty() ? opts.diffusion_model : opts.model;
+        fail(ExitCode::Load, "failed to load stable diffusion model: " + shown);
     }
 
     chimera_sd::GenerateRequest req;

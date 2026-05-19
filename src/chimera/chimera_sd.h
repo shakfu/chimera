@@ -52,9 +52,32 @@ struct GenerateRequest {
 
 // ---- model lifecycle ---------------------------------------------------
 
-// Loads a stable-diffusion model. `vae_decode_only=false` is required for
-// img2img / inpaint (which need the VAE encode path); `true` saves memory
-// on plain txt2img. Returns an empty pointer on failure.
+// Inputs for load_model. `model` is the combined single-file checkpoint
+// path used by classic SD/SDXL builds; for split layouts (Flux, Z-Image,
+// SD3, ...) leave `model` empty and populate the per-component paths
+// (`diffusion_model`, `vae`, and one of `clip_l`/`t5xxl`/`llm`).
+// `offload_to_cpu` and `diffusion_flash_attn` map to the same-named
+// sd_ctx_params_t fields and are the perf knobs Z-Image expects.
+struct LoadParams {
+    std::string model;
+    std::string diffusion_model;
+    std::string vae;
+    std::string clip_l;
+    std::string t5xxl;
+    std::string llm;
+    bool        vae_decode_only      = true;
+    bool        offload_to_cpu       = false;
+    bool        diffusion_flash_attn = false;
+    int         threads              = -1;
+};
+
+// Loads a stable-diffusion model from a LoadParams. Returns an empty
+// pointer on failure.
+SdContextPtr load_model(const LoadParams & params);
+
+// Back-compat single-file overload. `vae_decode_only=false` is required
+// for img2img / inpaint (which need the VAE encode path); `true` saves
+// memory on plain txt2img.
 SdContextPtr load_model(const std::string & path,
                         bool                vae_decode_only,
                         int                 threads = -1);

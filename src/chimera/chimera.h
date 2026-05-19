@@ -87,7 +87,12 @@ int command_whisper(const WhisperOptions & opts);
 
 #ifdef CHIMERA_HAS_SD
 struct SdOptions {
-    std::string model;
+    std::string model;            // combined checkpoint (legacy single-file)
+    std::string diffusion_model;  // separate UNet/DiT (e.g. Z-Image, Flux)
+    std::string vae;              // separate VAE
+    std::string clip_l;           // CLIP-L text encoder
+    std::string t5xxl;            // T5-XXL text encoder
+    std::string llm;              // LLM text encoder (e.g. Qwen3 for Z-Image)
     std::string prompt;
     std::string negative_prompt;
     std::string output = "output.png";
@@ -104,6 +109,8 @@ struct SdOptions {
     int64_t seed = -1;
     float cfg_scale = 7.0f;
     float strength = 0.75f;  // img2img denoising strength (0 = preserve, 1 = full noise)
+    bool offload_to_cpu = false;
+    bool diffusion_fa = false;   // flash-attention in the diffusion model
 };
 int command_sd(const SdOptions & opts);
 #endif

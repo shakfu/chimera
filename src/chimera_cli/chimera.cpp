@@ -2440,7 +2440,20 @@ void bind_whisper_cmd(CLI::App & app, ParsedCli & p) {
 #ifdef CHIMERA_HAS_SD
 void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
     auto * cmd = app.add_subcommand("sd", "Minimal stable-diffusion text-to-image");
-    cmd->add_option("-m,--model", p.sd_opts.model, "Diffusion model")->required();
+    cmd->add_option("-m,--model", p.sd_opts.model,
+                    "Combined single-file checkpoint (classic SD/SDXL). "
+                    "For split layouts (Z-Image, Flux, SD3) use --diffusion-model.");
+    cmd->add_option("--diffusion-model", p.sd_opts.diffusion_model,
+                    "Diffusion UNet/DiT file (split layout)");
+    cmd->add_option("--vae", p.sd_opts.vae, "Separate VAE file");
+    cmd->add_option("--clip-l", p.sd_opts.clip_l, "CLIP-L text encoder");
+    cmd->add_option("--t5xxl", p.sd_opts.t5xxl, "T5-XXL text encoder");
+    cmd->add_option("--llm", p.sd_opts.llm,
+                    "LLM text encoder (e.g. Qwen3 for Z-Image)");
+    cmd->add_flag("--offload-to-cpu", p.sd_opts.offload_to_cpu,
+                  "Offload model params to CPU (saves VRAM)");
+    cmd->add_flag("--diffusion-fa", p.sd_opts.diffusion_fa,
+                  "Enable flash-attention in the diffusion model");
     cmd->add_option("-p,--prompt", p.sd_opts.prompt, "Prompt")->required();
     cmd->add_option("-o,--output", p.sd_opts.output, "Output PNG path");
     cmd->add_option("--negative-prompt", p.sd_opts.negative_prompt, "Negative prompt");

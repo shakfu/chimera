@@ -24,6 +24,17 @@ message(STATUS "sqlite version:         ${SQLITE_VERSION}")
 message(STATUS "sqlite-vec version:     ${SQLITE_VEC_VERSION}")
 
 # -----------------------------------------------------------------------------
+# GENERAL SPEEDUPS
+# -----------------------------------------------------------------------------
+
+# use ccache if available
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    message(STATUS "Found ccache in ${CCACHE_PROGRAM}")
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
+endif()
+
+# -----------------------------------------------------------------------------
 # Options
 # -----------------------------------------------------------------------------
 # stable-diffusion.cpp must NOT use its own vendored ggml — it has to share
