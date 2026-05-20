@@ -128,11 +128,12 @@ json format_verbose_json(const chimera_whisper::TranscribeResult & r,
 // expose a temperature knob in the same sense). timestamp_granularities is
 // also ignored; segment-level timing is always returned in verbose_json.
 server_http_context::handler_t make_audio_transcribe_handler(
-    whisper_context * ctx,
-    std::mutex      & ctx_mutex,
-    bool              translate) {
+    whisper_context  * ctx,
+    std::mutex       & ctx_mutex,
+    bool               translate,
+    const std::string & vad_model_path) {
 
-    return [ctx, &ctx_mutex, translate](const server_http_req & req) -> server_http_res_ptr {
+    return [ctx, &ctx_mutex, translate, vad_model_path](const server_http_req & req) -> server_http_res_ptr {
         auto err_res = [](int code, const std::string & msg) {
             auto res = std::make_unique<server_http_res>();
             res->status = code;
@@ -238,6 +239,49 @@ server_http_context::handler_t make_audio_transcribe_handler(
             treq.max_len       = coerce_int (fields["max_len"],       treq.max_len);
         if (fields.contains("split_on_word"))
             treq.split_on_word = coerce_bool(fields["split_on_word"], treq.split_on_word);
+        // Audio wave 2 — decoder-fail thresholds. NaN sentinels on
+        // TranscribeRequest are preserved when the field is omitted (no
+        // negative-as-sentinel here because `logprob_thold`'s upstream
+        // default is itself negative — only NaN unambiguously means
+        // "leave whisper's default"). `no_fallback=true` still wins
+        // and clamps `temperature_inc` negative at the engine layer.
+        if (fields.contains("temperature_inc"))
+            treq.temperature_inc = coerce_float(fields["temperature_inc"], treq.temperature_inc);
+        if (fields.contains("entropy_thold"))
+            treq.entropy_thold   = coerce_float(fields["entropy_thold"],   treq.entropy_thold);
+        if (fields.contains("logprob_thold"))
+            treq.logprob_thold   = coerce_float(fields["logprob_thold"],   treq.logprob_thold);
+        if (fields.contains("no_speech_thold"))
+            treq.no_speech_thold = coerce_float(fields["no_speech_thold"], treq.no_speech_thold);
+
+        // VAD bundle (step 5a). vad=true activates whisper's VAD
+        // preprocessor; it needs a VAD model path on the request.
+        // The model path is server-init (--audio-vad-model) — we don't
+        // accept it from the client to avoid the server reading
+        // arbitrary filesystem paths from external callers. A request
+        // with vad=true but no server-configured VAD model returns 400
+        // before transcription runs.
+        if (fields.contains("vad") && coerce_bool(fields["vad"], false)) {
+            if (vad_model_path.empty()) {
+                return err_res(400,
+                    "vad=true requires the server to have been started with "
+                    "--audio-vad-model <path>; this server has no VAD model loaded");
+            }
+            treq.vad            = true;
+            treq.vad_model_path = vad_model_path;
+            if (fields.contains("vad_threshold"))
+                treq.vad_threshold = coerce_float(fields["vad_threshold"], treq.vad_threshold);
+            if (fields.contains("vad_min_speech_duration_ms"))
+                treq.vad_min_speech_duration_ms = coerce_int(fields["vad_min_speech_duration_ms"], treq.vad_min_speech_duration_ms);
+            if (fields.contains("vad_min_silence_duration_ms"))
+                treq.vad_min_silence_duration_ms = coerce_int(fields["vad_min_silence_duration_ms"], treq.vad_min_silence_duration_ms);
+            if (fields.contains("vad_max_speech_duration_s"))
+                treq.vad_max_speech_duration_s = coerce_float(fields["vad_max_speech_duration_s"], treq.vad_max_speech_duration_s);
+            if (fields.contains("vad_speech_pad_ms"))
+                treq.vad_speech_pad_ms = coerce_int(fields["vad_speech_pad_ms"], treq.vad_speech_pad_ms);
+            if (fields.contains("vad_samples_overlap"))
+                treq.vad_samples_overlap = coerce_float(fields["vad_samples_overlap"], treq.vad_samples_overlap);
+        }
 
         // Stereo speaker diarization. The CLI does this in command_whisper
         // — same algorithm, ported here. Each channel is resampled to

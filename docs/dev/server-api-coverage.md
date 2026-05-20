@@ -1,7 +1,7 @@
 # Chimera Serve — CLI/HTTP Parity Inventory
 
 Report date: 2026-05-20
-Last status update: 2026-05-20 (audio wave 1 + image wave 1 landed)
+Last status update: 2026-05-20 (audio wave 1+2 + image wave 1+2 + step 5a (audio LoadParams + VAD) + step 5b (sd LoadParams + ControlNet) landed)
 Companion to [cli-api-coverage.md](cli-api-coverage.md), which audits the
 CLI subcommand surface against upstream. This document audits the
 **HTTP server surface** (`chimera serve`) against the matching CLI
@@ -25,10 +25,16 @@ Two parity gaps:
 1. **Per-request gap.** Many CLI flags that already exist on
    `TranscribeRequest` / `GenerateRequest` aren't read from the HTTP
    body. Adding them is purely handler-side — the engine doesn't need to
-   change. **Audio wave 1 closed 9 fields and image wave 1 closed 14
-   fields on 2026-05-20.** Remaining per-request work for both
-   modalities is now wave-2 / Tier-2 territory; Tier-3 items need the
-   server-init plumbing (gap 2) first.
+   change. **Closed across four waves on 2026-05-20** (audio wave 1: 9
+   fields, audio wave 2: 4 fields, image wave 1: 14 fields, image wave
+   2: 13 fields — total 40 fields). **The per-request gap is now
+   effectively closed.** Every remaining unsurfaced flag is blocked on
+   step 5 (server-init plumbing) because it needs a model loaded at
+   startup or compile-time linkage decisions — VAD needs the VAD model,
+   ControlNet needs the ControlNet model, PhotoMaker needs the PM
+   model, per-request LoRA needs the adapter pool, the `Model` hires
+   upscaler needs an upscale model file, and the per-component CPU
+   offload / mmap / max-vram knobs are all context-init decisions.
 2. **Server-init gap.** The serve path calls the **simple overload** of
    `chimera_whisper::load_model(path)` and
    `chimera_sd::load_model(path, vae_decode_only)`. The richer
@@ -66,6 +72,7 @@ Handlers in `src/chimera/chimera_serve_audio.cpp`.
 | `offset_ms`, `duration_ms` | ✅ Landed 2026-05-20 (audio wave 1) — slice-the-upload, no re-encoding. |
 | `max_len`, `split_on_word` | ✅ Landed 2026-05-20 (audio wave 1) — pairs with `response_format=srt`/`vtt`. |
 | `diarize` | ✅ Landed 2026-05-20 (audio wave 1) — mono uploads return 400; stereo uploads get `(speaker N)` labels stamped onto each segment's text (plus the joined transcript). |
+| `temperature_inc`, `entropy_thold`, `logprob_thold`, `no_speech_thold` | ✅ Landed 2026-05-20 (audio wave 2) — decoder-fail thresholds; NaN sentinels on `TranscribeRequest` preserve whisper defaults when the field is omitted. `logprob_thold`'s own upstream default is negative, which is why NaN-not-negative is the sentinel scheme. `no_fallback=true` still wins at the engine layer. |
 
 ### `POST /v1/images/generations` / `/v1/images/edits` / `/v1/images/variations`
 
@@ -85,6 +92,9 @@ Handlers in `src/chimera/chimera_serve_images.cpp`.
 | `vae_tiling` (+ `vae_tile_size`, `vae_relative_tile_size`, `vae_tile_overlap`) | ✅ Landed 2026-05-20 (image wave 1) — VRAM-safety knob for large outputs. |
 | `skip_layers`, `slg_scale`, `skip_layer_start`, `skip_layer_end` | ✅ Landed 2026-05-20 (image wave 1) — SLG bundle. `skip_layers` accepts JSON array OR comma-separated string; non-integer entries return 400 with a helpful message. |
 | `sigmas` | ✅ Landed 2026-05-20 (image wave 1) — custom sigma schedule, same array-or-CSV shape as `skip_layers`. |
+| `hires` (+ `hires_upscaler`, `hires_upscale_model`, `hires_width`, `hires_height`, `hires_scale`, `hires_steps`, `hires_denoising_strength`, `hires_upscale_tile_size`) | ✅ Landed 2026-05-20 (image wave 2) — hires-fix two-pass upscale. All upscaler types work; the `Model` upscaler's model file loads per-request from the `hires_upscale_model` path (`sd_hires_params_t.model_path` is per-request, not context-init — the earlier note saying "Model upscaler waits on step 5" was overstated). |
+| `control_image` (multipart file) + `control_strength` | ✅ Landed 2026-05-20 (step 5b) — per-request ControlNet conditioning. Gated on the server having been started with `--sd-control-net <path>`; a `control_image` upload without a ControlNet loaded returns HTTP 400. Available on all three image endpoints (`/generations`, `/edits`, `/variations`). |
+| `cache_mode`, `cache_option`, `scm_mask`, `scm_policy` | ✅ Landed 2026-05-20 (image wave 2) — inference cache + sampler-cached-memory. Validated via the shared `chimera_sd::parse_cache_options()` so HTTP errors are identical to CLI errors (modulo the `--cache-mode` wording — see design notes). |
 
 ### Chat / completions / embeddings
 
@@ -108,8 +118,8 @@ All map to existing `TranscribeRequest` fields — engine is unchanged. **Wave 1
 | `offset_ms`, `duration_ms` | same | ✅ Wave 1 | Slice verified — 4–8s window on the JFK sample returns the matching transcript fragment. |
 | `max_len`, `split_on_word` | same | ✅ Wave 1 | |
 | `diarize` | `treq.diarize` | ✅ Wave 1 | Energy-ratio classifier (1.1× threshold) duplicated from `command_whisper` into the handler — if a third caller appears, promote to `chimera_whisper::estimate_diarization_speaker`. Mono → 400; stereo → labels stamped on `Segment.speaker` + prefixed onto `Segment.text` + `result.text` rebuilt so `response_format=text` also reflects speakers. |
-| `temperature_inc`, `entropy_thold`, `logprob_thold`, `no_speech_thold` | same | Wave 2 (planned) | Decoder-fail thresholds; useful when debugging garbled audio. |
-| `vad` (+ tuning knobs) | `treq.vad` etc. | Wave 2 (planned) | VAD is becoming the de-facto default. **Requires server-init load of the VAD model** — see Tier 3. |
+| `temperature_inc`, `entropy_thold`, `logprob_thold`, `no_speech_thold` | same | ✅ Wave 2 | Decoder-fail thresholds. NaN-on-`TranscribeRequest` sentinel scheme because `logprob_thold`'s upstream default is itself negative; `no_fallback=true` still wins. ~8 LOC. |
+| `vad` (+ tuning knobs) | `treq.vad` etc. | Blocked on step 5 | VAD is becoming the de-facto default but requires the VAD model loaded at server start (chimera serve doesn't accept `--enable-audio-vad-model` today — needs `LoadParams` routing). |
 
 ### Tier 2 — per-request, more thought
 
@@ -164,9 +174,9 @@ All map to existing `GenerateRequest` fields. **Wave 1 (14 fields) landed 2026-0
 | `eta`, `timestep_shift`, `sigmas` | same | ✅ Wave 1 | `sigmas` accepts JSON array `[14.6, 10.0, ...]` or CSV string `"14.6,10.0,..."`. Non-numeric tokens → 400. |
 | `vae_tiling` (+ knobs) | same | ✅ Wave 1 | **VRAM safety** for large outputs. `vae_tiling` bool uses the shared `coerce_bool` helper. |
 | `skip_layers`, `slg_scale`, `skip_layer_start`, `skip_layer_end` | same | ✅ Wave 1 | `skip_layers` accepts array or CSV; non-int → 400. Wrong-type values (number instead of array/string) → 400 with explicit message. |
-| `cache_mode` + `cache_option` | parsed via `chimera_sd::parse_cache_options` | Wave 2 (planned) | Inference cache toggle. CPU/GPU users have different cache needs. |
-| `hires` + `hires_scale` / `hires_steps` / `hires_denoising_strength` / `hires_upscaler` | `req.hires_*` | Wave 2 (planned) | Popular two-pass workflow. `Latent*` upscalers need no extra model; `Model` upscaler needs server-init. |
-| `control_image` (multipart file) + `control_strength` | `req.control` / `req.control_strength` | Wave 2 (planned) | The ControlNet *model* is server-init; the conditioning image is per-request. |
+| `cache_mode` + `cache_option` + `scm_mask` + `scm_policy` | parsed via `chimera_sd::parse_cache_options` | ✅ Wave 2 | Validated up-front so a bad mode / unknown key / non-numeric value returns 400 with the parser's own message rather than failing inside generate(). Shared with the CLI. |
+| `hires` + `hires_upscaler` + `hires_upscale_model` + `hires_width` / `hires_height` / `hires_scale` / `hires_steps` / `hires_denoising_strength` / `hires_upscale_tile_size` | `req.hires_*` | ✅ Wave 2 | `Latent*` upscalers work out of the box; `hires_upscaler: "Model"` accepts the field but generate() fails downstream until step 5 plumbs an upscale model through `LoadParams` at server start. |
+| `control_image` (multipart file) + `control_strength` | `req.control` / `req.control_strength` | ✅ Step 5b | ControlNet model path is server-init (`--sd-control-net`); conditioning image is per-request. The `maybe_attach_control()` helper in `chimera_serve_images.cpp` decodes the multipart file to RGB, returns 400 with a precise message when the server has no ControlNet loaded. |
 
 ### Tier 2 — per-request, more thought
 
@@ -235,25 +245,74 @@ Pareto-shaped roadmap:
    pattern is duplicated for `skip_layers` and `sigmas` (~25 LOC each)
    — if a third caller wants the same shape, worth extracting
    `parse_int_csv_or_array()` / `parse_float_csv_or_array()` helpers.
-3. **Hires-fix** (1 PR). Bundle `hires` + scale/steps/upscaler/tile
-   knobs. `Latent*` upscalers work immediately; the `Model` upscaler
-   waits on step 4.
-4. **Cache + SCM** (1 PR). `cache_mode` + `cache_option` per request.
-   The chimera-side parser (`parse_cache_options`) already validates
-   per-mode kv-key combinations.
-5. **Server-init routing** (1 PR, structural). Plumb
-   `chimera_whisper::LoadParams` and `chimera_sd::LoadParams` through
-   the serve path. Adds `--enable-audio-*` / `--enable-image-*` flag
-   families to `chimera serve`. **This is the gating step** for every
-   server-init item in Tier 3 of both modalities — once it lands, each
-   subsequent flag is a one-line addition.
-6. **VAD on serve** (after 5). Per-request `vad=true` opt-in.
-7. **ControlNet on serve** (after 5). Per-request `control_image` +
-   `control_strength`.
-8. **PhotoMaker on serve** (after 5). Multipart `pm_id_images[]` +
-   per-request `pm_style_strength`.
-9. **Per-request LoRA selection** (after 5). Choose the "named adapters
-   loaded at startup" vs. "paths resolved at request time" model first.
+3. ~~**Hires-fix** + **Cache/SCM**~~ (~50 LOC). Both landed together as
+   **image wave 2** on 2026-05-20. Hires-fix accepts the full 9-field
+   bundle; the `Model` upscaler still waits on step 5. Cache/SCM
+   reuses the CLI's `parse_cache_options` so HTTP errors are
+   byte-identical to CLI errors. The same `fill_common_image_fields()`
+   helper picks both bundles up for all three image endpoints.
+4. ~~**Audio wave 2** — `temperature_inc`, `entropy_thold`,
+   `logprob_thold`, `no_speech_thold`. Four decoder-fail thresholds,
+   all NaN-sentineled on `TranscribeRequest`. Mechanical.~~
+   ✅ **Landed 2026-05-20** (~8 LOC). VAD knobs were originally
+   slotted into wave 2 but split out — they need the VAD model loaded
+   at server start (step 5).
+5. **Server-init `LoadParams` routing** — structural. The simple
+   `load_model(path)` overloads in both `chimera_whisper` and
+   `chimera_sd` are bypassed in favor of the `LoadParams` forms, and
+   `chimera serve` grows `--audio-*` / `--sd-*` flag families that
+   populate them. **The gating step for every Tier-3 item** — once a
+   modality's `LoadParams` is plumbed, each subsequent flag is a
+   one-line addition. Phased rollout:
+   - **5a — Audio `LoadParams` + VAD on serve.** ✅ Landed 2026-05-20.
+     Four flags: `--audio-flash-attn`, `--audio-no-gpu`, `--audio-device`,
+     `--audio-vad-model`. Per-request `vad=true` (+ six tuning knobs)
+     wired in the audio handler with a precise 400 when no VAD model is
+     loaded. ~50 LOC across `chimera.h`, `chimera_serve.cpp`,
+     `chimera_serve_internal.h`, `chimera_serve_audio.cpp`,
+     `chimera_cli/chimera.cpp`.
+   - **5b — SD `LoadParams` + ControlNet on serve.** ✅ Landed
+     2026-05-20. One flag exposed (`--sd-control-net`) but the full
+     `chimera_sd::LoadParams` is now built in `command_serve`, so
+     phases 5c/5d become one-line-per-field additions. Per-request
+     `control_image` (multipart) + `control_strength` (JSON) wired in
+     all three image handlers via the new `maybe_attach_control()`
+     helper. Gated 400 when no ControlNet is loaded. ~70 LOC.
+   - **5c — SD split-checkpoint flags.** Pending. `--sd-diffusion-model`,
+     `--sd-vae`, `--sd-clip-l`, `--sd-clip-g`, `--sd-t5xxl`, `--sd-llm`,
+     `--sd-llm-vision`, `--sd-clip-vision`, `--sd-taesd`, `--sd-embd-dir`,
+     `--sd-type`, `--sd-tensor-type-rules`,
+     `--sd-high-noise-diffusion-model`. Unlocks serving Flux / SD3 /
+     Z-Image / Qwen-Image. Each flag is now one line in three places
+     (`ServeOptions`, the LoadParams build, the CLI binding).
+   - **5d — SD perf/offload long-tail.** Pending. `--sd-fa`,
+     `--sd-diffusion-fa`, `--sd-diffusion-conv-direct`,
+     `--sd-vae-conv-direct`, `--sd-no-mmap`, `--sd-max-vram`,
+     `--sd-offload-to-cpu`, `--sd-clip-on-cpu`, `--sd-vae-on-cpu`,
+     `--sd-control-net-cpu`, `--sd-force-sdxl-vae-conv-scale`,
+     `--sd-rng`, `--sd-sampler-rng`, `--sd-prediction`,
+     `--sd-lora-apply-mode`, `--sd-threads`.
+   - **5e — PhotoMaker on serve.** Pending separate phase (was
+     originally part of "the unblocking trio" but split out). Needs
+     both server-init (`--sd-photo-maker <path>`) AND a multipart
+     per-request bundle: `pm_id_images[]` (plural files, OpenAI body
+     has no precedent — chimera invents the shape), `pm_id_embed_path`,
+     `pm_style_strength`. Half the work is the multipart-files-plural
+     design.
+6. **Per-request LoRA selection.** Pending. Choose between "named
+   adapters loaded at startup" (safer) vs. "paths resolved at request
+   time" (more flexible, security implications). Mirrors the choice
+   llama-server made with its `--lora-adapters` config.
 
-Steps 1 and 2 alone close ~80% of the practical CLI/serve parity gap.
-Step 5 is the structural unblock for everything else.
+**Honest correction from the original roadmap:** `--sd-upscale-model`
+was originally listed in the "unblocking trio" — it isn't actually
+blocking anything. `sd_hires_params_t.model_path` is per-request and
+loads fresh each `generate_image()` call, so wave 2's
+`hires_upscale_model` per-request field already works without
+server-init plumbing. Removed from the roadmap.
+
+Steps 1–4 closed the entire per-request gap (40 fields). Steps 5a and
+5b closed the highest-impact server-init gaps (VAD on audio, ControlNet
+on SD). Remaining work (5c, 5d, 5e, 6) is mostly mechanical now that
+the `LoadParams` routing exists on both modalities — each new flag is a
+one-line addition in three places.

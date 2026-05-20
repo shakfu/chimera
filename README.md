@@ -66,6 +66,14 @@ Experimental: `make build-with-webui` is identical to `make build` but flips `-D
 
 OpenSSL is required at link time (cpp-httplib uses it for TLS support inside the bundled HTTP server). On macOS this also pulls in the system Security and CoreFoundation frameworks. Install OpenSSL via your package manager (`brew install openssl@3` on macOS; `apt install libssl-dev` on Debian/Ubuntu) before running `make build`.
 
+On Windows, use one of the following methods:
+
+- `winget install -e --id ShiningLight.OpenSSL.Dev`
+- `vcpkg install openssl:x64-windows`
+- `choco install openssl -y`
+- `scoop install openssl`
+- Download directly from [Shining Light OpenSSL](https://slproweb.com/products/Win32OpenSSL.html).
+
 ## Install
 
 ```bash

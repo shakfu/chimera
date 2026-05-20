@@ -614,7 +614,17 @@ int command_serve(const ServeOptions & opts) {
     std::mutex        whisper_mutex;
     if (!opts.audio_model.empty()) {
         std::cout << "chimera serve: loading audio model " << opts.audio_model << "...\n";
-        whisper_ctx = chimera_whisper::load_model(opts.audio_model);
+        // Audio LoadParams routing (step 5a). The simple
+        // load_model(path) overload is preserved for back-compat and
+        // delegates to this LoadParams form; switching call sites here
+        // is what enables the --audio-flash-attn / --audio-no-gpu /
+        // --audio-device knobs.
+        chimera_whisper::LoadParams alp;
+        alp.model      = opts.audio_model;
+        alp.flash_attn = opts.audio_flash_attn;
+        alp.use_gpu    = !opts.audio_no_gpu;
+        alp.gpu_device = opts.audio_gpu_device;
+        whisper_ctx = chimera_whisper::load_model(alp);
         if (!whisper_ctx) {
             std::cerr << "chimera serve: failed to load audio model: "
                       << opts.audio_model << "\n";
@@ -634,7 +644,16 @@ int command_serve(const ServeOptions & opts) {
     std::mutex   sd_mutex;
     if (!opts.sd_model.empty()) {
         std::cout << "chimera serve: loading image model " << opts.sd_model << "...\n";
-        sd_ctx = chimera_sd::load_model(opts.sd_model, /*vae_decode_only=*/false);
+        // SD LoadParams routing (step 5b). Replaces the simple
+        // load_model(path, vae_decode_only) overload so server-init
+        // flags like --sd-control-net can land in the sd_ctx_params.
+        // vae_decode_only=false because /v1/images/edits and
+        // /variations both need the encode path (img2img).
+        chimera_sd::LoadParams slp;
+        slp.model           = opts.sd_model;
+        slp.vae_decode_only = false;
+        slp.control_net     = opts.sd_control_net;
+        sd_ctx = chimera_sd::load_model(slp);
         if (!sd_ctx) {
             std::cerr << "chimera serve: failed to load image model: "
                       << opts.sd_model << "\n";
@@ -809,20 +828,25 @@ int command_serve(const ServeOptions & opts) {
     if (whisper_ctx) {
         ctx_http.post("/v1/audio/transcriptions",
                       ex_wrapper(make_audio_transcribe_handler(
-                          whisper_ctx.get(), whisper_mutex, /*translate=*/false)));
+                          whisper_ctx.get(), whisper_mutex, /*translate=*/false,
+                          opts.audio_vad_model)));
         ctx_http.post("/v1/audio/translations",
                       ex_wrapper(make_audio_transcribe_handler(
-                          whisper_ctx.get(), whisper_mutex, /*translate=*/true)));
+                          whisper_ctx.get(), whisper_mutex, /*translate=*/true,
+                          opts.audio_vad_model)));
     }
 #endif
 #ifdef CHIMERA_HAS_SD
     if (sd_ctx) {
         ctx_http.post("/v1/images/generations",
-                      ex_wrapper(make_image_generations_handler(sd_ctx.get(), sd_mutex)));
+                      ex_wrapper(make_image_generations_handler(
+                          sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty())));
         ctx_http.post("/v1/images/edits",
-                      ex_wrapper(make_image_edits_handler(sd_ctx.get(), sd_mutex)));
+                      ex_wrapper(make_image_edits_handler(
+                          sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty())));
         ctx_http.post("/v1/images/variations",
-                      ex_wrapper(make_image_variations_handler(sd_ctx.get(), sd_mutex)));
+                      ex_wrapper(make_image_variations_handler(
+                          sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty())));
     }
 #endif
     // /v1/rerank takes {"query": "...", "documents": ["..."]} and returns

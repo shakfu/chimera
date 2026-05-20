@@ -484,6 +484,16 @@ struct ServeOptions {
     // Opt-in audio. When non-empty, a whisper.cpp model is loaded
     // alongside the LLM and POST /v1/audio/transcriptions becomes available.
     std::string audio_model;        // --enable-audio <whisper.gguf>
+    // Audio LoadParams routing (step 5a). Mirrors `chimera whisper` CLI
+    // flag names with an --audio- prefix. Empty / false / -1 sentinels
+    // leave the whisper.cpp defaults in place. `audio_vad_model` is the
+    // gating piece for per-request `vad=true` — without a VAD model
+    // loaded at startup, the per-request VAD knobs have nothing to
+    // activate.
+    bool        audio_flash_attn = false;
+    bool        audio_no_gpu     = false;
+    int         audio_gpu_device = 0;
+    std::string audio_vad_model;
 
     // Opt-in image. When non-empty, a stable-diffusion.cpp model is
     // loaded alongside the LLM and POST /v1/images/{generations,edits,
@@ -491,6 +501,12 @@ struct ServeOptions {
     // vae_decode_only=false so the encode path is available for img2img
     // (/edits and /variations).
     std::string sd_model;           // --enable-image <sd.gguf>
+    // SD LoadParams routing (step 5b). Mirrors `chimera sd` CLI flag
+    // names with a --sd- prefix. Empty = unused. `sd_control_net` is
+    // the gating piece for per-request `control_image` — without a
+    // ControlNet model loaded at startup, requests with control_image
+    // return HTTP 400.
+    std::string sd_control_net;     // --sd-control-net <path>
 
     // Opt-in vector store / RAG. When non-empty, the named GGUF embedding
     // model is loaded alongside the LLM and the POST/GET /v1/vector_stores/*

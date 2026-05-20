@@ -260,6 +260,45 @@ bool fill_common_image_fields(const json &                  fields,
     if (fields.contains("slg_scale"))        req.slg_scale        = coerce_float(fields["slg_scale"],        req.slg_scale);
     if (fields.contains("skip_layer_start")) req.skip_layer_start = coerce_float(fields["skip_layer_start"], req.skip_layer_start);
     if (fields.contains("skip_layer_end"))   req.skip_layer_end   = coerce_float(fields["skip_layer_end"],   req.skip_layer_end);
+    // Image wave 2 — hires-fix bundle. Toggle plus the seven scalar
+    // knobs that mirror sd_hires_params_t. The Latent* upscalers work
+    // without any extra model load; the `Model` upscaler needs an
+    // upscale model on disk + the `hires_upscale_model` path — without
+    // a server-init plumb-through of LoadParams the `Model` form will
+    // fail downstream in generate(). Documented in
+    // docs/dev/server-api-coverage.md.
+    if (fields.contains("hires"))                req.hires_enabled            = coerce_bool (fields["hires"],                req.hires_enabled);
+    if (fields.contains("hires_upscaler"))       req.hires_upscaler           = coerce_string(fields["hires_upscaler"]);
+    if (fields.contains("hires_upscale_model")) req.hires_upscale_model      = coerce_string(fields["hires_upscale_model"]);
+    if (fields.contains("hires_width"))          req.hires_target_width       = coerce_int  (fields["hires_width"],          req.hires_target_width);
+    if (fields.contains("hires_height"))         req.hires_target_height      = coerce_int  (fields["hires_height"],         req.hires_target_height);
+    if (fields.contains("hires_scale"))          req.hires_scale              = coerce_float(fields["hires_scale"],          req.hires_scale);
+    if (fields.contains("hires_steps"))          req.hires_steps              = coerce_int  (fields["hires_steps"],          req.hires_steps);
+    if (fields.contains("hires_denoising_strength")) req.hires_denoising_strength = coerce_float(fields["hires_denoising_strength"], req.hires_denoising_strength);
+    if (fields.contains("hires_upscale_tile_size")) req.hires_upscale_tile_size = coerce_int(fields["hires_upscale_tile_size"], req.hires_upscale_tile_size);
+
+    // Cache / SCM bundle. The four-field surface mirrors sd-cli: mode
+    // picks the algorithm, option overrides per-mode tunables in
+    // KEY=VALUE,... form, scm_mask/scm_policy steer sampler-cached-memory.
+    // chimera_sd::parse_cache_options does the validation up-front so
+    // a bad cache_option entry fails here with a precise 400 rather
+    // than producing silent default behavior.
+    {
+        const std::string cache_mode   = fields.contains("cache_mode")   ? coerce_string(fields["cache_mode"])   : std::string();
+        const std::string cache_option = fields.contains("cache_option") ? coerce_string(fields["cache_option"]) : std::string();
+        const std::string scm_mask     = fields.contains("scm_mask")     ? coerce_string(fields["scm_mask"])     : std::string();
+        const std::string scm_policy   = fields.contains("scm_policy")   ? coerce_string(fields["scm_policy"])   : std::string();
+        if (!cache_mode.empty() || !cache_option.empty() ||
+            !scm_mask.empty()   || !scm_policy.empty()) {
+            try {
+                chimera_sd::parse_cache_options(cache_mode, cache_option, scm_mask, scm_policy, &req);
+            } catch (const ChimeraError & e) {
+                err = e.what();
+                return false;
+            }
+        }
+    }
+
     // Custom sigma schedule. Same array-or-CSV shape as skip_layers.
     if (fields.contains("sigmas")) {
         const auto & sg = fields["sigmas"];
@@ -308,9 +347,54 @@ bool fill_common_image_fields(const json &                  fields,
 }  // namespace
 
 // POST /v1/images/generations — txt2img.
+// Optional per-request ControlNet conditioning. Multipart file
+// `control_image` + JSON field `control_strength`. Gated on the server
+// having been started with `--sd-control-net <path>` — a request that
+// supplies `control_image` without a ControlNet loaded returns 400
+// with the same gating shape used for audio VAD.
+//
+// Decodes the conditioning image to 3-channel RGB. Dimension matching
+// against the request's width/height is enforced inside
+// chimera_sd::generate() so callers get a uniform error path.
+//
+// Returns nullptr on success; otherwise an HTTP error response that
+// the caller should propagate.
+server_http_res_ptr maybe_attach_control(
+    const server_http_req &       req,
+    const json &                  fields,
+    bool                          control_net_loaded,
+    chimera_sd::GenerateRequest & sreq) {
+    auto err_res = [](int code, const std::string & msg) {
+        auto r = std::make_unique<server_http_res>();
+        r->status = code;
+        r->data = json{{ "error", { { "message", msg }, { "code", code }, { "type", "invalid_request_error" } }}}.dump();
+        return r;
+    };
+    auto file_it = req.files.find("control_image");
+    const bool has_control_image =
+        file_it != req.files.end() && !file_it->second.data.empty();
+    if (!has_control_image) return nullptr;
+    if (!control_net_loaded) {
+        return err_res(400,
+            "control_image was supplied but the server has no ControlNet "
+            "loaded; restart chimera serve with --sd-control-net <path> "
+            "to enable per-request ControlNet conditioning");
+    }
+    try {
+        sreq.control = chimera_sd::decode_image_bytes(
+            file_it->second.data.data(), file_it->second.data.size(), 3);
+    } catch (const ChimeraError & e) {
+        return err_res(415, std::string("could not decode control_image: ") + e.what());
+    }
+    if (fields.contains("control_strength")) {
+        sreq.control_strength = coerce_float(fields["control_strength"], sreq.control_strength);
+    }
+    return nullptr;
+}
+
 server_http_context::handler_t make_image_generations_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex) {
-    return [ctx, &ctx_mutex](const server_http_req & req) -> server_http_res_ptr {
+    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded) {
+    return [ctx, &ctx_mutex, control_net_loaded](const server_http_req & req) -> server_http_res_ptr {
         json fields = json::object();
         if (!req.body.empty()) {
             try { fields = json::parse(req.body); }
@@ -336,14 +420,17 @@ server_http_context::handler_t make_image_generations_handler(
             res->data = json{{ "error", { { "message", err }, { "code", 400 }}}}.dump();
             return res;
         }
+        if (auto e = maybe_attach_control(req, fields, control_net_loaded, sreq)) {
+            return e;
+        }
         return run_image_generate(ctx, ctx_mutex, std::move(sreq), fields);
     };
 }
 
 // POST /v1/images/edits — img2img + optional mask (inpaint). Multipart.
 server_http_context::handler_t make_image_edits_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex) {
-    return [ctx, &ctx_mutex](const server_http_req & req) -> server_http_res_ptr {
+    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded) {
+    return [ctx, &ctx_mutex, control_net_loaded](const server_http_req & req) -> server_http_res_ptr {
         auto err_res = [](int code, const std::string & msg) {
             auto r = std::make_unique<server_http_res>();
             r->status = code;
@@ -389,6 +476,9 @@ server_http_context::handler_t make_image_edits_handler(
                 return err_res(415, std::string("could not decode mask image: ") + e.what());
             }
         }
+        if (auto e = maybe_attach_control(req, fields, control_net_loaded, sreq)) {
+            return e;
+        }
         return run_image_generate(ctx, ctx_mutex, std::move(sreq), fields);
     };
 }
@@ -396,8 +486,8 @@ server_http_context::handler_t make_image_edits_handler(
 // POST /v1/images/variations — img2img with no prompt. We pass an empty
 // prompt; SD will produce variations driven by the init latent + noise.
 server_http_context::handler_t make_image_variations_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex) {
-    return [ctx, &ctx_mutex](const server_http_req & req) -> server_http_res_ptr {
+    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded) {
+    return [ctx, &ctx_mutex, control_net_loaded](const server_http_req & req) -> server_http_res_ptr {
         auto err_res = [](int code, const std::string & msg) {
             auto r = std::make_unique<server_http_res>();
             r->status = code;
@@ -428,6 +518,9 @@ server_http_context::handler_t make_image_variations_handler(
         if (!fields.contains("size")) {
             sreq.width  = sreq.init.width;
             sreq.height = sreq.init.height;
+        }
+        if (auto e = maybe_attach_control(req, fields, control_net_loaded, sreq)) {
+            return e;
         }
         return run_image_generate(ctx, ctx_mutex, std::move(sreq), fields);
     };

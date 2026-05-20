@@ -3623,10 +3623,24 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
 #ifdef CHIMERA_HAS_WHISPER
     cmd->add_option("--enable-audio", p.serve_opts.audio_model,
         "Whisper GGUF to load alongside the LLM (enables /v1/audio/transcriptions)");
+    cmd->add_flag("--audio-flash-attn", p.serve_opts.audio_flash_attn,
+        "Enable flash-attention in the whisper context (GPU builds)");
+    cmd->add_flag("--audio-no-gpu", p.serve_opts.audio_no_gpu,
+        "Force whisper to run on CPU even when GPU support is built in");
+    cmd->add_option("--audio-device", p.serve_opts.audio_gpu_device,
+        "CUDA device index for the whisper context (ignored under --audio-no-gpu)");
+    cmd->add_option("--audio-vad-model", p.serve_opts.audio_vad_model,
+        "Path to a whisper VAD model (e.g. silero v5). Required to enable "
+        "per-request vad=true on /v1/audio/transcriptions — without it, "
+        "requests asking for VAD return HTTP 400.");
 #endif
 #ifdef CHIMERA_HAS_SD
     cmd->add_option("--enable-image", p.serve_opts.sd_model,
         "Stable-diffusion GGUF to load alongside the LLM (enables /v1/images/*)");
+    cmd->add_option("--sd-control-net", p.serve_opts.sd_control_net,
+        "Path to a ControlNet model. Required to enable per-request "
+        "control_image (multipart file) + control_strength on /v1/images/* — "
+        "without it, requests with control_image return HTTP 400.");
 #endif
     cmd->add_option("--enable-rag", p.serve_opts.rag_embedding_model,
         "Embedding GGUF to load alongside the LLM (enables /v1/vector_stores/*)");

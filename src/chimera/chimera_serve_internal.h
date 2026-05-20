@@ -72,10 +72,17 @@ bool        coerce_bool  (const json & v, bool dflt);
 // ----------------------------------------------------------------------------
 
 #ifdef CHIMERA_HAS_WHISPER
+// `vad_model_path` is the server-init `--audio-vad-model` value. When
+// the per-request body sets `vad=true`, the handler injects this path
+// into `treq.vad_model_path` so whisper.cpp picks up the VAD model.
+// Empty path means VAD is not available; a `vad=true` request then
+// returns HTTP 400 with a precise message rather than crashing in
+// whisper_full.
 server_http_context::handler_t make_audio_transcribe_handler(
-    whisper_context * ctx,
-    std::mutex      & ctx_mutex,
-    bool              translate);
+    whisper_context  * ctx,
+    std::mutex       & ctx_mutex,
+    bool               translate,
+    const std::string & vad_model_path);
 #endif
 
 // ----------------------------------------------------------------------------
@@ -85,12 +92,18 @@ server_http_context::handler_t make_audio_transcribe_handler(
 // ----------------------------------------------------------------------------
 
 #ifdef CHIMERA_HAS_SD
+// `control_net_loaded` reports whether the server was started with a
+// ControlNet model (`--sd-control-net`). The handlers gate per-request
+// `control_image` on this flag — a request that supplies one without a
+// ControlNet loaded returns HTTP 400. Same shape used by the audio
+// handler for VAD: opt-in server-init, with a precise error when the
+// per-request feature is asked for but unavailable.
 server_http_context::handler_t make_image_generations_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex);
+    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded);
 server_http_context::handler_t make_image_edits_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex);
+    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded);
 server_http_context::handler_t make_image_variations_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex);
+    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded);
 #endif
 
 // ----------------------------------------------------------------------------
