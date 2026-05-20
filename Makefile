@@ -5,14 +5,17 @@
 # python.org default, Microsoft Store Python, some Linux distros), `py -3`
 # (Windows Python Launcher, ships with python.org installers since 3.6).
 # Falls back to a literal `python3` if nothing is found so the failure is
-# obvious. Requires a POSIX shell — the project already needs bash for
+# obvious. Each candidate is probed by actually running `--version` because
+# Windows ships a Microsoft Store `python3.exe` stub on PATH that exits
+# non-zero with "Python was not found" — `command -v` would happily pick
+# it. Requires a POSIX shell — the project already needs bash for
 # `scripts/test.sh`, and the Windows CI leg uses git-bash, so this is
 # satisfied everywhere we build. Override with `make PYTHON=<cmd>` for
 # unusual environments (e.g. `PYTHON="uv run python"`).
 PYTHON ?= $(shell \
-    if command -v python3 >/dev/null 2>&1; then echo python3;  \
-    elif command -v python  >/dev/null 2>&1; then echo python; \
-    elif command -v py      >/dev/null 2>&1; then echo py -3;  \
+    if python3 --version >/dev/null 2>&1; then echo python3;  \
+    elif python  --version >/dev/null 2>&1; then echo python; \
+    elif py -3   --version >/dev/null 2>&1; then echo py -3;  \
     else echo python3; fi)
 BUILD_DIR ?= build
 PREFIX ?= /usr/local
