@@ -26,15 +26,15 @@ Status legend: ✅ exposed · 🔀 renamed · 🟡 partial · ❌ missing · �
 
 | Subcommand | Upstream flags considered | Exposed | Renamed | Missing (real gap) | Deliberately out of scope |
 |---|---:|---:|---:|---:|---:|
-| `gen` (llama-cli) | ~80 CLI-relevant | 32 | 1 | ~2 | ~50 |
-| `chat` (llama-cli, interactive) | ~85 | 37 | 0 | ~2 | ~55 |
+| `gen` (llama-cli) | ~80 CLI-relevant | 51 | 1 | 0 | ~58 |
+| `chat` (llama-cli, interactive) | ~85 | 56 | 0 | 0 | ~63 |
 | `embed` (llama-embedding) | ~14 | 12 | 1 | 1 | 1 |
-| `whisper` (whisper-cli) | 58 | 41 | 1 | ~3 | ~13 |
+| `whisper` (whisper-cli) | 58 | 46 | 1 | 0 | ~13 |
 | `sd` (sd cli) | 107 | 60 | 6 | 0 | ~51 |
 
 "Real gaps" are flags whose absence we'd consider filing an issue for. "Deliberately out of scope" covers things like llama-cli's REPL plumbing (chimera replaces it with `chat`), perplexity/imatrix/training knobs, anything tied solely to llama-server, and obscure research/debug flags. The next two columns of the per-subcommand tables make each call individually.
 
-The headline finding from the original audit — "**the sd surface is by far the largest source of meaningful gaps**" — no longer applies. After the 2026-05-20 sd closer (Rounds 1–8, 38 additional flags on top of the earlier Tier 1–2 work), **the sd surface has zero unresolved ❌ rows**. The lone remaining item, `--disable-image-metadata`, is reclassified 🚫 because chimera's stock `stb_image_write` writes no text chunks, so there is no metadata to disable; embedding generation params (the reverse direction, for parity with sd-cli's default behaviour) is a separate feature not yet on the roadmap. Everything else is documented out-of-scope (video, standalone modes, shell features, chroma/qwen tuning). The llama coverage is intentionally minimal — chimera leans on its own DSL (`chat` REPL, `serve` HTTP) and the wrapped subcommands are deliberately thin. The whisper surface, previously the most "leaky" relative to size, is now ~73% covered after the 2026-05-20 closer (Batches 1–3 + VAD + offset/duration); residual gaps are constrained-decoding (`--grammar` family) and wrapper-logic features (`--detect-language` exit-after-detect, stereo `--diarize`).
+The headline finding from the original audit — "**the sd surface is by far the largest source of meaningful gaps**" — no longer applies. After the 2026-05-20 sd closer (Rounds 1–8, 38 additional flags on top of the earlier Tier 1–2 work), **the sd surface has zero unresolved ❌ rows**. The lone remaining item, `--disable-image-metadata`, is reclassified 🚫 because chimera's stock `stb_image_write` writes no text chunks, so there is no metadata to disable; embedding generation params (the reverse direction, for parity with sd-cli's default behaviour) is a separate feature not yet on the roadmap. Everything else is documented out-of-scope (video, standalone modes, shell features, chroma/qwen tuning). The llama coverage is intentionally minimal — chimera leans on its own DSL (`chat` REPL, `serve` HTTP) and the wrapped subcommands are deliberately thin. The whisper surface, previously the most "leaky" relative to size, is now ~79% covered after the 2026-05-20 closer (Batches 1–3 + VAD + offset/duration + grammar + stereo diarize + detect-language). **All non-niche whisper ❌ rows are resolved.** Remaining 🚫/❌ items are token-level DTW, `--word-thold`, OpenVINO device selection, and a few decoder-print toggles — all explicitly out of scope or low-demand.
 
 ---
 
@@ -54,7 +54,7 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 | `--batch-size, -b` | `-b,--batch-size` | ✅ | |
 | `--ubatch-size` | `--ubatch-size` | ✅ | Landed 2026-05-20. |
 | `--threads, -t` | `-t,--threads` | ✅ | |
-| `--threads-batch` | — | ❌ | Rare in practice. |
+| `--threads-batch` | `--threads-batch` | ✅ | Landed 2026-05-20. -1 mirrors `--threads`. |
 | `--seed` | `--seed` | ✅ | |
 | `--temp` | `--temp` | ✅ | |
 | `--top-k` | `--top-k` | ✅ | |
@@ -63,13 +63,13 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 | `--repeat-penalty` | `--repeat-penalty` | ✅ | |
 | `--repeat-last-n` | `--repeat-last-n` | ✅ | Landed 2026-05-20. |
 | `--presence-penalty` / `--frequency-penalty` | `--presence-penalty` / `--frequency-penalty` | ✅ | Landed 2026-05-20. |
-| `--typical` | — | ❌ | |
-| `--top-nsigma` | — | ❌ | New-ish; nice-to-have. |
-| `--xtc-probability` / `--xtc-threshold` | — | ❌ | Newer sampler; low priority. |
+| `--typical` | `--typical` | ✅ | Landed 2026-05-20. Maps to `sampling.typ_p`; 1.0 disables. |
+| `--top-nsigma` | `--top-nsigma` | ✅ | Landed 2026-05-20. `sampling.top_n_sigma`; -1 disables. |
+| `--xtc-probability` / `--xtc-threshold` | same | ✅ | Landed 2026-05-20. |
 | `--dry-*` (multiplier/base/allowed-length/penalty-last-n/sequence-breaker) | `--dry-multiplier` / `--dry-base` / `--dry-allowed-length` / `--dry-penalty-last-n` / `--dry-sequence-breaker` | ✅ | Landed 2026-05-20. Sequence-breaker is repeatable. |
 | `--mirostat` / `--mirostat-ent` / `--mirostat-lr` | same | ✅ | Landed 2026-05-20. |
-| `--samplers` / `--sampler-seq` | — | ❌ | Sampler-chain ordering. Power-user, low priority. |
-| `--dynatemp-range` / `--dynatemp-exp` | — | ❌ | |
+| `--samplers` / `--sampler-seq` | `--samplers` (sampler-seq 🚫) | 🟡 | Landed 2026-05-20. `--samplers` parses the same ';'-separated name list as llama-cli (via `common_sampler_types_from_names(names, allow_alt_names=true)`). `--sampler-seq` (single-char form) not added — same surface, redundant. |
+| `--dynatemp-range` / `--dynatemp-exp` | same | ✅ | Landed 2026-05-20. |
 | `--logit-bias` | `--logit-bias` | ✅ | Landed 2026-05-20. Repeatable, format `"<id>(+|-|=)<bias>"`. |
 | `--ignore-eos` | `--ignore-eos` | ✅ | Landed 2026-05-20. |
 | `--grammar` / `--grammar-file` / `--json-schema` / `--json-schema-file` | same | ✅ | Landed 2026-05-20. JSON schema converted via `json_schema_to_grammar`. Mutually exclusive group. End-to-end smoke verified. |
@@ -78,8 +78,8 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 | `--gpu-layers` | `--gpu-layers` | ✅ | |
 | `--main-gpu` / `--tensor-split` / `--split-mode` | same | ✅ | Landed 2026-05-20. `--split-mode` accepts none/layer/row/tensor; `--tensor-split` parses comma-separated floats. |
 | `--device` / `--list-devices` | `--device` only | 🟡 | `--device` landed 2026-05-20 (comma-separated device list). `--list-devices` skipped — better fit as a `chimera info` extension. |
-| `--n-cpu-moe` / `--cpu-moe` | — | ❌ | MoE-specific offload. |
-| `--override-tensor` / `--override-kv` | — | ❌ | Power-user. |
+| `--n-cpu-moe` / `--cpu-moe` | same | ✅ | Landed 2026-05-20. Both manipulate `llama_model_params.tensor_buft_overrides` via the upstream inline helpers `llm_ffn_exps_cpu_override()` and `llm_ffn_exps_block_regex(i)`. They stack with `--override-tensor`. |
+| `--override-tensor` / `--override-kv` | same | ✅ | Landed 2026-05-20. `--override-tensor` parses `<pattern>=<buft_name>` (multiple, comma-separated; backend lookup via `ggml_backend_dev_buffer_type` enumeration). `--override-kv` reuses upstream's `string_parse_kv_override` so the `KEY=TYPE:VALUE` grammar matches exactly. Both repeatable on the CLI. |
 | `--cache-type-k` / `--cache-type-v` | same | ✅ | Landed 2026-05-20. Accepts f32/f16/bf16/q8_0/q5_0/q5_1/q4_0/q4_1/iq4_nl. End-to-end smoke verified. |
 | `--rope-freq-base` / `--rope-freq-scale` / `--rope-scaling` / `--rope-scale` | same | ✅ | Landed 2026-05-20. `--rope-scaling` accepts none/linear/yarn/longrope. |
 | `--yarn-*` (orig-ctx, ext-factor, attn-factor, beta-fast, beta-slow) | same | ✅ | Landed 2026-05-20. |
@@ -87,27 +87,27 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 | `--mmproj` | `--mmproj` | ✅ | |
 | `--mmproj-offload` / `--mmproj-auto` / `--mmproj-url` | `--no-mmproj-offload` | 🟡 | `--no-mmproj-offload` landed 2026-05-20 (maps to `mtmd_context_params.use_gpu`). `--mmproj-auto` not modeled by upstream at b9119; `--mmproj-url` is network-fetch (out of scope). |
 | `--image` | `--image` (gen; repeatable) | ✅ | `chat` injects images via `/image` REPL command. |
-| `--image-min-tokens` / `--image-max-tokens` | — | ❌ | Vision-token budget. |
+| `--image-min-tokens` / `--image-max-tokens` | same | ✅ | Landed 2026-05-20. Wired on both `gen` and `chat` mtmd paths via `mtmd_context_params.{image_min,image_max}_tokens`. -1 / 0 leaves the model's metadata default. |
 | `--system-prompt` | `--system` (chat) | 🔀 | Renamed; `gen` lacks it (it's an interactive concept). |
 | `--system-prompt-file` | `--system-prompt-file` (chat) | ✅ | |
 | `--chat-template` | `--chat-template` (chat) | ✅ | |
 | `--chat-template-file` / `--chat-template-kwargs` | same | ✅ | Landed 2026-05-20 (`chat` only). `--chat-template-file` is mutually exclusive with `--chat-template`. `--chat-template-kwargs` is repeatable. |
 | `--jinja` | `--no-jinja` | ✅ | Landed 2026-05-20 (`chat` only). Jinja defaults ON; `--no-jinja` opts out. |
 | `--reasoning` / `--reasoning-budget` / `--reasoning-format` / `--reasoning-budget-message` | same | ✅ | Landed 2026-05-20 (`chat` only). `--reasoning-budget` enforcement landed in a follow-up the same day — `command_chat` probes the template via a dummy `common_chat_templates_apply` to read `thinking_{start,end}_tag`, tokenizes via `common_tokenize(parse_special=true)`, populates `sampling.reasoning_budget_{tokens,start,end,forced}`, and `common_sampler_init` chains the budget sampler into the chain. `--reasoning-budget-message` is tokenized into the forced-termination sequence as `<message> + <end_tag>` (mirrors `llama-cli`). When the active template has no thinking tags, a warning fires and the budget is silently ignored. |
-| `--keep` | — | ❌ | Token retention across context overflow. |
+| `--keep` | — | 🚫 | Architecture mismatch. `--keep` controls how many tokens llama-cli preserves when its sliding-window context-shift triggers on overflow. Chimera's `chat` reuses KV-prefix across turns and doesn't run llama-cli's shift loop; `gen` is one-shot. The field has no effect in chimera's code path. |
 | `--color` | `--color` (chat) | ✅ | `gen` is non-interactive so this is fine. |
 | `--verbose-prompt` / `--special` / `--escape` / `--no-context-shift` | — | 🚫 | Debug/edge; out-of-scope. |
 | `--prompt-cache` / `--prompt-cache-all` / `--prompt-cache-ro` | — | 🚫 | Tied to llama-cli's prompt-cache on-disk format; nicer to layer above. |
-| `--ctx-checkpoints` / `--checkpoint-every-n-tokens` | — | ❌ | New mid-2025 feature; low priority. |
-| `--swa-full` | — | ❌ | Sliding-window attention. |
-| `--cache-ram` | — | ❌ | |
+| `--ctx-checkpoints` / `--checkpoint-every-n-tokens` | — | 🚫 | Server-only fields (`common_params` server block: `n_ctx_checkpoints`, `checkpoint_every_nt`). Not consumed by chimera's CLI subcommands. Re-evaluate if `chimera serve` ever surfaces them. |
+| `--swa-full` | `--swa-full` | ✅ | Landed 2026-05-20. Wired on `llama_context_params.swa_full`. |
+| `--cache-ram` | — | 🚫 | Server-only field (`common_params.cache_ram_mib`). Out of scope for the CLI subcommands. |
 | `--n-predict` shorthand `-n` | covered | ✅ | |
 | `--single-turn` / `--interactive` / `--interactive-first` / `--in-prefix` / `--in-prefix-bos` / `--in-suffix` / `--reverse-prompt` / `--multiline-input` / `--conversation` / `--display-prompt` / `--simple-io` / `--print-token-count` | — | 🚫 | Upstream's interactive REPL; chimera replaces with its own `chat` + linenoise. Do not port. |
 | `--no-warmup` | — | 🚫 | |
 | `--hf-repo` / `--hf-file` / `--hf-token` / `--model-url` / `--offline` / `--docker-repo` | — | 🚫 | Network model fetch; chimera assumes the user supplies a local path. |
 | `--cpu-mask*` / `--cpu-range*` / `--cpu-strict*` / `--prio*` / `--poll*` | — | 🚫 | Thread-affinity knobs; specialist usage. |
 | `--draft*` / `--spec-*` (~30 flags) | — | 🚫 | Speculative decoding. Out of scope until chimera grows a draft-model story. |
-| `--control-vector*` | — | ❌ | Activation steering. Cool but low demand. |
+| `--control-vector*` | same | ✅ | Landed 2026-05-20. `--control-vector PATH` (scale=1.0), `--control-vector-scaled PATH:SCALE`, `--control-vector-layer-start/-end N`. Loaded via `common_control_vector_load` and applied via `llama_set_adapter_cvec` after context init. Layer defaults: start=1, end=`llama_model_n_layer(model)`. Both load flags repeatable and comma-separable. |
 | `--diffusion-*` (algorithm/steps/eps/etc.) | — | 🚫 | llama.cpp diffusion LM support; not the same thing as `chimera sd`. |
 | `--hellaswag*` / `--winogrande*` / `--multiple-choice*` / `--ppl*` / `--kl-divergence` / `--perplexity*` | — | 🚫 | Eval-only. |
 | `--logits-output-dir` / `--save-logits` / `--save-all-logits` | — | 🚫 | |
@@ -125,6 +125,8 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 ### Notable gaps worth filing
 
 All five priorities from the original audit landed on 2026-05-20 (`--flash-attn`, grammar/json-schema, DRY + repeat-last-n, `--lora` in gen/chat, reasoning family). Residual items:
+
+0. ~~**Long-tail gen/chat closer** — 19 flags landed: `--typical`, `--top-nsigma`, `--xtc-probability`/`--xtc-threshold`, `--dynatemp-range`/`--dynatemp-exp`, `--samplers`, `--threads-batch`, `--swa-full`, `--image-min-tokens`/`--image-max-tokens`, `--cpu-moe`/`--n-cpu-moe`, `--override-tensor`/`--override-kv`, full `--control-vector*` family.~~ ✅ Landed 2026-05-20. Four upstream flags (`--keep`, `--ctx-checkpoints`, `--checkpoint-every-n-tokens`, `--cache-ram`) reclassified 🚫 — `--keep` is upstream's context-shift loop (chimera uses KV-prefix reuse; no shift), the other three are server-only `common_params` fields not consumed by the CLI subcommands.
 
 1. ~~**`--reasoning-budget` enforcement**.~~ ✅ Landed 2026-05-20. The earlier "needs `chat_sample_loop` restructure" comment turned out to be wrong on closer reading: `common_sampler_init` itself chains `common_reasoning_budget_init` into the sampler whenever the `sampling.reasoning_budget_{tokens,start,end,forced}` fields are populated, so the integration is entirely upstream of `common_sampler_init` — no sample-loop changes needed. Implementation: `command_chat` probes the active chat template once at startup via a dummy `common_chat_templates_apply`, reads `thinking_{start,end}_tag`, tokenizes with `parse_special=true`, and stuffs the result into the sampling params before `make_sampler`. Forced-termination sequence = `--reasoning-budget-message + thinking_end_tag`. Templates without thinking tags warn and ignore the budget.
 2. ~~**`--list-devices`**~~ ✅ Landed 2026-05-20 as `chimera info --list-devices`.
@@ -198,7 +200,7 @@ whisper-cli has a flat ~58-flag surface. Chimera exposes 5 of them. The result i
 | `-t / --threads` | `-t,--threads` | ✅ | |
 | `-p / --processors` | `--processors` | ✅ | Landed 2026-05-20. >1 routes through `whisper_full_parallel`; default 1 keeps the serial path. |
 | `-l / --language` | `-l,--language` | ✅ | |
-| `-dl / --detect-language` | — | ❌ | Useful as exit-after-detect mode. |
+| `-dl / --detect-language` | `--detect-language` | ✅ | Landed 2026-05-20. Sets `whisper_full_params.detect_language = true`; whisper.cpp itself short-circuits before any decode pass (see `whisper.cpp` ~line 6815 — returns 0 after `whisper_lang_auto_detect_with_state`). chimera reads the detected language via `whisper_full_lang_id(ctx)` → `whisper_lang_str(...)` and prints just the code (e.g. `en`) to the output sink, then exits. Format-file flags are silently no-op'd since `result.segments` is empty after the short-circuit. Note: English-only models (`*.en.bin`) produce garbage codes — language detection requires a multilingual model. |
 | `-tr / --translate` | `--translate` | ✅ | |
 | `--prompt` | `--prompt` | ✅ | Landed 2026-05-20. Initial-prompt biasing (`whisper_full_params.initial_prompt`). |
 | `--carry-initial-prompt` | `--carry-initial-prompt` | ✅ | Landed 2026-05-20. |
@@ -217,7 +219,7 @@ whisper-cli has a flat ~58-flag surface. Chimera exposes 5 of them. The result i
 | `-fa / --flash-attn` / `-nfa / --no-flash-attn` | `--flash-attn` | 🟡 | Landed 2026-05-20 as `--flash-attn`. `--no-flash-attn` is redundant (default is off) so not added. |
 | `-ng / --no-gpu` | `--no-gpu` | ✅ | Landed 2026-05-20. Inverts whisper's default `use_gpu=true`. |
 | `-dev / --device` | `--device` | ✅ | Landed 2026-05-20. Single CUDA device index (whisper's `gpu_device` field). Not the comma-separated list shape used by llama-side `--device`. |
-| `-di / --diarize` | — | ❌ | Stereo diarization — implemented in whisper-cli as wrapper logic, not a `whisper_full_params` field. Out of scope for now. |
+| `-di / --diarize` | `--diarize` | ✅ | Landed 2026-05-20. Wrapper-logic feature (no `whisper_full_params` field). Algorithm matches whisper-cli's `estimate_diarization_speaker`: per segment, sum `\|amplitude\|` over `[t0, t1]` for both 16 kHz channels; the 1.1× energy ratio picks `(speaker 0)`/`(speaker 1)`, otherwise `(speaker ?)`. `WavData` now retains a `per_channel` view alongside the downmixed mono so the stereo data is available; mono inputs fail before model load with a precise message. Label is both stamped on `Segment.speaker` (structured) and prefixed to `Segment.text` so existing format writers (SRT/VTT/JSON/CSV/LRC) render it without changes. |
 | `-tdrz / --tinydiarize` | `--tinydiarize` | ✅ | Landed 2026-05-20. Requires a tdrz-trained model; silently ignored on others. |
 | `-otxt / -ovtt / -osrt / -ocsv / -olrc / -oj / -ojf` | `--output-txt` / `--output-vtt` / `--output-srt` / `--output-csv` / `--output-lrc` / `--output-json` / `--output-json-full` | ✅ | Landed 2026-05-20. CLI11 rejects multi-char short flags, so long-only here (no `-osrt` aliases). All combinable; segment-level timestamps auto-enabled when any format is requested. |
 | `-owts` | — | 🚫 | Karaoke video script; depends on font/ffmpeg toolchain. |
@@ -228,7 +230,7 @@ whisper-cli has a flat ~58-flag surface. Chimera exposes 5 of them. The result i
 | `--vad` | `--vad` | ✅ | Landed 2026-05-20. Requires `--vad-model`; chimera fails with `BadInput` if the toggle is set without the model path. |
 | `--vad-model` / `--vad-threshold` / `--vad-min-speech-duration-ms` / `--vad-min-silence-duration-ms` / `--vad-max-speech-duration-s` / `--vad-speech-pad-ms` / `--vad-samples-overlap` | same | ✅ | Landed 2026-05-20. Numeric knobs inherit `whisper_vad_default_params()` when unset (negative-one sentinels). |
 | `-sns / --suppress-nst` / `--suppress-regex` | `--suppress-nst` / `--suppress-regex` | ✅ | Landed 2026-05-20. Regex is matched against token strings; empty string leaves the default. |
-| `--grammar` / `--grammar-rule` / `--grammar-penalty` | — | ❌ | Constrained decoding. |
+| `--grammar` / `--grammar-rule` / `--grammar-penalty` | same (plus `--grammar-file`) | ✅ | Landed 2026-05-20. Vendored whisper.cpp's `examples/grammar-parser.{h,cpp}` (~450 LOC, MIT) as `src/chimera/chimera_whisper_grammar.{h,cpp}` — whisper ships the parser in examples/ rather than libwhisper, so reuse meant copying. `--grammar-rule` defaults to `"root"` (whisper-cli convention); `--grammar-penalty` defaults to 100.0 (matches whisper-cli). `--grammar-file` added as a chimera-side ergonomic. Mutual-exclusion + bad-rule-name + GBNF parse errors all fire before `whisper_full` runs. The parser produces a `parse_state` whose `rules` outlive the borrowed pointer view (`c_rules()` output), so command_whisper keeps both on its stack frame for the duration of `transcribe()`. Verified end-to-end on JFK sample with a literal-string grammar — output is constrained as expected. |
 | `-dtw / --dtw` | — | ❌ | Token-level timestamps. |
 | `-oved / --ov-e-device` | — | 🚫 | OpenVINO-only. |
 | `-debug / --debug-mode` / `-np / --no-prints` / `-ps / --print-special` / `-pc / --print-colors` / `--print-confidence` / `-pp / --print-progress` / `-ls / --log-score` | — | 🚫 | Debug / logging cosmetics; chimera owns its own logging. |
@@ -242,7 +244,7 @@ whisper-cli has a flat ~58-flag surface. Chimera exposes 5 of them. The result i
 5. ~~**Offset/duration** (`-ot`, `-d`).~~ ✅ Landed 2026-05-20 as `--offset` / `--duration` (ms-based). `-on` is internal to whisper-cli's WAV reader and not exposed by `whisper_full_params`, so deliberately skipped.
 6. ~~**Segment shaping + decoder thresholds + audio-ctx + tinydiarize + suppression + flash-attn/no-gpu/device + processors.**~~ ✅ Landed 2026-05-20 as Batches 1–3 of the whisper closer (see CHANGELOG).
 
-Remaining out-of-scope or deferred (do not re-flag): `--grammar` family (needs the same grammar parser as `gen`/`chat` — bigger lift, low demand for audio), `--detect-language` exit-after-detect mode (whisper-cli wrapper logic, not a `whisper_full_params` field), stereo `--diarize` (same — wrapper logic over two-channel WAVs), `--dtw` token-level DTW (niche), `-wt / --word-thold` (we already emit per-word timing in `--output-json-full`), OpenVINO device selection.
+Remaining out-of-scope or deferred (do not re-flag): `--dtw` token-level DTW (niche), `-wt / --word-thold` (we already emit per-word timing in `--output-json-full`), OpenVINO device selection, and a handful of decoder-print toggles (`-pc/-pp/-ls/-debug/-np/-ps/--print-confidence`) where chimera owns its own logging. The `--grammar` family, stereo `--diarize`, and `--detect-language` were previously listed here; all three landed 2026-05-20 — see the whisper coverage table above.
 
 ### Deliberately omitted
 
@@ -435,4 +437,4 @@ In priority order (highest user impact first). Items struck through landed on 20
 11. ~~**sd coverage closer — Rounds 1–8 (38 flags).**~~ ✅ Landed 2026-05-20. Perf/offload (Round 1), sampler/generation (Round 2), model-loading completers (Round 3), PhotoMaker bundle (Round 4), reference images (Round 5), hires-fix bundle (Round 6), cache/SCM bundle (Round 7), `--embd-dir` (Round 8). See the per-section tables above and the CHANGELOG entry for the full enumeration.
 12. ~~**whisper coverage closer — Batches 1–3 + VAD + offset/duration (22 flags).**~~ ✅ Landed 2026-05-20.
 
-Residual open items at the close of this audit cycle: whisper `--grammar` family, whisper `--detect-language` + stereo `--diarize` (both wrapper logic). The prior `chat --reasoning-budget` enforcement gap was closed the same day — the integration turned out to be entirely upstream of `common_sampler_init`, not inside the sample loop. The prior sd `--disable-image-metadata` residual was reclassified 🚫 — chimera's stock `stb_image_write` doesn't embed any text chunks, so there is nothing to disable; a future "embed metadata" feature for parity with sd-cli's default is tracked as net-new functionality, not a port. None of the remaining open items are high-impact; all are documented in their per-section tables with a sentence explaining why they were deferred or are out of scope.
+**No residual open items at the close of this audit cycle.** Every flag on the gen/chat/embed/whisper/sd surfaces is either landed, deliberately renamed, partial-with-explanation, or explicitly out-of-scope. The remaining 🚫 rows are documented in their per-section tables with a sentence each: video-only sd modes, server-only common_params fields, llama-cli's REPL plumbing (replaced by chimera's own `chat` + linenoise), speculative decoding, training/perplexity/imatrix flags, OpenVINO and chroma/qwen tuning, low-level decoder-print toggles, and a handful of niche items where the chimera path already supplies an equivalent (e.g. `--word-thold` is moot because `--output-json-full` already emits per-word timing). The 14 prior gen/chat residuals all closed in a long-tail batch the same day — 19 flags landed (sampler nibbles, MoE offload, override-tensor/kv, control vectors, etc.) and four upstream flags reclassified 🚫 (`--keep` for architecture mismatch — chimera uses KV-prefix reuse, not context-shift; `--ctx-checkpoints`, `--checkpoint-every-n-tokens`, `--cache-ram` for server-only `common_params` fields the CLI never touches). The prior `chat --reasoning-budget` enforcement gap was closed the same day — the integration turned out to be entirely upstream of `common_sampler_init`, not inside the sample loop. The prior sd `--disable-image-metadata` residual was reclassified 🚫 — chimera's stock `stb_image_write` doesn't embed any text chunks, so there is nothing to disable; a future "embed metadata" feature for parity with sd-cli's default is tracked as net-new functionality, not a port. The three remaining whisper items are wrapper-logic features rather than param plumbing, so they're deferred as bigger lifts rather than mechanical ports.

@@ -89,6 +89,36 @@ chimera chat -m model.gguf --reasoning deepseek \
     --reasoning-budget 1024 \
     --reasoning-budget-message "Time's up. Final answer:"
 
+# Extra samplers (all sentinels default to "off" so unset is a no-op)
+chimera chat -m model.gguf --typical 0.95            # locally typical
+chimera chat -m model.gguf --top-nsigma 1.0          # nsigma truncation
+chimera chat -m model.gguf --xtc-probability 0.1 --xtc-threshold 0.15
+chimera chat -m model.gguf --dynatemp-range 0.2 --dynatemp-exp 1.2
+
+# Sampler chain ordering (matches llama-cli's --samplers shape)
+chimera chat -m model.gguf \
+    --samplers "dry;top_k;typ_p;top_p;min_p;xtc;temperature"
+
+# Vision-token budget (only meaningful with --mmproj)
+chimera gen -m model.gguf --mmproj mmproj.gguf --image cat.png -p "describe" \
+    --image-min-tokens 64 --image-max-tokens 1024
+
+# MoE expert offload (keep experts on CPU to fit a big MoE on a smaller GPU)
+chimera chat -m mixtral.gguf --cpu-moe                # all MoE on CPU
+chimera chat -m mixtral.gguf --n-cpu-moe 8            # MoE of first 8 layers on CPU
+
+# Manual tensor / KV-meta overrides (power-user)
+chimera chat -m model.gguf \
+    --override-tensor 'blk\.[0-3]\.ffn=CPU,output\.weight=CPU'
+chimera chat -m model.gguf \
+    --override-kv 'tokenizer.ggml.add_bos_token=bool:false'
+
+# Activation steering / control vectors
+chimera chat -m model.gguf --control-vector cvec.gguf
+chimera chat -m model.gguf \
+    --control-vector-scaled cvec.gguf:0.7 \
+    --control-vector-layer-start 8 --control-vector-layer-end 24
+
 # Persistent chats (off by default; data goes to the SQLite DB)
 chimera chat -m model.gguf --persist             # save every turn
 chimera chat --resume 42                         # resume saved chat #42
@@ -204,6 +234,28 @@ chimera whisper -m ggml-base.en.bin -i speech.wav \
     --processors 4                              # split decode (may degrade accuracy at chunk seams)
 chimera whisper -m ggml-base.en.bin -i tiny.wav \
     --audio-ctx 768                             # halve the audio context for tiny.en speedups
+
+# Exit-after-detect language identification (prints just the ISO code).
+# Format-file flags are no-op'd. Requires a multilingual model — *.en.bin
+# returns garbage codes because the model is single-language.
+chimera whisper -m ggml-base.bin -i unknown.wav --detect-language
+
+# Stereo speaker diarization. Requires a 2-channel WAV; each segment
+# is prefixed with '(speaker 0)' / '(speaker 1)' / '(speaker ?)' based
+# on the per-channel energy ratio over the segment's time range. Works
+# with --output-srt etc. — the prefix is embedded in the text.
+chimera whisper -m ggml-base.en.bin -i interview.wav --diarize
+chimera whisper -m ggml-base.en.bin -i interview.wav --diarize \
+    --output-srt --output-file interview
+
+# Constrained decoding (GBNF). Pin the transcript to a fixed set of
+# alternatives. --grammar-rule defaults to "root"; --grammar-penalty
+# scales the logit penalty for non-matching tokens (default 100.0).
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --grammar 'root ::= "yes" | "no" | "maybe"'
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --grammar-file fixed_phrases.gbnf --grammar-rule sentence \
+    --grammar-penalty 50.0
 ```
 
 Non-WAV input? Convert first:

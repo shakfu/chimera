@@ -81,6 +81,7 @@ set_target_properties(chimera_lib PROPERTIES
 if(CHIMERA_LINK_WHISPER)
     target_sources(chimera_lib PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/chimera_whisper.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/chimera_whisper_grammar.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_audio.cpp"
     )
     target_compile_definitions(chimera_lib PUBLIC CHIMERA_HAS_WHISPER)

@@ -99,6 +99,50 @@ struct LlamaCommonOptions {
     int  reasoning_budget = -1;
     std::string reasoning_format;      // alias of `reasoning` if specified
     std::string reasoning_budget_message;
+
+    // Extra sampler knobs. Sentinels match upstream defaults so unset
+    // means "don't touch the sampler" — typ_p=1.0 disables typical,
+    // top_n_sigma=-1 disables nsigma, xtc_probability=0 disables XTC,
+    // dynatemp_range=0 disables dynamic temperature.
+    float       typ_p             = 1.00f;
+    float       top_n_sigma       = -1.00f;
+    float       xtc_probability   = 0.00f;
+    float       xtc_threshold     = 0.10f;
+    float       dynatemp_range    = 0.00f;
+    float       dynatemp_exp      = 1.00f;
+    // Sampler chain order. Empty = leave the upstream default (which
+    // already includes the chimera-wired samplers). Accepts the same
+    // ';'-separated names as llama-cli's --samplers
+    // (e.g. "dry;top_k;typ_p;top_p;min_p;xtc;temperature").
+    std::string samplers;
+
+    // Perf
+    int  threads_batch = -1;   // -1 = mirror --threads
+    bool swa_full      = false; // full-size SWA cache
+
+    // Vision-token budget (mtmd_context_params). -1 = leave model default.
+    int  image_min_tokens = -1;
+    int  image_max_tokens = -1;
+
+    // MoE expert offload (mutually-supportive with manual --override-tensor).
+    bool cpu_moe   = false;  // keep ALL MoE experts on CPU
+    int  n_cpu_moe = 0;      // keep MoE experts of the first N layers on CPU; 0 = unused
+
+    // Manual tensor-buffer / KV-meta overrides. Each --override-tensor
+    // entry is `<pattern>=<buft_name>`; each --override-kv entry is
+    // `KEY=TYPE:VALUE` (TYPE one of int/float/bool/str). Parsed by
+    // chimera at CLI time; invalid entries exit with BadInput.
+    std::vector<std::string> override_tensor;
+    std::vector<std::string> override_kv;
+
+    // Activation-steering control vectors. Each --control-vector entry is
+    // a path (scale=1.0); each --control-vector-scaled is `path:scale`.
+    // Layer range applies to all loaded vectors; -1 means "default
+    // (1..n_layer)". Loaded after context init via llama_set_adapter_cvec.
+    std::vector<std::string> control_vector;        // path entries
+    std::vector<std::string> control_vector_scaled; // path:scale entries
+    int control_vector_layer_start = -1;
+    int control_vector_layer_end   = -1;
 };
 
 struct EmbedOptions {
@@ -247,6 +291,30 @@ struct WhisperOptions {
 
     // Parallel decode (whisper_full_parallel). 1 keeps the serial path.
     int processors = 1;
+
+    // Constrained decoding. Mutually exclusive at parse time: pass at
+    // most one of --grammar / --grammar-file. Empty grammar disables
+    // constraints regardless of --grammar-rule / --grammar-penalty.
+    // grammar_rule names the top-level rule (whisper-cli convention is
+    // "root" if the user doesn't override). grammar_penalty scales the
+    // logit penalty applied to tokens that don't extend any rule —
+    // whisper-cli default is 100.0.
+    std::string grammar;
+    std::string grammar_file;
+    std::string grammar_rule    = "root";
+    float       grammar_penalty = 100.0f;
+
+    // Stereo diarization. Requires a 2-channel WAV; chimera fails with
+    // BadInput when the input isn't stereo. Per-segment speaker labels
+    // are computed in command_whisper after each segment finalizes and
+    // prepended to the segment text — same shape as whisper-cli.
+    bool diarize = false;
+
+    // Exit-after-detect language ID. When true, whisper runs the
+    // language-detection prefix and short-circuits before the decode
+    // pass; chimera prints just the detected language code to the
+    // configured output sink and skips all format-file emission.
+    bool detect_language = false;
 };
 int command_whisper(const WhisperOptions & opts);
 #endif

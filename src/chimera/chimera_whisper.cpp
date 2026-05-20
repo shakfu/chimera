@@ -22,6 +22,7 @@
 
 #include "chimera.h"
 #include "chimera_whisper.h"
+#include "chimera_whisper_grammar.h"
 #include "whisper.h"
 
 void WhisperContextDeleter::operator()(whisper_context * ctx) const {
@@ -179,21 +180,33 @@ chimera_whisper::WavData parse_wav_stream(std::istream & in, const std::string &
     }
 
     std::vector<float> mono;
+    std::vector<std::vector<float>> per_channel;
     if (channels == 1) {
         mono = std::move(interleaved);
     } else {
         const size_t frames = interleaved.size() / channels;
+        // Split into per-channel float vectors first so the downmix
+        // and the diarize path read from the same source data without
+        // a second pass over `interleaved`.
+        per_channel.assign(channels, std::vector<float>(frames));
         mono.resize(frames, 0.0f);
         for (size_t frame = 0; frame < frames; ++frame) {
             double sum = 0.0;
             for (uint16_t ch = 0; ch < channels; ++ch) {
-                sum += interleaved[frame * channels + ch];
+                const float s = interleaved[frame * channels + ch];
+                per_channel[ch][frame] = s;
+                sum += s;
             }
             mono[frame] = static_cast<float>(sum / channels);
         }
     }
 
-    return WavData{static_cast<int>(sample_rate), static_cast<int>(channels), std::move(mono)};
+    WavData out;
+    out.sample_rate = static_cast<int>(sample_rate);
+    out.channels    = static_cast<int>(channels);
+    out.samples     = std::move(mono);
+    out.per_channel = std::move(per_channel);
+    return out;
 }
 
 // Bridges req.on_segment into whisper's C-style new_segment_callback. The
@@ -415,6 +428,37 @@ TranscribeResult transcribe(whisper_context * ctx, const TranscribeRequest & req
     }
     if (req.suppress_nst) params.suppress_nst = true;
 
+    // Exit-after-detect. whisper.cpp's whisper_full short-circuits with
+    // a return code of 0 once `state->lang_id` is set, before any decode
+    // pass — so segments come back empty and `whisper_full_lang_id`
+    // reads the detected id. Implies `language="auto"` for the runtime
+    // check inside whisper.cpp, but we don't have to touch req.language
+    // because that check is `||`-disjunctive with detect_language.
+    if (req.detect_language) params.detect_language = true;
+
+    // Grammar constraint. The vector pointed to by req.grammar_rules
+    // (a `std::vector<const whisper_grammar_element *>`) is owned by
+    // the caller and must outlive whisper_full / whisper_full_parallel.
+    // grammar_rule_index < 0 disables the constraint regardless of the
+    // other fields; the index is also bounds-checked here against the
+    // rule count so a stale request doesn't index out of range.
+    if (req.grammar_rules != nullptr && req.grammar_rule_index >= 0 &&
+        !req.grammar_rules->empty()) {
+        if (static_cast<size_t>(req.grammar_rule_index) >= req.grammar_rules->size()) {
+            fail(ExitCode::BadInput,
+                 "grammar_rule_index out of range for the parsed grammar");
+        }
+        // whisper.h declares grammar_rules as `const whisper_grammar_element **`
+        // (mutable outer pointer); our request stores a vector of
+        // `const whisper_grammar_element *`, so .data() yields
+        // `const whisper_grammar_element * const *`. Strip the outer const —
+        // whisper.cpp only reads through the pointer, never mutates.
+        params.grammar_rules   = const_cast<const whisper_grammar_element **>(req.grammar_rules->data());
+        params.n_grammar_rules = req.grammar_rules->size();
+        params.i_start_rule    = static_cast<size_t>(req.grammar_rule_index);
+        params.grammar_penalty = req.grammar_penalty;
+    }
+
     StreamingCallbackCtx cb_ctx{&req.on_segment};
     if (req.on_segment) {
         params.new_segment_callback = streaming_segment_cb;
@@ -506,7 +550,7 @@ TranscribeResult transcribe(whisper_context * ctx, const TranscribeRequest & req
         result.text += s.text;
         result.segments.push_back(std::move(s));
     }
-    if (req.language == "auto") {
+    if (req.language == "auto" || req.detect_language) {
         const int lang_id = whisper_full_lang_id(ctx);
         if (lang_id >= 0) {
             if (const char * code = whisper_lang_str(lang_id)) {
@@ -710,9 +754,67 @@ int command_whisper(const WhisperOptions & opts) {
     if (opts.model.empty() || opts.input.empty()) {
         fail(ExitCode::BadInput, "whisper requires --model and --input");
     }
+    // Fast checks before paying the WAV-load cost: mutually-exclusive
+    // grammar sources. Detailed parse-time errors (bad rule name, GBNF
+    // syntax) still surface below — those need the full grammar source.
+    if (!opts.grammar.empty() && !opts.grammar_file.empty()) {
+        fail(ExitCode::BadInput,
+             "use only one of --grammar or --grammar-file");
+    }
 
     auto wav = chimera_whisper::load_wav_file(opts.input);
     auto audio = chimera_whisper::resample_linear(wav.samples, wav.sample_rate, WHISPER_SAMPLE_RATE);
+
+    // Stereo diarization. We need both channels at 16 kHz for the
+    // energy-ratio classifier; mono inputs fail with a precise message
+    // (mirrors whisper-cli's behavior where --diarize is a stereo-only
+    // feature). Each channel is resampled independently so the
+    // per-channel sample count matches `audio` and segment-time -> sample
+    // arithmetic uses one rate everywhere.
+    std::vector<std::vector<float>> diarize_16k;
+    if (opts.diarize) {
+        if (wav.channels != 2) {
+            fail(ExitCode::BadInput,
+                 "--diarize requires a 2-channel (stereo) WAV input; got " +
+                 std::to_string(wav.channels) +
+                 (wav.channels == 1 ? "-channel (mono)" : "-channel") + " audio");
+        }
+        if (wav.per_channel.size() != 2) {
+            // Defensive: WAV parser should populate per_channel whenever
+            // channels > 1. If it didn't (parser change?), bail loudly
+            // rather than silently producing all-"(speaker ?)" segments.
+            fail(ExitCode::Runtime,
+                 "internal: stereo WAV has no per_channel data — refusing to diarize");
+        }
+        diarize_16k.resize(2);
+        for (int c = 0; c < 2; ++c) {
+            diarize_16k[c] = chimera_whisper::resample_linear(
+                wav.per_channel[c], wav.sample_rate, WHISPER_SAMPLE_RATE);
+        }
+    }
+    // Energy-ratio classifier matching whisper-cli's
+    // estimate_diarization_speaker: sum |amplitude| over [t0,t1] in 16kHz
+    // samples for both channels; 1.1x ratio threshold picks a speaker,
+    // otherwise "?". t0/t1 are in 10ms units.
+    auto estimate_speaker = [&](int64_t t0, int64_t t1) -> std::string {
+        if (diarize_16k.size() != 2) return "";
+        const int64_t n_samples = static_cast<int64_t>(diarize_16k[0].size());
+        const auto clamp = [&](int64_t t) -> int64_t {
+            int64_t s = (t * WHISPER_SAMPLE_RATE) / 100;
+            if (s < 0)         s = 0;
+            if (s > n_samples) s = n_samples;
+            return s;
+        };
+        const int64_t is0 = clamp(t0);
+        const int64_t is1 = clamp(t1);
+        double e0 = 0.0, e1 = 0.0;
+        for (int64_t j = is0; j < is1; ++j) {
+            e0 += std::fabs(diarize_16k[0][j]);
+            e1 += std::fabs(diarize_16k[1][j]);
+        }
+        const char * id = (e0 > 1.1 * e1) ? "0" : (e1 > 1.1 * e0) ? "1" : "?";
+        return std::string("(speaker ") + id + ")";
+    };
 
     chimera_whisper::LoadParams lp;
     lp.model      = opts.model;
@@ -776,6 +878,50 @@ int command_whisper(const WhisperOptions & opts) {
     req.suppress_regex     = opts.suppress_regex;
     req.suppress_nst       = opts.suppress_nst;
     req.processors         = opts.processors;
+    req.detect_language    = opts.detect_language;
+
+    // Grammar constraint. parse_state + c_rules() output both live on
+    // this stack frame for the duration of transcribe(). c_rules()
+    // builds a vector<const whisper_grammar_element *> by taking the
+    // address of each row of parse_state.rules, so parse_state must
+    // outlive the borrowed pointer view.
+    grammar_parser::parse_state grammar_state;
+    std::vector<const whisper_grammar_element *> grammar_c_rules;
+    std::string grammar_src = opts.grammar;
+    if (grammar_src.empty() && !opts.grammar_file.empty()) {
+        std::ifstream f(opts.grammar_file);
+        if (!f) {
+            fail(ExitCode::BadInput,
+                 "failed to open --grammar-file: " + opts.grammar_file);
+        }
+        std::stringstream ss;
+        ss << f.rdbuf();
+        grammar_src = ss.str();
+    }
+    if (!grammar_src.empty()) {
+        try {
+            grammar_state = grammar_parser::parse(grammar_src.c_str());
+        } catch (const std::exception & e) {
+            fail(ExitCode::BadInput,
+                 std::string("--grammar parse failed: ") + e.what());
+        }
+        if (grammar_state.rules.empty()) {
+            fail(ExitCode::BadInput,
+                 "--grammar parsed but produced no rules");
+        }
+        const auto it = grammar_state.symbol_ids.find(opts.grammar_rule);
+        if (it == grammar_state.symbol_ids.end()) {
+            fail(ExitCode::BadInput,
+                 "--grammar-rule '" + opts.grammar_rule +
+                 "' not found in the parsed grammar (top-level rules must "
+                 "be declared with `rule ::= ...`)");
+        }
+        grammar_c_rules    = grammar_state.c_rules();
+        req.grammar_rules  = &grammar_c_rules;
+        req.grammar_rule_index = static_cast<int>(it->second);
+        req.grammar_penalty    = opts.grammar_penalty;
+    }
+
     // -ojf needs per-word timing on top of segment-level timing.
     req.word_timestamps = opts.out_json_full;
     // Stream each finalized segment as soon as whisper.cpp emits it. Same
@@ -788,10 +934,46 @@ int command_whisper(const WhisperOptions & opts) {
                  << chimera_whisper::format_timestamp_10ms(s.t1)
                  << "] ";
         }
+        if (opts.diarize) {
+            // Speaker label is computed once per segment here and reused
+            // when stamping result.segments below — the energy-ratio
+            // function is fast enough that running it twice would be
+            // fine, but the lambda is the only place where this segment
+            // is identifiable, so we compute it here and rely on the
+            // post-transcribe walk to keep result.segments in sync.
+            *out << estimate_speaker(s.t0, s.t1) << ' ';
+        }
         *out << s.text << '\n' << std::flush;
     };
 
     auto result = chimera_whisper::transcribe(ctx.get(), req);
+
+    // --detect-language short-circuit. whisper_full returns before
+    // running any decode pass, so result has no segments. Emit just
+    // the detected language code (or `?` if detection itself failed)
+    // and skip all the streaming + format-file plumbing below. The
+    // output goes to the same sink as a normal transcript would
+    // (-o file when set, stdout otherwise) so users can pipe it.
+    if (opts.detect_language) {
+        const std::string code = result.detected_language.empty()
+            ? std::string("?") : result.detected_language;
+        *out << code << '\n' << std::flush;
+        return 0;
+    }
+
+    // For --diarize, stamp each finalized segment with its speaker
+    // label so the SRT/VTT/JSON/CSV/LRC writers below see it. The label
+    // is written into `segment.speaker` (structured) and also prefixed
+    // onto `segment.text` (so existing format writers, which only look
+    // at .text, render the prefix verbatim without further changes).
+    if (opts.diarize && diarize_16k.size() == 2) {
+        for (auto & s : result.segments) {
+            s.speaker = estimate_speaker(s.t0, s.t1);
+            if (!s.speaker.empty()) {
+                s.text = s.speaker + ' ' + s.text;
+            }
+        }
+    }
 
     if (any_format) {
         const std::string base = opts.output_file_base.empty()

@@ -337,8 +337,60 @@ std::vector<ggml_backend_dev_t> resolve_devices(const std::string & devices_csv)
 // `params` that must stay valid until the model load completes.
 struct ModelExtras {
     std::vector<ggml_backend_dev_t> devices_storage;
-    std::vector<float> tensor_split_storage;
+    std::vector<float>              tensor_split_storage;
+    // Backing storage for --override-tensor / --cpu-moe / --n-cpu-moe.
+    // The std::string entries hold the regex patterns; llama_model_params
+    // borrows `const char *` into them, so this vector must outlive the
+    // llama_model_load_from_file call.
+    std::vector<std::string>                             buft_pattern_storage;
+    std::vector<llama_model_tensor_buft_override>        buft_overrides_storage;
+    std::vector<llama_model_kv_override>                 kv_overrides_storage;
 };
+
+// Build a name→buft map by enumerating ggml backend devices. Mirrors
+// llama-cli's parse_tensor_buffer_overrides without reusing the (static)
+// upstream copy.
+std::map<std::string, ggml_backend_buffer_type_t> backend_buft_table() {
+    ggml_backend_load_all();
+    std::map<std::string, ggml_backend_buffer_type_t> out;
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        auto * dev  = ggml_backend_dev_get(i);
+        auto * buft = ggml_backend_dev_buffer_type(dev);
+        if (buft) out[ggml_backend_buft_name(buft)] = buft;
+    }
+    return out;
+}
+
+// Parse a single --override-tensor entry `<pattern>=<buft_name>` and
+// append to extras.buft_overrides_storage / buft_pattern_storage.
+void append_tensor_buft_override(ModelExtras & extras,
+                                 const std::string & spec) {
+    const auto eq = spec.find('=');
+    if (eq == std::string::npos || eq == 0 || eq + 1 == spec.size()) {
+        fail(ExitCode::BadInput,
+             "--override-tensor expects '<pattern>=<buft>', got: '" + spec + "'");
+    }
+    static thread_local std::map<std::string, ggml_backend_buffer_type_t> bufts;
+    if (bufts.empty()) bufts = backend_buft_table();
+    const std::string pat   = spec.substr(0, eq);
+    const std::string bname = spec.substr(eq + 1);
+    auto it = bufts.find(bname);
+    if (it == bufts.end()) {
+        std::string known;
+        for (const auto & kv : bufts) {
+            if (!known.empty()) known += ", ";
+            known += kv.first;
+        }
+        fail(ExitCode::BadInput,
+             "--override-tensor: unknown buffer type '" + bname +
+             "' (available: " + known + ")");
+    }
+    extras.buft_pattern_storage.push_back(pat);
+    llama_model_tensor_buft_override o{};
+    o.pattern = extras.buft_pattern_storage.back().c_str();
+    o.buft    = it->second;
+    extras.buft_overrides_storage.push_back(o);
+}
 
 void apply_model_common(llama_model_params & params,
                         ModelExtras & extras,
@@ -347,7 +399,11 @@ void apply_model_common(llama_model_params & params,
                         int main_gpu,
                         const std::string & tensor_split_csv,
                         const std::string & split_mode_name,
-                        const std::string & devices_csv) {
+                        const std::string & devices_csv,
+                        bool cpu_moe,
+                        int  n_cpu_moe,
+                        const std::vector<std::string> & override_tensor,
+                        const std::vector<std::string> & override_kv) {
     params.use_mmap  = use_mmap;
     params.use_mlock = use_mlock;
     params.main_gpu  = main_gpu;
@@ -365,6 +421,58 @@ void apply_model_common(llama_model_params & params,
         if (!extras.devices_storage.empty()) {
             params.devices = extras.devices_storage.data();
         }
+    }
+
+    // Tensor buffer-type overrides. Three sources can populate the same
+    // vector: --cpu-moe, --n-cpu-moe, --override-tensor. They stack —
+    // matching llama-cli's behavior — and the resulting array is passed
+    // to llama_model_params.tensor_buft_overrides.
+    if (cpu_moe) {
+        // Use upstream's inline helper for the regex pattern.
+        auto o = llm_ffn_exps_cpu_override();
+        // The pattern lives in a static string upstream so we don't have
+        // to back it ourselves.
+        extras.buft_overrides_storage.push_back(o);
+    }
+    for (int i = 0; i < n_cpu_moe; ++i) {
+        extras.buft_pattern_storage.push_back(llm_ffn_exps_block_regex(i));
+        llama_model_tensor_buft_override o{};
+        o.pattern = extras.buft_pattern_storage.back().c_str();
+        o.buft    = ggml_backend_cpu_buffer_type();
+        extras.buft_overrides_storage.push_back(o);
+    }
+    for (const auto & spec : override_tensor) {
+        for (const auto & item : split_csv(spec)) {
+            append_tensor_buft_override(extras, item);
+        }
+    }
+    if (!extras.buft_overrides_storage.empty()) {
+        // llama expects a sentinel-terminated array (last entry has
+        // pattern == nullptr).
+        llama_model_tensor_buft_override sentinel{};
+        sentinel.pattern = nullptr;
+        extras.buft_overrides_storage.push_back(sentinel);
+        params.tensor_buft_overrides = extras.buft_overrides_storage.data();
+    }
+
+    // KV-meta overrides. Parsed via upstream helper so we get the same
+    // KEY=TYPE:VALUE grammar (int/float/bool/str). Each --override-kv
+    // CLI entry may itself be comma-separated.
+    for (const auto & spec : override_kv) {
+        for (const auto & item : split_csv(spec)) {
+            if (!string_parse_kv_override(item.c_str(), extras.kv_overrides_storage)) {
+                fail(ExitCode::BadInput,
+                     "--override-kv: invalid entry '" + item +
+                     "' (expected KEY=TYPE:VALUE with TYPE in int/float/bool/str)");
+            }
+        }
+    }
+    if (!extras.kv_overrides_storage.empty()) {
+        // Terminator: an entry with an empty key.
+        llama_model_kv_override term{};
+        term.key[0] = 0;
+        extras.kv_overrides_storage.push_back(term);
+        params.kv_overrides = extras.kv_overrides_storage.data();
     }
 }
 
@@ -419,7 +527,9 @@ LlamaModelPtr load_llama_model(const LlamaCommonOptions & opts) {
     apply_model_common(params, extras,
                        opts.use_mmap, opts.use_mlock,
                        opts.main_gpu, opts.tensor_split,
-                       opts.split_mode, opts.devices);
+                       opts.split_mode, opts.devices,
+                       opts.cpu_moe, opts.n_cpu_moe,
+                       opts.override_tensor, opts.override_kv);
 
     LlamaModelPtr model(llama_model_load_from_file(opts.model.c_str(), params));
     if (!model) {
@@ -437,8 +547,11 @@ LlamaContextPtr new_llama_context(llama_model * model, const LlamaCommonOptions 
     params.n_batch = std::max<uint32_t>(1, opts.n_batch);
     params.n_ubatch = opts.n_ubatch > 0 ? opts.n_ubatch : params.n_batch;
     params.n_threads = opts.threads;
-    params.n_threads_batch = opts.threads;
+    params.n_threads_batch = opts.threads_batch > 0 ? opts.threads_batch : opts.threads;
     params.no_perf = true;
+    if (opts.swa_full) {
+        params.swa_full = true;
+    }
 
     if (opts.flash_attn) {
         params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
@@ -472,6 +585,51 @@ LlamaContextPtr new_llama_context(llama_model * model, const LlamaCommonOptions 
     if (!ctx) {
         fail(ExitCode::Load, "failed to create llama context");
     }
+
+    // Activation steering. --control-vector takes plain paths (scale=1.0);
+    // --control-vector-scaled takes "path:scale" entries. Both stack into
+    // the same load-info vector. Layer range defaults — start at 1,
+    // end at n_layer — mirror common_init_from_params at common.cpp:1291.
+    // We do this here (rather than in load_llama_model) because
+    // llama_set_adapter_cvec needs the context, not just the model.
+    if (!opts.control_vector.empty() || !opts.control_vector_scaled.empty()) {
+        std::vector<common_control_vector_load_info> load_infos;
+        for (const auto & raw : opts.control_vector) {
+            for (const auto & item : split_csv(raw)) {
+                if (!item.empty()) load_infos.push_back({1.0f, item});
+            }
+        }
+        for (const auto & raw : opts.control_vector_scaled) {
+            for (const auto & item : split_csv(raw)) {
+                const auto colon = item.rfind(':');
+                if (colon == std::string::npos) {
+                    fail(ExitCode::BadInput,
+                         "--control-vector-scaled expects 'path:scale', got: '" + item + "'");
+                }
+                try {
+                    const float scale = std::stof(item.substr(colon + 1));
+                    load_infos.push_back({scale, item.substr(0, colon)});
+                } catch (const std::exception &) {
+                    fail(ExitCode::BadInput,
+                         "--control-vector-scaled: invalid scale in '" + item + "'");
+                }
+            }
+        }
+        const auto cvec = common_control_vector_load(load_infos);
+        if (cvec.n_embd == -1) {
+            fail(ExitCode::Load, "failed to load control vectors");
+        }
+        const int layer_start = opts.control_vector_layer_start > 0
+            ? opts.control_vector_layer_start : 1;
+        const int layer_end   = opts.control_vector_layer_end   > 0
+            ? opts.control_vector_layer_end   : llama_model_n_layer(model);
+        if (llama_set_adapter_cvec(ctx.get(),
+                                    cvec.data.data(), cvec.data.size(),
+                                    cvec.n_embd, layer_start, layer_end) != 0) {
+            fail(ExitCode::Load, "llama_set_adapter_cvec failed");
+        }
+    }
+
     return ctx;
 }
 
@@ -740,6 +898,32 @@ common_sampler_ptr make_sampler(const llama_model *           model,
     }
     sampling.ignore_eos = opts.ignore_eos;
     sampling.no_perf = true;
+    // Wave-1 sampler knobs. Sentinels match upstream defaults so unset
+    // values are no-ops — we copy unconditionally to keep this short.
+    sampling.typ_p             = opts.typ_p;
+    sampling.top_n_sigma       = opts.top_n_sigma;
+    sampling.xtc_probability   = opts.xtc_probability;
+    sampling.xtc_threshold     = opts.xtc_threshold;
+    sampling.dynatemp_range    = opts.dynatemp_range;
+    sampling.dynatemp_exponent = opts.dynatemp_exp;
+    // Sampler chain ordering. Empty string keeps the upstream default
+    // chain; otherwise we parse the ';'-separated name list with
+    // allow_alt_names=true (matches llama-cli's --samplers parsing).
+    if (!opts.samplers.empty()) {
+        std::vector<std::string> names;
+        size_t pos = 0;
+        while (pos < opts.samplers.size()) {
+            size_t sc = opts.samplers.find(';', pos);
+            names.push_back(opts.samplers.substr(pos, sc == std::string::npos ? std::string::npos : sc - pos));
+            if (sc == std::string::npos) break;
+            pos = sc + 1;
+        }
+        sampling.samplers = common_sampler_types_from_names(names, /*allow_alt_names=*/true);
+        if (sampling.samplers.empty()) {
+            fail(ExitCode::BadInput,
+                 "--samplers parsed to an empty chain from value: '" + opts.samplers + "'");
+        }
+    }
 
     for (const auto & spec : opts.logit_bias) {
         llama_logit_bias lb{};
@@ -827,6 +1011,8 @@ std::string run_generation_mtmd(
     if (opts.flash_attn) {
         mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     }
+    if (opts.image_min_tokens > 0) mparams.image_min_tokens = opts.image_min_tokens;
+    if (opts.image_max_tokens > 0) mparams.image_max_tokens = opts.image_max_tokens;
 
     MtmdContextPtr mctx(mtmd_init_from_file(opts.mmproj.c_str(), model, mparams));
     if (!mctx) {
@@ -1239,6 +1425,8 @@ int command_chat(const LlamaCommonOptions & opts,
         if (opts.flash_attn) {
             mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
         }
+        if (opts.image_min_tokens > 0) mparams.image_min_tokens = opts.image_min_tokens;
+        if (opts.image_max_tokens > 0) mparams.image_max_tokens = opts.image_max_tokens;
         mctx.reset(mtmd_init_from_file(opts.mmproj.c_str(), model.get(), mparams));
         spinner.stop();
         if (!mctx) {
@@ -2874,6 +3062,60 @@ void bind_llama_common_opts(CLI::App * cmd, LlamaCommonOptions & o) {
     // mmproj offload
     cmd->add_flag("!--no-mmproj-offload", o.mmproj_use_gpu,
         "Run the multimodal projector on CPU (defaults to GPU)");
+
+    // Extra samplers (Wave 1: typical / top-nsigma / xtc / dynatemp).
+    cmd->add_option("--typical", o.typ_p,
+        "Locally typical-p sampling (1.0 = disabled)");
+    cmd->add_option("--top-nsigma", o.top_n_sigma,
+        "top-n-sigma sampling (-1 = disabled)");
+    cmd->add_option("--xtc-probability", o.xtc_probability,
+        "XTC sampler: probability of removing a top token (0 = disabled)");
+    cmd->add_option("--xtc-threshold", o.xtc_threshold,
+        "XTC sampler: probability threshold (values > 0.5 also disable XTC)");
+    cmd->add_option("--dynatemp-range", o.dynatemp_range,
+        "Dynamic temperature range (0 = disabled)");
+    cmd->add_option("--dynatemp-exp", o.dynatemp_exp,
+        "Dynamic temperature exponent (entropy→temperature mapping)");
+    cmd->add_option("--samplers", o.samplers,
+        "Sampler chain order, ';'-separated. Example: "
+        "\"dry;top_k;typ_p;top_p;min_p;xtc;temperature\". Empty = upstream default.");
+
+    // Perf
+    cmd->add_option("--threads-batch", o.threads_batch,
+        "Threads for batch (prompt-prefill) processing; -1 = mirror --threads");
+    cmd->add_flag("--swa-full", o.swa_full,
+        "Use the full-size SWA cache (slower but exposes the full window)");
+
+    // Vision-token budget (mtmd_context_params; only meaningful with --mmproj).
+    cmd->add_option("--image-min-tokens", o.image_min_tokens,
+        "Minimum tokens per image (-1 = leave model default)");
+    cmd->add_option("--image-max-tokens", o.image_max_tokens,
+        "Maximum tokens per image (-1 = leave model default)");
+
+    // MoE expert offload (manipulates tensor_buft_overrides under the hood).
+    cmd->add_flag("--cpu-moe", o.cpu_moe,
+        "Keep ALL Mixture-of-Experts weights on CPU");
+    cmd->add_option("--n-cpu-moe", o.n_cpu_moe,
+        "Keep MoE weights of the first N layers on CPU (0 = unused)");
+
+    // Manual tensor / KV overrides.
+    cmd->add_option("--override-tensor", o.override_tensor,
+        "Override a tensor's buffer type: '<pattern>=<buft_name>' (repeatable; "
+        "each entry may itself be comma-separated). Use `chimera info --list-devices` "
+        "to discover the buffer type names sd ggml knows.");
+    cmd->add_option("--override-kv", o.override_kv,
+        "Override model KV metadata: 'KEY=TYPE:VALUE' with TYPE in int/float/bool/str "
+        "(repeatable; comma-separated)");
+
+    // Activation steering.
+    cmd->add_option("--control-vector", o.control_vector,
+        "Path to a control-vector file (scale=1.0; repeatable; comma-separated)");
+    cmd->add_option("--control-vector-scaled", o.control_vector_scaled,
+        "Path:scale pair for a control vector (e.g. 'cvec.gguf:0.8'; repeatable; comma-separated)");
+    cmd->add_option("--control-vector-layer-start", o.control_vector_layer_start,
+        "First layer index to apply control vectors at (default: 1)");
+    cmd->add_option("--control-vector-layer-end", o.control_vector_layer_end,
+        "Last layer index to apply control vectors at (default: n_layer)");
 }
 
 void bind_gen_cmd(CLI::App & app, ParsedCli & p) {
@@ -3141,6 +3383,23 @@ void bind_whisper_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--processors", p.whisper_opts.processors,
         "Split decode across N processors via whisper_full_parallel (1 = serial; "
         ">1 may degrade accuracy near chunk boundaries)");
+    // Grammar (constrained decoding). --grammar and --grammar-file are
+    // mutually exclusive; checked in command_whisper before model load.
+    cmd->add_option("--grammar", p.whisper_opts.grammar,
+        "GBNF grammar literal that constrains decoding (mutually exclusive with --grammar-file)");
+    cmd->add_option("--grammar-file", p.whisper_opts.grammar_file,
+        "Read the GBNF grammar from FILE (mutually exclusive with --grammar)");
+    cmd->add_option("--grammar-rule", p.whisper_opts.grammar_rule,
+        "Top-level GBNF rule name (default: 'root')");
+    cmd->add_option("--grammar-penalty", p.whisper_opts.grammar_penalty,
+        "Logit penalty for tokens that don't extend the grammar (default: 100.0)");
+    cmd->add_flag("--diarize", p.whisper_opts.diarize,
+        "Stereo speaker diarization. Requires a 2-channel WAV; each segment "
+        "is prefixed with '(speaker 0)' / '(speaker 1)' / '(speaker ?)' based "
+        "on the per-channel energy ratio over the segment's time range.");
+    cmd->add_flag("--detect-language", p.whisper_opts.detect_language,
+        "Detect the spoken language and exit (prints e.g. 'en'). No "
+        "transcription is produced; format-file flags are ignored.");
     p.whisper_cmd = cmd;
 }
 #endif

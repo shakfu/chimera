@@ -15,6 +15,11 @@
 #include <vector>
 
 struct whisper_context;
+// Forward decl for the grammar element. whisper.h defines this as a
+// `typedef struct whisper_grammar_element { ... }` so the struct tag
+// is sufficient; consumers that actually look inside the struct
+// (chimera_whisper.cpp + chimera_whisper_grammar.cpp) include whisper.h.
+struct whisper_grammar_element;
 
 struct WhisperContextDeleter {
     void operator()(whisper_context * ctx) const;
@@ -41,6 +46,11 @@ struct Segment {
     int64_t           t1;   // end,   10ms units
     std::string       text;
     std::vector<Word> words;
+    // Optional speaker label, populated by `whisper --diarize` only.
+    // Empty for non-diarize transcripts. Format mirrors whisper-cli:
+    // "(speaker 0)" / "(speaker 1)" / "(speaker ?)" — including the
+    // parens — so it can be prepended verbatim to text.
+    std::string speaker;
 };
 
 struct TranscribeRequest {
@@ -127,6 +137,23 @@ struct TranscribeRequest {
     // accuracy at chunk boundaries, so default 1 keeps the serial path.
     int processors = 1;
 
+    // Optional GBNF grammar constraint. `grammar_rules` is the C-pointer
+    // view that transcribe() borrows into whisper_full_params, so its
+    // backing parse_state (held by the caller) must outlive the call.
+    // `grammar_rule_index` is the start-rule index inside that vector
+    // (resolved by name in command_whisper before this struct is built);
+    // -1 disables grammar regardless of the other fields.
+    const std::vector<const whisper_grammar_element *> * grammar_rules = nullptr;
+    int   grammar_rule_index = -1;
+    float grammar_penalty    = 100.0f;
+
+    // Exit-after-detect language identification. When true, whisper.cpp
+    // runs `whisper_lang_auto_detect_with_state` and returns from
+    // `whisper_full` before any decode steps — the resulting TranscribeResult
+    // has the language in `.detected_language` and zero segments. Useful
+    // as a probe before committing to a full transcription run.
+    bool detect_language = false;
+
     // Optional callback invoked from whisper's new_segment_callback for each
     // finalized segment as it arrives. Used by the CLI for streaming output;
     // HTTP handlers can omit this and read TranscribeResult::segments after.
@@ -164,6 +191,11 @@ struct WavData {
     int                sample_rate = 0;
     int                channels    = 0;
     std::vector<float> samples;   // interleaved-then-downmixed to mono
+    // Per-channel float view in source order, populated only when
+    // channels > 1 (mono inputs leave this empty — `samples` already is
+    // the lone channel). Used by `whisper --diarize` for stereo speaker
+    // estimation; other consumers can ignore.
+    std::vector<std::vector<float>> per_channel;
 };
 
 // Parse a RIFF/WAVE byte buffer (PCM int8/16/24/32 or float32). Throws
