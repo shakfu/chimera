@@ -334,12 +334,36 @@ else()
     if(CHIMERA_LINK_SD)
         list(APPEND _CHIMERA_MODALITY_LIBS ${LIB_SD})
     endif()
+    # Windows / MSVC: backend libs (ggml-cuda, ggml-vulkan, ...) must be on
+    # the link line or ggml-backend-reg.obj's direct calls to
+    # ggml_backend_cuda_reg / ggml_backend_vulkan_reg / ... go unresolved.
+    # ggml-backend-reg.obj is compiled with GGML_USE_<BACKEND> defined by
+    # the deps step, so these references are present unconditionally
+    # whenever the matching backend is enabled. MSVC's linker is multi-pass
+    # for static libs, so no start-group/end-group equivalent is needed.
+    set(_CHIMERA_GGML_BACKEND_LIBS "")
+    if(GGML_CUDA)
+        list(APPEND _CHIMERA_GGML_BACKEND_LIBS ${LIB_GGML_CUDA})
+    endif()
+    if(GGML_VULKAN)
+        list(APPEND _CHIMERA_GGML_BACKEND_LIBS ${LIB_GGML_VULKAN})
+    endif()
+    if(GGML_SYCL)
+        list(APPEND _CHIMERA_GGML_BACKEND_LIBS ${LIB_GGML_SYCL})
+    endif()
+    if(GGML_HIP)
+        list(APPEND _CHIMERA_GGML_BACKEND_LIBS ${LIB_GGML_HIP})
+    endif()
+    if(GGML_OPENCL)
+        list(APPEND _CHIMERA_GGML_BACKEND_LIBS ${LIB_GGML_OPENCL})
+    endif()
     target_link_libraries(chimera_lib PUBLIC
         ${LIB_LLAMA}
         ${LIB_LLAMA_COMMON}
         ${LIB_GGML}
         ${LIB_GGML_BASE}
         ${LIB_GGML_CPU}
+        ${_CHIMERA_GGML_BACKEND_LIBS}
         ${LIB_MTMD}
         ${LIB_SERVER_CONTEXT}
         ${LIB_CPP_HTTPLIB}
@@ -347,6 +371,7 @@ else()
         ${SYSTEM_LIBS}
     )
     unset(_CHIMERA_MODALITY_LIBS)
+    unset(_CHIMERA_GGML_BACKEND_LIBS)
 endif()
 
 if(CHIMERA_LINK_LINENOISE)
