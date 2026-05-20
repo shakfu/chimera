@@ -6,6 +6,22 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Added
 
+- `chimera sd` perf + RNG knobs (Tier 2 of the audit in `doc/dev/cli-api-coverage.md`):
+  - `--diffusion-conv-direct` and `--vae-conv-direct`: wire `sd_ctx_params_t.diffusion_conv_direct` / `vae_conv_direct`. Measurable perf win on modern dGPUs.
+  - `--rng <std_default|cuda|cpu>` and `--sampler-rng <std_default|cuda|cpu>`: map to `sd_ctx_params_t.rng_type` / `sampler_rng_type` via `str_to_rng_type`; unknown values exit with `BadInput`. `--sampler-rng cpu` is what matches ComfyUI seeds across implementations.
+
+- `chimera embed` output-shape gaps (Tier 2 of the audit):
+  - `--embd-output-format <fmt>` with values `''` (default; current space-separated-floats output, byte-for-byte preserved), `array` (JSON array — single `[..]` for one vector, `[[..],[..]]` for multiple), `json` (OpenAI-style `{"object":"list","data":[{"object":"embedding","index":N,"embedding":[...]},...],"model":"..."}` envelope), `raw` (one float per line, blank line between vectors). Unknown values exit with `BadInput` before model load.
+  - `--embd-separator <str>` literal-string splitter: when set, the input is split on the separator and one vector is emitted per piece. Mirrors `llama-embedding --embd-separator`.
+  - `--attention <causal|non-causal>` pins `llama_context_params.attention_type` for the embedding pass. Empty (default) leaves the model's training-time choice in place. Required override for some encoder checkpoints.
+  - `--pooling rank` now accepted (in addition to `mean|cls|last|none`), so the existing `embed` subcommand can drive cross-encoder reranker checkpoints (`LLAMA_POOLING_TYPE_RANK`).
+
+- `chimera sd` ControlNet + VAE tiling + finish-the-model-loading-story bundle (Tier 1 of the audit in `doc/dev/cli-api-coverage.md`):
+  - ControlNet: `--control-net <model>` (loads the ControlNet alongside the diffusion model), `--control-image <path>` (conditioning image; must match `-W`/`-H`), `--control-strength <f>` (default 0.9). `--control-image` requires `--control-net` and fails at parse time otherwise.
+  - VAE tiling: `--vae-tiling` (toggle) plus `--vae-tile-size <px>` (absolute, both axes), `--vae-relative-tile-size <f>` (fraction of canvas, both axes), `--vae-tile-overlap <f>` (fractional overlap). All three knobs are optional sentinels; unset values leave `sd_tiling_params_t` defaults in place. Lets large outputs render without OOM at a small quality cost.
+  - Model-loading completers: `--clip-g <path>` (CLIP-G text encoder for SDXL split layouts — paired with the existing `--clip-l`), `--type <wtype>` (weights type override, e.g. `f16`/`q8_0`/`bf16`; unknown values exit with `BadInput`), `--lora <path[:scale]>` (repeatable, scale defaults to 1.0; mirrors the `serve`/`gen`/`chat` parser), `--lora-model-dir <dir>` (base directory used to resolve relative `--lora` paths so prompt-style names work without per-file absolute paths).
+  - Closes the asymmetry where `--lora` had landed on `serve`/`gen`/`chat` but not on `sd`. Smoke verified via `make test` (44/44 pass).
+
 - `chimera sd` `--guidance` and `--flow-shift`. Both map to `sd_sample_params_t` (`guidance.distilled_guidance`, `flow_shift`). Sentinel `-1` leaves the upstream default in place, so existing invocations are unchanged. Closes the Flux/SD3 generation-side gap that paralleled the earlier Z-Image model-loading fix.
 
 - `chimera whisper` decoding-strategy flags: `--prompt` (vocabulary/style biasing — the most-requested missing flag), `--carry-initial-prompt`, `--beam-size N` (switches to `WHISPER_SAMPLING_BEAM_SEARCH`), `--best-of N` (greedy), `--temperature`, `--no-fallback` (sets `temperature_inc<0` to disable the temperature-fallback ladder). Wired through `chimera_whisper::TranscribeRequest`. Smoke-validated on `ggml-base.en` + JFK sample with `--beam-size 5 --temperature 0 --no-fallback --prompt`.

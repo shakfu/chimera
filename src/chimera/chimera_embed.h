@@ -24,7 +24,11 @@ namespace chimera_embed {
 
 struct Config {
     std::string model;                  // GGUF path
-    std::string pooling = "mean";       // mean | cls | last | none
+    std::string pooling = "mean";       // mean | cls | last | none | rank
+    // Attention type override for the embedding pass. Empty leaves the
+    // model's training-time default in place; "causal" / "non-causal"
+    // pin llama.cpp's `attention_type` for encoders that mis-detect.
+    std::string attention;
     int         threads = -1;
     int         gpu_layers = 0;
     uint32_t    n_ctx = 0;              // 0 = model's training context

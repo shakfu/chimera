@@ -105,7 +105,17 @@ struct EmbedOptions {
     std::string input;
     std::string input_file;
     std::string output;            // empty = stdout
-    std::string pooling = "mean";  // mean | cls | last | none
+    std::string pooling = "mean";  // mean | cls | last | none | rank
+    // Output format: empty (default; space-separated floats per line),
+    // "array" (JSON array — single or list), "json" (OpenAI-style envelope),
+    // "raw" (one float per line). Unknown values exit with BadInput.
+    std::string embd_output_format;
+    // When non-empty, split the input on this separator and emit one
+    // vector per piece (matches `llama-embedding --embd-separator`).
+    std::string embd_separator;
+    // Attention type for embedding pass: "" (model default), "causal",
+    // "non-causal". Required override for some encoder checkpoints.
+    std::string attention;
     int threads = -1;
     int gpu_layers = 0;
     uint32_t n_ctx = 0;            // 0 = use model's default training context
@@ -193,15 +203,21 @@ struct SdOptions {
     std::string diffusion_model;  // separate UNet/DiT (e.g. Z-Image, Flux)
     std::string vae;              // separate VAE
     std::string clip_l;           // CLIP-L text encoder
+    std::string clip_g;           // CLIP-G text encoder (SDXL split layouts)
     std::string t5xxl;            // T5-XXL text encoder
     std::string llm;              // LLM text encoder (e.g. Qwen3 for Z-Image)
+    std::string control_net;      // ControlNet model file
+    std::string wtype;            // weights type override (f16, q8_0, ...)
     std::string prompt;
     std::string negative_prompt;
     std::string output = "output.png";
     std::string sample_method;
     std::string scheduler;
-    std::string init_image;  // empty = text-to-image
-    std::string mask_image;  // empty = no inpainting mask
+    std::string init_image;     // empty = text-to-image
+    std::string mask_image;     // empty = no inpainting mask
+    std::string control_image;  // empty = no ControlNet conditioning
+    std::string lora_model_dir; // base dir for resolving relative --lora paths
+    std::vector<std::string> lora_adapters; // "path[:scale]" entries, repeatable
     int width = 512;
     int height = 512;
     int steps = 20;
@@ -213,8 +229,26 @@ struct SdOptions {
     float strength = 0.75f;  // img2img denoising strength (0 = preserve, 1 = full noise)
     float guidance = -1.0f;  // distilled guidance (Flux / SD3); -1 = upstream default
     float flow_shift = -1.0f;// Flux/SD3 timestep shift; -1 = upstream default
+    float control_strength = 0.9f; // ControlNet conditioning strength (only used with --control-image)
     bool offload_to_cpu = false;
     bool diffusion_fa = false;   // flash-attention in the diffusion model
+    bool diffusion_conv_direct = false; // conv-direct kernels in the diffusion model
+    bool vae_conv_direct = false;       // conv-direct kernels in the VAE
+
+    // RNG selection. Empty = leave the upstream default
+    // (`STD_DEFAULT_RNG`) in place. Accepted values are whatever
+    // sd.cpp's `str_to_rng_type` recognizes ("std_default", "cuda",
+    // "cpu") — unknown values exit with `BadInput`. `--sampler-rng`
+    // is the per-sampling RNG and is what matches ComfyUI seeds.
+    std::string rng;          // ctx_params.rng_type
+    std::string sampler_rng;  // ctx_params.sampler_rng_type
+
+    // VAE tiling: reduces peak VRAM for large outputs at a small quality cost.
+    // Negative-one sentinels mean "leave the upstream default in place".
+    bool  vae_tiling             = false;
+    int   vae_tile_size          = -1;    // absolute tile size (px); applied to both x and y
+    float vae_relative_tile_size = -1.0f; // tile size as a fraction of the canvas; applied to both axes
+    float vae_tile_overlap       = -1.0f; // fraction overlap between tiles
 };
 int command_sd(const SdOptions & opts);
 #endif

@@ -1803,9 +1803,19 @@ enum llama_pooling_type parse_pooling(const std::string & name) {
 int command_embed(const EmbedOptions & opts) {
     const std::string text = resolve_prompt(opts.input, opts.input_file);
 
+    // Output format validation up front so a typo doesn't get caught
+    // only after we've spent seconds loading the model.
+    const std::string & fmt = opts.embd_output_format;
+    if (!fmt.empty() && fmt != "array" && fmt != "json" && fmt != "raw") {
+        fail(ExitCode::BadInput,
+             "unknown --embd-output-format: '" + fmt +
+             "' (expected '', 'array', 'json', or 'raw')");
+    }
+
     chimera_embed::Config cfg;
     cfg.model      = opts.model;
     cfg.pooling    = opts.pooling;
+    cfg.attention  = opts.attention;
     cfg.threads    = opts.threads;
     cfg.gpu_layers = opts.gpu_layers;
     cfg.n_ctx      = opts.n_ctx;
@@ -1840,7 +1850,31 @@ int command_embed(const EmbedOptions & opts) {
             opts.cache_db.empty() ? chimera_db::default_path() : opts.cache_db, mid);
         embedder.set_cache(ecache.get());
     }
-    const auto vec = embedder.embed(text);
+    // Split into one-or-more pieces. --embd-separator splits the input
+    // on the given literal string (no regex) and emits one vector per
+    // piece, mirroring `llama-embedding --embd-separator`.
+    std::vector<std::string> pieces;
+    if (opts.embd_separator.empty()) {
+        pieces.push_back(text);
+    } else {
+        const std::string & sep = opts.embd_separator;
+        size_t start = 0;
+        while (true) {
+            const size_t hit = text.find(sep, start);
+            if (hit == std::string::npos) {
+                pieces.emplace_back(text.substr(start));
+                break;
+            }
+            pieces.emplace_back(text.substr(start, hit - start));
+            start = hit + sep.size();
+        }
+    }
+
+    std::vector<std::vector<float>> vecs;
+    vecs.reserve(pieces.size());
+    for (const auto & p : pieces) {
+        vecs.push_back(embedder.embed(p));
+    }
 
     std::ofstream out_file;
     std::ostream * out = &std::cout;
@@ -1852,11 +1886,61 @@ int command_embed(const EmbedOptions & opts) {
         out = &out_file;
     }
     *out << std::setprecision(8);
-    for (size_t i = 0; i < vec.size(); ++i) {
-        if (i > 0) *out << ' ';
-        *out << vec[i];
+
+    auto write_default = [&](const std::vector<float> & vec) {
+        for (size_t i = 0; i < vec.size(); ++i) {
+            if (i > 0) *out << ' ';
+            *out << vec[i];
+        }
+        *out << '\n';
+    };
+    auto write_array = [&](std::ostream & os, const std::vector<float> & vec) {
+        os << '[';
+        for (size_t i = 0; i < vec.size(); ++i) {
+            if (i > 0) os << ',';
+            os << vec[i];
+        }
+        os << ']';
+    };
+
+    if (fmt.empty()) {
+        // Preserve the historic chimera output exactly: one
+        // space-separated line per vector.
+        for (const auto & v : vecs) write_default(v);
+    } else if (fmt == "raw") {
+        // One float per line; vectors separated by a blank line.
+        for (size_t i = 0; i < vecs.size(); ++i) {
+            if (i > 0) *out << '\n';
+            for (float v : vecs[i]) *out << v << '\n';
+        }
+    } else if (fmt == "array") {
+        // JSON array of arrays. For a single vector, emit a single
+        // [..] (no wrapping list) to match the upstream README example.
+        if (vecs.size() == 1) {
+            write_array(*out, vecs[0]);
+        } else {
+            *out << '[';
+            for (size_t i = 0; i < vecs.size(); ++i) {
+                if (i > 0) *out << ',';
+                write_array(*out, vecs[i]);
+            }
+            *out << ']';
+        }
+        *out << '\n';
+    } else if (fmt == "json") {
+        // OpenAI-shaped envelope. `model` is the GGUF path so scripts
+        // can correlate the output back to a checkpoint; `usage` is
+        // omitted (we don't track token counts here).
+        *out << "{\"object\":\"list\",\"data\":[";
+        for (size_t i = 0; i < vecs.size(); ++i) {
+            if (i > 0) *out << ',';
+            *out << "{\"object\":\"embedding\",\"index\":" << i << ",\"embedding\":";
+            write_array(*out, vecs[i]);
+            *out << '}';
+        }
+        // Bare-minimum metadata; embedding callers care about `data`.
+        *out << "],\"model\":\"" << opts.model << "\"}\n";
     }
-    *out << '\n';
     return 0;
 }
 
@@ -2850,7 +2934,17 @@ void bind_embed_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("-o,--output", p.embed_opts.output,
         "Output file (default: stdout)");
     cmd->add_option("--pooling", p.embed_opts.pooling,
-        "Pooling: mean | cls | last | none");
+        "Pooling: mean | cls | last | none | rank "
+        "(use 'rank' for cross-encoder reranker checkpoints)");
+    cmd->add_option("--embd-output-format", p.embed_opts.embd_output_format,
+        "Output format: '' (default; space-separated floats), 'array' (JSON array), "
+        "'json' (OpenAI-shaped envelope), 'raw' (one float per line)");
+    cmd->add_option("--embd-separator", p.embed_opts.embd_separator,
+        "If set, split the input on this literal string and emit one vector per piece");
+    cmd->add_option("--attention", p.embed_opts.attention,
+        "Attention type override for the embedding pass: causal | non-causal "
+        "(empty leaves the model's training-time default in place)")
+        ->check(CLI::IsMember({"", "causal", "non-causal"}));
     cmd->add_option("-c,--ctx-size", p.embed_opts.n_ctx,
         "Context size (0 = model's training context)");
     cmd->add_option("-b,--batch-size", p.embed_opts.n_batch, "Batch size");
@@ -2939,13 +3033,29 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
                     "Diffusion UNet/DiT file (split layout)");
     cmd->add_option("--vae", p.sd_opts.vae, "Separate VAE file");
     cmd->add_option("--clip-l", p.sd_opts.clip_l, "CLIP-L text encoder");
+    cmd->add_option("--clip-g", p.sd_opts.clip_g,
+                    "CLIP-G text encoder (SDXL split-checkpoint layouts)");
     cmd->add_option("--t5xxl", p.sd_opts.t5xxl, "T5-XXL text encoder");
     cmd->add_option("--llm", p.sd_opts.llm,
                     "LLM text encoder (e.g. Qwen3 for Z-Image)");
+    cmd->add_option("--control-net", p.sd_opts.control_net,
+                    "ControlNet model file (pair with --control-image)");
+    cmd->add_option("--type", p.sd_opts.wtype,
+                    "Weights type override (f16, f32, bf16, q8_0, q5_1, "
+                    "q5_0, q4_1, q4_0, q4_k, q3_k, q2_k, iq4_nl, ...)");
     cmd->add_flag("--offload-to-cpu", p.sd_opts.offload_to_cpu,
                   "Offload model params to CPU (saves VRAM)");
     cmd->add_flag("--diffusion-fa", p.sd_opts.diffusion_fa,
                   "Enable flash-attention in the diffusion model");
+    cmd->add_flag("--diffusion-conv-direct", p.sd_opts.diffusion_conv_direct,
+                  "Use conv-direct kernels in the diffusion model (faster on modern dGPUs)");
+    cmd->add_flag("--vae-conv-direct", p.sd_opts.vae_conv_direct,
+                  "Use conv-direct kernels in the VAE (pairs with --diffusion-conv-direct)");
+    cmd->add_option("--rng", p.sd_opts.rng,
+                  "RNG kind: std_default | cuda | cpu (leave unset for upstream default)");
+    cmd->add_option("--sampler-rng", p.sd_opts.sampler_rng,
+                  "Per-sampling RNG: std_default | cuda | cpu "
+                  "(use cpu to match ComfyUI seeds across implementations)");
     cmd->add_option("-p,--prompt", p.sd_opts.prompt, "Prompt")->required();
     cmd->add_option("-o,--output", p.sd_opts.output, "Output PNG path");
     cmd->add_option("--negative-prompt", p.sd_opts.negative_prompt, "Negative prompt");
@@ -2969,6 +3079,23 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Distilled guidance scale (Flux / SD3); leave unset for upstream default");
     cmd->add_option("--flow-shift", p.sd_opts.flow_shift,
         "Flux/SD3 timestep shift; leave unset for upstream default");
+    cmd->add_option("--control-image", p.sd_opts.control_image,
+        "ControlNet conditioning image (requires --control-net)");
+    cmd->add_option("--control-strength", p.sd_opts.control_strength,
+        "ControlNet conditioning strength (default 0.9, only used with --control-image)");
+    cmd->add_flag("--vae-tiling", p.sd_opts.vae_tiling,
+        "Tile the VAE decode to lower peak VRAM for large outputs");
+    cmd->add_option("--vae-tile-size", p.sd_opts.vae_tile_size,
+        "Absolute VAE tile size in pixels (applied to both axes)");
+    cmd->add_option("--vae-relative-tile-size", p.sd_opts.vae_relative_tile_size,
+        "VAE tile size as a fraction of the canvas (e.g. 0.5)");
+    cmd->add_option("--vae-tile-overlap", p.sd_opts.vae_tile_overlap,
+        "Fractional overlap between VAE tiles (e.g. 0.25)");
+    cmd->add_option("--lora", p.sd_opts.lora_adapters,
+        "LoRA adapter as path[:scale] (scale defaults to 1.0; repeatable). "
+        "Relative paths are joined against --lora-model-dir when set.");
+    cmd->add_option("--lora-model-dir", p.sd_opts.lora_model_dir,
+        "Base directory used to resolve relative --lora paths");
     p.sd_cmd = cmd;
 }
 #endif

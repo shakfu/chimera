@@ -29,6 +29,15 @@ struct PixelImage {
     std::vector<unsigned char> pixels;       // size == width*height*channels
 };
 
+// LoRA adapter request entry. `path` is the resolved on-disk file; the
+// chimera_sd::generate() implementation borrows the string for the
+// duration of the call (sd_lora_t.path is const char*), so callers must
+// keep the GenerateRequest alive across the call.
+struct LoraEntry {
+    std::string path;
+    float       scale = 1.0f;
+};
+
 struct GenerateRequest {
     std::string prompt;
     std::string negative_prompt;
@@ -50,6 +59,24 @@ struct GenerateRequest {
     // mask is set, init must also be set (mask without init is rejected).
     PixelImage init;   // .pixels.empty() means "skip"
     PixelImage mask;   // .pixels.empty() means "skip"
+
+    // Optional ControlNet conditioning. Requires the context to have been
+    // loaded with LoadParams::control_net set. control must match
+    // width/height. control_strength is ignored when control is empty.
+    PixelImage control;
+    float      control_strength = 0.9f;
+
+    // Optional VAE tiling (lowers peak VRAM at a small quality cost).
+    // Mirrors sd_tiling_params_t. Negative-one sentinels leave the upstream
+    // default in place (only `enabled` is checked unconditionally).
+    bool  vae_tiling             = false;
+    int   vae_tile_size          = -1;    // absolute tile size (applied to both axes)
+    float vae_relative_tile_size = -1.0f; // fraction of canvas (applied to both axes)
+    float vae_tile_overlap       = -1.0f; // fractional overlap
+
+    // Optional LoRA adapters applied during generation. Each entry's path
+    // must already be resolved to a file the sd context can open.
+    std::vector<LoraEntry> loras;
 };
 
 // ---- model lifecycle ---------------------------------------------------
@@ -65,11 +92,18 @@ struct LoadParams {
     std::string diffusion_model;
     std::string vae;
     std::string clip_l;
+    std::string clip_g;           // SDXL split-checkpoint CLIP-G text encoder
     std::string t5xxl;
     std::string llm;
-    bool        vae_decode_only      = true;
-    bool        offload_to_cpu       = false;
-    bool        diffusion_flash_attn = false;
+    std::string control_net;      // ControlNet model file
+    std::string wtype;            // weights type override (empty = upstream default)
+    bool        vae_decode_only       = true;
+    bool        offload_to_cpu        = false;
+    bool        diffusion_flash_attn  = false;
+    bool        diffusion_conv_direct = false;
+    bool        vae_conv_direct       = false;
+    std::string rng_type;          // empty = upstream default; otherwise via str_to_rng_type
+    std::string sampler_rng_type;  // empty = upstream default
     int         threads              = -1;
 };
 

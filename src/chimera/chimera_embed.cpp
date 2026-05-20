@@ -29,7 +29,17 @@ enum llama_pooling_type parse_pooling(const std::string & name) {
     if (name == "cls")  return LLAMA_POOLING_TYPE_CLS;
     if (name == "last") return LLAMA_POOLING_TYPE_LAST;
     if (name == "none") return LLAMA_POOLING_TYPE_NONE;
-    fail(ExitCode::BadInput, "unsupported pooling: " + name + " (use mean|cls|last|none)");
+    if (name == "rank") return LLAMA_POOLING_TYPE_RANK;
+    fail(ExitCode::BadInput,
+         "unsupported pooling: " + name + " (use mean|cls|last|none|rank)");
+}
+
+enum llama_attention_type parse_attention(const std::string & name) {
+    if (name.empty())          return LLAMA_ATTENTION_TYPE_UNSPECIFIED;
+    if (name == "causal")      return LLAMA_ATTENTION_TYPE_CAUSAL;
+    if (name == "non-causal")  return LLAMA_ATTENTION_TYPE_NON_CAUSAL;
+    fail(ExitCode::BadInput,
+         "unsupported attention: " + name + " (use causal|non-causal)");
 }
 
 std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string & text,
@@ -124,6 +134,7 @@ Embedder::Embedder(const Config & cfg) : impl_(std::make_unique<Impl>()) {
     cparams.n_threads_batch = cfg.threads;
     cparams.embeddings      = true;
     cparams.pooling_type    = parse_pooling(cfg.pooling);
+    cparams.attention_type  = parse_attention(cfg.attention);
     cparams.no_perf         = true;
     if (cfg.flash_attn) cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     if (cfg.rope_freq_base  > 0.0f) cparams.rope_freq_base  = cfg.rope_freq_base;

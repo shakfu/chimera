@@ -144,15 +144,15 @@ All five priorities from the original audit landed on 2026-05-20 (`--flash-attn`
 | `--model, -m` | `-m,--model` | ✅ | |
 | `--prompt, -p` / file via `-f` | `-p,--prompt` / `-f,--prompt-file` | ✅ | Stdin via `-`. |
 | `--embedding` / `--embeddings` | implicit (subcommand intent) | ✅ | Chimera dispatches embed mode automatically. |
-| `--pooling {none,mean,cls,last,rank}` | `--pooling` | 🟡 | Chimera doc-string lists `mean\|cls\|last\|none`; `rank` (reranker) is **missing**. |
+| `--pooling {none,mean,cls,last,rank}` | `--pooling` | ✅ | `rank` (reranker) landed 2026-05-20 — `LLAMA_POOLING_TYPE_RANK` is now accepted alongside `mean\|cls\|last\|none`. |
 | `--embd-normalize N` (-1 / 0 / 1 / 2 / >2) | `--no-normalize` flag | 🔀 | Chimera reduces to a boolean (L2 or off). Loses access to taxicab/p-norm. Acceptable simplification; document the choice. |
-| `--embd-output-format` | — | ❌ | No way to ask for OpenAI-style JSON / `array` / `raw`. **Worth filing.** |
-| `--embd-separator` | — | ❌ | Batch separator; needed if anyone passes multi-doc prompts. **Worth filing.** |
+| `--embd-output-format` | `--embd-output-format` | ✅ | Landed 2026-05-20. Values: `''` (default; space-separated, preserves prior output), `array`, `json` (OpenAI envelope), `raw`. `json+` (cosine-similarity matrix add-on) not implemented. |
+| `--embd-separator` | `--embd-separator` | ✅ | Landed 2026-05-20. Literal-string splitter (no regex); emits one vector per piece. |
 | `--ctx-size, -c` | `-c,--ctx-size` | ✅ | |
 | `--batch-size, -b` | `-b,--batch-size` | ✅ | |
 | `--threads, -t` | `-t,--threads` | ✅ | |
 | `--gpu-layers` | `--gpu-layers` | ✅ | |
-| `--attention {causal,non-causal}` | — | ❌ | Some embed models need this overridden; **worth filing.** |
+| `--attention {causal,non-causal}` | `--attention` | ✅ | Landed 2026-05-20. Pins `llama_context_params.attention_type`; empty leaves the model default. |
 | `--flash-attn` | `--flash-attn` | ✅ | Landed 2026-05-20. |
 | `--cls-separator` | — | 🚫 | Eval/retrieval-specific. |
 | `--chunk` / `--chunks` / `--chunk-size` / `--chunk-separator` | — | 🚫 | Belongs to chimera's own `index`/`search` layer, not the model invocation. |
@@ -165,10 +165,10 @@ All five priorities from the original audit landed on 2026-05-20 (`--flash-attn`
 
 ### Notable gaps worth filing
 
-1. `--embd-output-format` — without this, scripting against `chimera embed` for OpenAI-compatible output requires post-processing.
-2. `--embd-separator` — needed for multi-prompt batching.
-3. `--attention causal|non-causal` — some encoder models need this.
-4. Pooling `rank` value — required to use reranker checkpoints via `embed`.
+1. ~~`--embd-output-format`~~ ✅ Landed 2026-05-20.
+2. ~~`--embd-separator`~~ ✅ Landed 2026-05-20.
+3. ~~`--attention causal|non-causal`~~ ✅ Landed 2026-05-20.
+4. ~~Pooling `rank` value~~ ✅ Landed 2026-05-20.
 
 ### Also landed 2026-05-20 (carried over from the llama-shared option set)
 
@@ -258,18 +258,18 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--vae` | `--vae` | ✅ | |
 | `--taesd` / `--tae` | — | ❌ | Tiny-AutoEncoder fast decode. **Worth filing**, low cost. |
 | `--clip_l` | `--clip-l` | 🔀 | **Naming drift.** Upstream uses underscore; chimera uses kebab. Stay with kebab in chimera (project convention) but document. |
-| `--clip_g` | — | ❌ | Required for SDXL split layouts. **Worth filing.** |
+| `--clip_g` | `--clip-g` | 🔀 | Landed 2026-05-20. Naming drift (kebab vs underscore) tracked above. |
 | `--clip_vision` | — | ❌ | |
 | `--t5xxl` | `--t5xxl` | ✅ | |
 | `--llm` | `--llm` | ✅ | Z-Image text encoder. |
 | `--llm_vision` / `--qwen2vl` / `--qwen2vl_vision` | — | ❌/🚫 | `--qwen2vl` is a deprecated alias of `--llm`; safe to skip. `--llm_vision` may matter for vision-conditioning Qwen-Image. |
-| `--control-net` | — | ❌ | ControlNet model path. **Worth filing.** |
+| `--control-net` | `--control-net` | ✅ | Landed 2026-05-20. Wired into `sd_ctx_params_t.control_net_path`. `--control-image` requires this. |
 | `--embd-dir` | — | ❌ | Textual-inversion / embedding directory. |
-| `--lora-model-dir` | — | ❌ | LoRA discovery directory. **Worth filing** — pairs with prompt-syntax LoRA. |
+| `--lora-model-dir` | `--lora-model-dir` | ✅ | Landed 2026-05-20. Base directory used to resolve relative `--lora` paths (chimera-side; sd.cpp's C API takes resolved paths in `sd_lora_t`). |
 | `--photo-maker` | — | ❌ | PhotoMaker checkpoint. |
 | `--upscale-model` / `--hires-upscalers-dir` | — | ❌ | Upscaler integration. |
 | `--tensor-type-rules` | — | ❌ | |
-| `--type` | — | ❌ | Weights type / precision override; **worth filing**. |
+| `--type` | `--type` | ✅ | Landed 2026-05-20. Maps to `sd_ctx_params_t.wtype` via `str_to_sd_type`; unknown values exit with `BadInput`. |
 
 ### Coverage table — perf / offload
 
@@ -281,7 +281,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--mmap` | — | ❌ | |
 | `--fa` | — | ❌ | Global flash-attn (not just diffusion). |
 | `--diffusion-fa` | `--diffusion-fa` | ✅ | Landed in audit. |
-| `--diffusion-conv-direct` / `--vae-conv-direct` | — | ❌ | conv-direct perf path. **Worth filing**. |
+| `--diffusion-conv-direct` / `--vae-conv-direct` | same | ✅ | Landed 2026-05-20. Map directly to `sd_ctx_params_t.{diffusion,vae}_conv_direct`. |
 | `--clip-on-cpu` / `--vae-on-cpu` / `--control-net-cpu` | — | ❌ | Selective CPU offload (more surgical than `--offload-to-cpu`). |
 | `--force-sdxl-vae-conv-scale` | — | ❌ | SDXL-VAE numerics fix. |
 
@@ -303,7 +303,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--sampling-method` | `--sample-method` | 🔀 | Naming drift (`sampling` vs `sample`). Document. |
 | `--scheduler` | `--scheduler` | ✅ | |
 | `--sigmas` | — | ❌ | Custom sigma schedule. |
-| `--rng` / `--sampler-rng` | — | ❌ | Reproducibility/cpu-vs-cuda RNG choice. **Worth filing.** |
+| `--rng` / `--sampler-rng` | same | ✅ | Landed 2026-05-20. Resolved via `str_to_rng_type`; `--sampler-rng cpu` matches ComfyUI seeds. |
 | `--prediction` | — | ❌ | epsilon / v-prediction override. |
 | `--eta` | — | ❌ | DDIM-style stochasticity. |
 | `--flow-shift` | `--flow-shift` | ✅ | Landed 2026-05-20. Maps to `sd_sample_params_t.flow_shift`. |
@@ -319,8 +319,8 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--init-img` | `--init-image` | 🔀 | Naming. |
 | `--end-img` | — | ❌ | End-frame for img-to-img blending / video. |
 | `--mask` | `--mask-image` | 🔀 | Naming. |
-| `--control-image` | — | ❌ | ControlNet conditioning image. **Worth filing.** |
-| `--control-strength` | — | ❌ | |
+| `--control-image` | `--control-image` | ✅ | Landed 2026-05-20. Requires `--control-net`. Dimensions must match `-W`/`-H`. |
+| `--control-strength` | `--control-strength` | ✅ | Landed 2026-05-20. Default 0.9; only used with `--control-image`. |
 | `--control-video` | — | 🚫 | Video-only; chimera-sd is image-only today. |
 | `--strength` | `--strength` | ✅ | |
 | `--ref-image` | — | ❌ | Reference image (style/identity). |
@@ -332,8 +332,8 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 |---|---|---|---|
 | `--hires` | — | ❌ | Hires-fix toggle. **Worth filing** — popular feature. |
 | `--hires-upscaler` / `--hires-width` / `--hires-height` / `--hires-steps` / `--hires-scale` / `--hires-denoising-strength` / `--hires-upscale-tile-size` | — | ❌ | Whole hires-fix family. Bundle with `--hires`. |
-| `--vae-tiling` | — | ❌ | Reduces VRAM for large outputs. **Worth filing.** |
-| `--vae-tile-size` / `--vae-relative-tile-size` / `--vae-tile-overlap` | — | ❌ | Bundle with `--vae-tiling`. |
+| `--vae-tiling` | `--vae-tiling` | ✅ | Landed 2026-05-20. Enables `sd_img_gen_params_t.vae_tiling_params.enabled`. |
+| `--vae-tile-size` / `--vae-relative-tile-size` / `--vae-tile-overlap` | same | ✅ | Landed 2026-05-20. Sentinels (`-1`) leave the upstream default; otherwise applied symmetrically to both axes. |
 | `--upscale-repeats` / `--upscale-tile-size` | — | ❌ | Standalone upscale mode. |
 
 ### Coverage table — video / advanced / output
@@ -355,13 +355,13 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 ### Notable gaps worth filing
 
 1. ~~**`--guidance` and `--flow-shift`**.~~ ✅ Landed 2026-05-20.
-2. **`--clip_g` (alongside `--clip-l`)** — required for SDXL split-checkpoint layouts. Surprising omission given we ship `--clip-l`.
-3. **`--control-image` + `--control-strength`** — ControlNet is one of the most-asked-for sd features; we ship `--control-net` model loading? Actually we *don't* (see above). Both halves are missing — bundle into a single "ControlNet support" issue.
-4. **`--vae-tiling` family** — the no-VRAM-shame way to render large images. One toggle, three knobs.
-5. **`--diffusion-conv-direct` / `--vae-conv-direct`** — measurable perf win on modern dGPUs; bundle as one issue.
-6. **Sampler-RNG / `--rng`** — required for cross-implementation reproducibility (matching ComfyUI seeds, etc.).
-7. **`--lora-model-dir`** — needed for prompt-side `<lora:foo:0.8>` syntax to resolve files.
-8. **`--type`** — explicit weight-precision override; useful for low-VRAM users.
+2. ~~**`--clip_g` (alongside `--clip-l`)**.~~ ✅ Landed 2026-05-20 as `--clip-g`.
+3. ~~**`--control-image` + `--control-strength` + `--control-net`**.~~ ✅ Landed 2026-05-20 (ControlNet bundle).
+4. ~~**`--vae-tiling` family**.~~ ✅ Landed 2026-05-20.
+5. ~~**`--diffusion-conv-direct` / `--vae-conv-direct`**~~ ✅ Landed 2026-05-20.
+6. ~~**Sampler-RNG / `--rng`**~~ ✅ Landed 2026-05-20.
+7. ~~**`--lora-model-dir`**~~ ✅ Landed 2026-05-20 alongside `--lora <path[:scale]>` (repeatable). Note: prompt-side `<lora:foo:0.8>` extraction is **not** wired yet — `--lora` takes explicit paths. Follow-up.
+8. ~~**`--type`**~~ ✅ Landed 2026-05-20.
 
 ### Deliberately omitted
 
@@ -404,12 +404,12 @@ Three big slabs of upstream surface area are correctly out of scope and should s
 In priority order (highest user impact first). Items struck through landed on 2026-05-20.
 
 1. ~~**sd: Flux/SD3 guidance pair** (`--guidance`, `--flow-shift`).~~ ✅ Landed 2026-05-20.
-2. **sd: ControlNet bundle** (`--control-net`, `--control-image`, `--control-strength`).
+2. ~~**sd: ControlNet bundle** (`--control-net`, `--control-image`, `--control-strength`).~~ ✅ Landed 2026-05-20.
 3. ~~**whisper: output-format family** (`-osrt`, `-oj`, `-ovtt`, `-ojf`, `-ocsv`, `-olrc`).~~ ✅
-4. **sd: VAE-tiling bundle** (`--vae-tiling` + tile-size/overlap).
+4. ~~**sd: VAE-tiling bundle** (`--vae-tiling` + tile-size/overlap).~~ ✅ Landed 2026-05-20.
 5. ~~**llama: `--grammar` / `--json-schema` / `--json-schema-file`** in `gen`.~~ ✅
 6. ~~**All three: `--flash-attn`**.~~ ✅
 7. ~~**llama: `--lora` in `gen`/`chat`**.~~ ✅
 8. ~~**whisper: `--prompt` + decoding-strategy basics** (`--beam-size`, `--best-of`, `--temperature`, `--no-fallback`).~~ ✅ Landed 2026-05-20.
-9. **sd: `--lora-model-dir`, `--clip_g`, `--type`** — finishing the model-loading story.
-10. **embed: `--embd-output-format` + `--embd-separator` + `--attention`**.
+9. ~~**sd: `--lora`, `--lora-model-dir`, `--clip_g`, `--type`**~~ ✅ Landed 2026-05-20.
+10. ~~**embed: `--embd-output-format` + `--embd-separator` + `--attention`**~~ ✅ Landed 2026-05-20 (also `--pooling rank`).
