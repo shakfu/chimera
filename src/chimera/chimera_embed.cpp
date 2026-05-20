@@ -6,6 +6,7 @@
 #include "chimera_embed_cache.h"
 
 #include "llama.h"
+#include "ggml-backend.h"
 
 #include <algorithm>
 #include <cctype>
@@ -64,6 +65,50 @@ Embedder::Embedder(const Config & cfg) : impl_(std::make_unique<Impl>()) {
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = cfg.gpu_layers;
     mparams.use_mmap     = cfg.use_mmap;
+    mparams.use_mlock    = cfg.use_mlock;
+    mparams.main_gpu     = cfg.main_gpu;
+
+    // The model_params raw pointers must stay valid until the model load
+    // completes; parse into local storage that outlives mparams use.
+    std::vector<float> tensor_split_local;
+    std::vector<ggml_backend_dev_t> devices_local;
+    if (!cfg.tensor_split.empty()) {
+        for (size_t i = 0, prev = 0; ; ++i) {
+            if (i == cfg.tensor_split.size() || cfg.tensor_split[i] == ',') {
+                if (i > prev) {
+                    try { tensor_split_local.push_back(std::stof(cfg.tensor_split.substr(prev, i - prev))); }
+                    catch (...) { fail(ExitCode::BadInput, "invalid --tensor-split entry"); }
+                }
+                if (i == cfg.tensor_split.size()) break;
+                prev = i + 1;
+            }
+        }
+        if (!tensor_split_local.empty()) mparams.tensor_split = tensor_split_local.data();
+    }
+    if (!cfg.split_mode.empty()) {
+        if (cfg.split_mode == "none")        mparams.split_mode = LLAMA_SPLIT_MODE_NONE;
+        else if (cfg.split_mode == "layer")  mparams.split_mode = LLAMA_SPLIT_MODE_LAYER;
+        else if (cfg.split_mode == "row")    mparams.split_mode = LLAMA_SPLIT_MODE_ROW;
+        else if (cfg.split_mode == "tensor") mparams.split_mode = LLAMA_SPLIT_MODE_TENSOR;
+        else fail(ExitCode::BadInput, "unknown --split-mode: " + cfg.split_mode);
+    }
+    if (!cfg.devices.empty()) {
+        for (size_t i = 0, prev = 0; ; ++i) {
+            if (i == cfg.devices.size() || cfg.devices[i] == ',') {
+                if (i > prev) {
+                    const std::string name = cfg.devices.substr(prev, i - prev);
+                    ggml_backend_dev_t dev = ggml_backend_dev_by_name(name.c_str());
+                    if (!dev) fail(ExitCode::BadInput, "unknown device: '" + name + "'");
+                    devices_local.push_back(dev);
+                }
+                if (i == cfg.devices.size()) break;
+                prev = i + 1;
+            }
+        }
+        devices_local.push_back(nullptr);
+        mparams.devices = devices_local.data();
+    }
+
     impl_->model.reset(llama_model_load_from_file(cfg.model.c_str(), mparams));
     if (!impl_->model) {
         fail(ExitCode::Load, "failed to load embedding model: " + cfg.model);
@@ -74,12 +119,27 @@ Embedder::Embedder(const Config & cfg) : impl_(std::make_unique<Impl>()) {
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx           = cfg.n_ctx == 0 ? n_train : cfg.n_ctx;
     cparams.n_batch         = std::max<uint32_t>(cfg.n_batch, cparams.n_ctx);
-    cparams.n_ubatch        = cparams.n_batch;
+    cparams.n_ubatch        = cfg.n_ubatch > 0 ? cfg.n_ubatch : cparams.n_batch;
     cparams.n_threads       = cfg.threads;
     cparams.n_threads_batch = cfg.threads;
     cparams.embeddings      = true;
     cparams.pooling_type    = parse_pooling(cfg.pooling);
     cparams.no_perf         = true;
+    if (cfg.flash_attn) cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    if (cfg.rope_freq_base  > 0.0f) cparams.rope_freq_base  = cfg.rope_freq_base;
+    if (cfg.rope_freq_scale > 0.0f) cparams.rope_freq_scale = cfg.rope_freq_scale;
+    if (!cfg.rope_scaling.empty()) {
+        if (cfg.rope_scaling == "none")          cparams.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_NONE;
+        else if (cfg.rope_scaling == "linear")   cparams.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_LINEAR;
+        else if (cfg.rope_scaling == "yarn")     cparams.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_YARN;
+        else if (cfg.rope_scaling == "longrope") cparams.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_LONGROPE;
+        else fail(ExitCode::BadInput, "unknown --rope-scaling: " + cfg.rope_scaling);
+    }
+    if (cfg.yarn_orig_ctx > 0)   cparams.yarn_orig_ctx    = cfg.yarn_orig_ctx;
+    cparams.yarn_ext_factor  = cfg.yarn_ext_factor;
+    cparams.yarn_attn_factor = cfg.yarn_attn_factor;
+    cparams.yarn_beta_fast   = cfg.yarn_beta_fast;
+    cparams.yarn_beta_slow   = cfg.yarn_beta_slow;
 
     impl_->ctx.reset(llama_init_from_model(impl_->model.get(), cparams));
     if (!impl_->ctx) {

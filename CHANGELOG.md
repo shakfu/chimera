@@ -6,6 +6,18 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Added
 
+- Broad llama.cpp CLI coverage uplift on `gen` / `chat` / `embed`. 20 flag groups landed (~40 new options total), driven by the audit in `doc/dev/cli-api-coverage.md`. Highlights:
+  - Sampler: `--grammar` / `--grammar-file`, `--json-schema` / `--json-schema-file` (converted via `json_schema_to_grammar`), `--repeat-last-n`, `--presence-penalty`, `--frequency-penalty`, `--mirostat` + `--mirostat-ent` / `--mirostat-lr`, full `--dry-*` family (`--dry-multiplier`, `--dry-base`, `--dry-allowed-length`, `--dry-penalty-last-n`, `--dry-sequence-breaker` repeatable), `--logit-bias` (repeatable, `"<id>(+|-|=)<bias>"`), `--ignore-eos`.
+  - Performance / context: `--flash-attn`, `--cache-type-k` / `--cache-type-v` (f32/f16/bf16/q8_0/q5_0/q5_1/q4_0/q4_1/iq4_nl), `--ubatch-size`.
+  - Adapters: `--lora <path[:scale]>` (repeatable), attached via `llama_set_adapters_lora`. Closes the asymmetry with `serve` which already had this.
+  - RoPE / YaRN: `--rope-freq-base`, `--rope-freq-scale`, `--rope-scale` (alias), `--rope-scaling` (none/linear/yarn/longrope), `--yarn-orig-ctx`, `--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-fast`, `--yarn-beta-slow`.
+  - Multi-GPU / device: `--main-gpu`, `--tensor-split` (comma-separated floats), `--split-mode` (none/layer/row/tensor), `--device` (comma-separated device list).
+  - Memory: `--no-mmap`, `--mlock`. `use_mmap` was previously hard-coded.
+  - `chat`-only: `--chat-template-file` (mutually exclusive with `--chat-template`), `--chat-template-kwargs`, `--no-jinja` (jinja default ON to preserve behavior), `--reasoning` / `--reasoning-format` / `--reasoning-budget` / `--reasoning-budget-message`. Note: `--reasoning-budget` is parsed but not yet enforced at sampler level (upstream requires manual tokenization of reasoning start/end tags — follow-up).
+  - mmproj: `--no-mmproj-offload`. `--mmproj-auto` is not modeled by `mtmd_context_params` at b9119, so skipped.
+  - `--list-devices` skipped — fits more naturally as a `chimera info` extension; tracked separately.
+  - End-to-end smoke validated on Llama-3.2-1B-Instruct: `--flash-attn --cache-type-k q8_0 --cache-type-v q8_0` produces output cleanly, and `--grammar 'root ::= "apple" | "banana" | "cherry"'` correctly constrains output to one of the three literals.
+
 - Vulkan build validated end-to-end via `make build-vulkan`. `chimera info` reports llama/whisper/sd all built and loaded on the Vulkan backend; both an AMD iGPU (Radeon 610M, RADV) and an NVIDIA RTX 4060 enumerate as Vulkan devices on the same host, so dispatch is not vendor-locked. Resulting binary is 92M on Linux x86_64 — roughly half the CUDA build (169M) because Vulkan ships compact SPIR-V shaders rather than per-arch CUDA cubins, making it the smaller-footprint option when raw CUDA perf isn't required.
 
 - Split-checkpoint and Z-Image support on `chimera sd`. New flags `--diffusion-model`, `--vae`, `--clip-l`, `--t5xxl`, `--llm`, `--offload-to-cpu`, and `--diffusion-fa` map to the same-named `sd_ctx_params_t` fields (`diffusion_model_path`, `vae_path`, `clip_l_path`, `t5xxl_path`, `llm_path`, `offload_params_to_cpu`, `diffusion_flash_attn`). `-m,--model` is no longer required — pass it for combined SD/SDXL checkpoints, or use `--diffusion-model` + component paths for split layouts (Z-Image, Flux, SD3). `chimera_sd::load_model` gained a `LoadParams` overload; the single-path overload is kept for the existing `serve` caller. Validated end-to-end on Z-Image-Turbo (`z_image_turbo-Q6_K.gguf` + `ae.safetensors` + `Qwen3-4B-Q8_0.gguf`) via `scripts/case/z_turbo.sh`, on a CUDA build (RTX 4060, sd.cpp `master-596-90e87bc`, CUDA backend for all three of llama/whisper/sd).

@@ -29,8 +29,27 @@ struct Config {
     int         gpu_layers = 0;
     uint32_t    n_ctx = 0;              // 0 = model's training context
     uint32_t    n_batch = 512;          // bumped to fit each chunk
+    uint32_t    n_ubatch = 0;           // 0 = follow n_batch
     bool        normalize = true;       // L2-normalize the output vector
     bool        use_mmap = true;
+    bool        use_mlock = false;
+    bool        flash_attn = false;
+
+    // RoPE / YaRN — 0 / sentinel = leave llama.cpp default
+    float       rope_freq_base   = 0.0f;
+    float       rope_freq_scale  = 0.0f;
+    std::string rope_scaling;
+    uint32_t    yarn_orig_ctx    = 0;
+    float       yarn_ext_factor  = -1.0f;
+    float       yarn_attn_factor = 1.0f;
+    float       yarn_beta_fast   = 32.0f;
+    float       yarn_beta_slow   = 1.0f;
+
+    // Multi-GPU
+    int         main_gpu = 0;
+    std::string tensor_split;
+    std::string split_mode;
+    std::string devices;
 };
 
 class Embedder {

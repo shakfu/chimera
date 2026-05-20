@@ -43,6 +43,8 @@
 
 #include "chat.h"
 #include "chimera.h"
+#include "json-schema-to-grammar.h"
+#include "nlohmann/json.hpp"
 #include "chimera_chat_store.h"
 #include "chimera_db.h"
 #include "chimera_embed.h"
@@ -52,6 +54,7 @@
 #include "chimera_whisper.h"
 #include "common.h"
 #include "ggml.h"
+#include "ggml-backend.h"
 #include "llama.h"
 #include "log.h"
 #include "mtmd.h"
@@ -231,6 +234,164 @@ std::string token_to_piece(const llama_vocab * vocab, llama_token token) {
     return std::string(buf.data(), static_cast<size_t>(n));
 }
 
+// Parse a "path[:scale]" LoRA spec. Scale defaults to 1.0 when omitted.
+// Mirrors the parser in chimera_serve.cpp so both code paths accept the
+// same syntax (and tolerate Windows "C:\..." paths with no trailing
+// numeric suffix).
+struct LoraSpec { std::string path; float scale; };
+LoraSpec parse_lora_spec(const std::string & spec) {
+    LoraSpec out{spec, 1.0f};
+    const auto colon = spec.find_last_of(':');
+    if (colon != std::string::npos) {
+        try {
+            out.scale = std::stof(spec.substr(colon + 1));
+            out.path  = spec.substr(0, colon);
+        } catch (const std::exception &) {
+            out.path = spec;
+        }
+    }
+    return out;
+}
+
+// Map a string like "f16" / "q8_0" to the matching ggml type enum.
+// Returns false on unknown values; caller decides whether to fail.
+bool parse_cache_type(const std::string & name, ggml_type & out) {
+    static const std::vector<std::pair<std::string, ggml_type>> table = {
+        {"f32",    GGML_TYPE_F32},
+        {"f16",    GGML_TYPE_F16},
+        {"bf16",   GGML_TYPE_BF16},
+        {"q8_0",   GGML_TYPE_Q8_0},
+        {"q5_0",   GGML_TYPE_Q5_0},
+        {"q5_1",   GGML_TYPE_Q5_1},
+        {"q4_0",   GGML_TYPE_Q4_0},
+        {"q4_1",   GGML_TYPE_Q4_1},
+        {"iq4_nl", GGML_TYPE_IQ4_NL},
+    };
+    for (const auto & [k, v] : table) {
+        if (k == name) { out = v; return true; }
+    }
+    return false;
+}
+
+llama_rope_scaling_type parse_rope_scaling(const std::string & name) {
+    if (name.empty() || name == "unspecified") return LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED;
+    if (name == "none")     return LLAMA_ROPE_SCALING_TYPE_NONE;
+    if (name == "linear")   return LLAMA_ROPE_SCALING_TYPE_LINEAR;
+    if (name == "yarn")     return LLAMA_ROPE_SCALING_TYPE_YARN;
+    if (name == "longrope") return LLAMA_ROPE_SCALING_TYPE_LONGROPE;
+    fail(ExitCode::BadInput, "unknown --rope-scaling: " + name);
+}
+
+llama_split_mode parse_split_mode(const std::string & name) {
+    if (name.empty() || name == "layer") return LLAMA_SPLIT_MODE_LAYER;
+    if (name == "none")   return LLAMA_SPLIT_MODE_NONE;
+    if (name == "row")    return LLAMA_SPLIT_MODE_ROW;
+    if (name == "tensor") return LLAMA_SPLIT_MODE_TENSOR;
+    fail(ExitCode::BadInput, "unknown --split-mode: " + name);
+}
+
+std::vector<std::string> split_csv(const std::string & s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == ',') { if (!cur.empty()) out.push_back(cur); cur.clear(); }
+        else cur.push_back(c);
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+// Parse a comma-separated float list (--tensor-split). Returns empty when
+// the input is empty. Throws on malformed values.
+std::vector<float> parse_float_csv(const std::string & s) {
+    std::vector<float> out;
+    for (const auto & tok : split_csv(s)) {
+        try { out.push_back(std::stof(tok)); }
+        catch (const std::exception &) {
+            fail(ExitCode::BadInput, "invalid float in --tensor-split: '" + tok + "'");
+        }
+    }
+    return out;
+}
+
+// Resolve a comma-separated device-name list to a NULL-terminated
+// ggml_backend_dev_t array. Returns empty when input is empty.
+std::vector<ggml_backend_dev_t> resolve_devices(const std::string & devices_csv) {
+    std::vector<ggml_backend_dev_t> out;
+    if (devices_csv.empty()) return out;
+    for (const auto & name : split_csv(devices_csv)) {
+        ggml_backend_dev_t dev = ggml_backend_dev_by_name(name.c_str());
+        if (dev == nullptr) {
+            fail(ExitCode::BadInput, "unknown device: '" + name + "'");
+        }
+        out.push_back(dev);
+    }
+    out.push_back(nullptr);  // NULL-terminator expected by llama_model_params.devices
+    return out;
+}
+
+// Apply model-load options that are shared across all subcommands (gen,
+// chat, embed). Caller has already constructed `params` from
+// llama_model_default_params(). The caller owns the lifetime of the
+// std::string source members; this helper writes raw pointers into
+// `params` that must stay valid until the model load completes.
+struct ModelExtras {
+    std::vector<ggml_backend_dev_t> devices_storage;
+    std::vector<float> tensor_split_storage;
+};
+
+void apply_model_common(llama_model_params & params,
+                        ModelExtras & extras,
+                        bool use_mmap,
+                        bool use_mlock,
+                        int main_gpu,
+                        const std::string & tensor_split_csv,
+                        const std::string & split_mode_name,
+                        const std::string & devices_csv) {
+    params.use_mmap  = use_mmap;
+    params.use_mlock = use_mlock;
+    params.main_gpu  = main_gpu;
+    if (!split_mode_name.empty()) {
+        params.split_mode = parse_split_mode(split_mode_name);
+    }
+    if (!tensor_split_csv.empty()) {
+        extras.tensor_split_storage = parse_float_csv(tensor_split_csv);
+        if (!extras.tensor_split_storage.empty()) {
+            params.tensor_split = extras.tensor_split_storage.data();
+        }
+    }
+    if (!devices_csv.empty()) {
+        extras.devices_storage = resolve_devices(devices_csv);
+        if (!extras.devices_storage.empty()) {
+            params.devices = extras.devices_storage.data();
+        }
+    }
+}
+
+// Parse a single --logit-bias entry. Accepts "<id>(+|-|=)<bias>" with the
+// "=" form requiring an explicit sign or unsigned float. Returns false on
+// malformed input; caller fails with a useful message.
+bool parse_logit_bias(const std::string & spec, llama_logit_bias & out) {
+    // Find the first operator after a run of digits.
+    size_t i = 0;
+    if (i < spec.size() && (spec[i] == '+' || spec[i] == '-')) ++i;
+    while (i < spec.size() && std::isdigit(static_cast<unsigned char>(spec[i]))) ++i;
+    if (i == 0 || i >= spec.size()) return false;
+    const char op = spec[i];
+    if (op != '+' && op != '-' && op != '=') return false;
+    try {
+        out.token = static_cast<llama_token>(std::stoi(spec.substr(0, i)));
+        const std::string rest = spec.substr(i + 1);
+        const float v = rest.empty() ? 0.0f : std::stof(rest);
+        if (op == '+') out.bias = +v;
+        else if (op == '-') out.bias = -v;
+        else                out.bias = v;
+    } catch (const std::exception &) {
+        return false;
+    }
+    return true;
+}
+
 LlamaModelPtr load_llama_model(const LlamaCommonOptions & opts) {
     // Bail out with a precise message when the path doesn't resolve to a
     // readable file before we even try llama_model_load_from_file. The
@@ -254,7 +415,11 @@ LlamaModelPtr load_llama_model(const LlamaCommonOptions & opts) {
 
     llama_model_params params = llama_model_default_params();
     params.n_gpu_layers = opts.gpu_layers;
-    params.use_mmap = opts.use_mmap;
+    ModelExtras extras;
+    apply_model_common(params, extras,
+                       opts.use_mmap, opts.use_mlock,
+                       opts.main_gpu, opts.tensor_split,
+                       opts.split_mode, opts.devices);
 
     LlamaModelPtr model(llama_model_load_from_file(opts.model.c_str(), params));
     if (!model) {
@@ -270,16 +435,102 @@ LlamaContextPtr new_llama_context(llama_model * model, const LlamaCommonOptions 
     llama_context_params params = llama_context_default_params();
     params.n_ctx = std::max<uint32_t>(opts.n_ctx, static_cast<uint32_t>(min_prompt_tokens + opts.n_predict + 32));
     params.n_batch = std::max<uint32_t>(1, opts.n_batch);
-    params.n_ubatch = params.n_batch;
+    params.n_ubatch = opts.n_ubatch > 0 ? opts.n_ubatch : params.n_batch;
     params.n_threads = opts.threads;
     params.n_threads_batch = opts.threads;
     params.no_perf = true;
+
+    if (opts.flash_attn) {
+        params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    }
+    if (!opts.cache_type_k.empty()) {
+        ggml_type t;
+        if (!parse_cache_type(opts.cache_type_k, t)) {
+            fail(ExitCode::BadInput, "unknown --cache-type-k: " + opts.cache_type_k);
+        }
+        params.type_k = t;
+    }
+    if (!opts.cache_type_v.empty()) {
+        ggml_type t;
+        if (!parse_cache_type(opts.cache_type_v, t)) {
+            fail(ExitCode::BadInput, "unknown --cache-type-v: " + opts.cache_type_v);
+        }
+        params.type_v = t;
+    }
+    if (opts.rope_freq_base  > 0.0f) params.rope_freq_base  = opts.rope_freq_base;
+    if (opts.rope_freq_scale > 0.0f) params.rope_freq_scale = opts.rope_freq_scale;
+    if (!opts.rope_scaling.empty()) {
+        params.rope_scaling_type = parse_rope_scaling(opts.rope_scaling);
+    }
+    if (opts.yarn_orig_ctx > 0) params.yarn_orig_ctx = opts.yarn_orig_ctx;
+    params.yarn_ext_factor  = opts.yarn_ext_factor;
+    params.yarn_attn_factor = opts.yarn_attn_factor;
+    params.yarn_beta_fast   = opts.yarn_beta_fast;
+    params.yarn_beta_slow   = opts.yarn_beta_slow;
 
     LlamaContextPtr ctx(llama_init_from_model(model, params));
     if (!ctx) {
         fail(ExitCode::Load, "failed to create llama context");
     }
     return ctx;
+}
+
+// Read grammar from file or string. Mutually exclusive — caller checked.
+std::string resolve_grammar(const LlamaCommonOptions & opts) {
+    int set = 0;
+    set += !opts.grammar.empty();
+    set += !opts.grammar_file.empty();
+    set += !opts.json_schema.empty();
+    set += !opts.json_schema_file.empty();
+    if (set > 1) {
+        fail(ExitCode::BadInput,
+             "use only one of --grammar / --grammar-file / "
+             "--json-schema / --json-schema-file");
+    }
+    if (!opts.grammar.empty()) return opts.grammar;
+    if (!opts.grammar_file.empty()) return read_file(opts.grammar_file);
+    std::string schema_text;
+    if (!opts.json_schema.empty()) schema_text = opts.json_schema;
+    else if (!opts.json_schema_file.empty()) schema_text = read_file(opts.json_schema_file);
+    if (schema_text.empty()) return {};
+    try {
+        auto schema = nlohmann::ordered_json::parse(schema_text);
+        return json_schema_to_grammar(schema);
+    } catch (const std::exception & e) {
+        fail(ExitCode::BadInput,
+             std::string("failed to convert --json-schema to grammar: ") + e.what());
+    }
+    return {};
+}
+
+// Load each --lora spec into the model and attach (with the parsed scale)
+// to `ctx`. The returned vector keeps the adapter handles alive for the
+// duration of the call site — drop it after generation to free them.
+struct LoraAdapters {
+    std::vector<llama_adapter_lora_ptr> adapters;
+};
+LoraAdapters load_loras(llama_model * model, llama_context * ctx,
+                        const std::vector<std::string> & specs) {
+    LoraAdapters out;
+    if (specs.empty()) return out;
+    std::vector<llama_adapter_lora *> raw_ptrs;
+    std::vector<float>                scales;
+    raw_ptrs.reserve(specs.size());
+    scales.reserve(specs.size());
+    for (const auto & raw : specs) {
+        const auto parsed = parse_lora_spec(raw);
+        llama_adapter_lora * a = llama_adapter_lora_init(model, parsed.path.c_str());
+        if (a == nullptr) {
+            fail(ExitCode::Load, "failed to load LoRA adapter: " + parsed.path);
+        }
+        raw_ptrs.push_back(a);
+        scales.push_back(parsed.scale);
+        out.adapters.emplace_back(a);
+    }
+    if (llama_set_adapters_lora(ctx, raw_ptrs.data(), raw_ptrs.size(), scales.data()) != 0) {
+        fail(ExitCode::Load, "failed to attach LoRA adapters to context");
+    }
+    return out;
 }
 
 // Decode a batch of tokens into the context's KV cache, batched by n_batch
@@ -460,7 +711,38 @@ common_sampler_ptr make_sampler(const llama_model * model, const LlamaCommonOpti
     sampling.min_p = opts.min_p;
     sampling.temp = opts.temp;
     sampling.penalty_repeat = opts.repeat_penalty;
+    sampling.penalty_last_n  = opts.penalty_last_n;
+    sampling.penalty_present = opts.penalty_present;
+    sampling.penalty_freq    = opts.penalty_freq;
+    sampling.mirostat        = opts.mirostat;
+    sampling.mirostat_tau    = opts.mirostat_tau;
+    sampling.mirostat_eta    = opts.mirostat_eta;
+    sampling.dry_multiplier     = opts.dry_multiplier;
+    sampling.dry_base           = opts.dry_base;
+    sampling.dry_allowed_length = opts.dry_allowed_length;
+    sampling.dry_penalty_last_n = opts.dry_penalty_last_n;
+    if (!opts.dry_sequence_breakers.empty()) {
+        sampling.dry_sequence_breakers = opts.dry_sequence_breakers;
+    }
+    sampling.ignore_eos = opts.ignore_eos;
     sampling.no_perf = true;
+
+    for (const auto & spec : opts.logit_bias) {
+        llama_logit_bias lb{};
+        if (!parse_logit_bias(spec, lb)) {
+            fail(ExitCode::BadInput, "invalid --logit-bias: '" + spec + "'");
+        }
+        sampling.logit_bias.push_back(lb);
+    }
+
+    const std::string grammar_str = resolve_grammar(opts);
+    if (!grammar_str.empty()) {
+        const bool from_schema = !opts.json_schema.empty() || !opts.json_schema_file.empty();
+        sampling.grammar = common_grammar(
+            from_schema ? COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT
+                        : COMMON_GRAMMAR_TYPE_USER,
+            grammar_str);
+    }
 
     common_sampler * sampler = common_sampler_init(model, sampling);
     if (sampler == nullptr) {
@@ -499,10 +781,14 @@ std::string run_generation_mtmd(
     }
 
     mtmd_context_params mparams = mtmd_context_params_default();
-    // Leave use_gpu at its default (true): the vision encoder is a separate
-    // backend choice from --gpu-layers, which only controls LLM offload.
-    mparams.n_threads = opts.threads;
+    // use_gpu controls vision encoder offload, independent of --gpu-layers
+    // (which only governs LLM layers). --mmproj-offload toggles it.
+    mparams.use_gpu       = opts.mmproj_use_gpu;
+    mparams.n_threads     = opts.threads;
     mparams.print_timings = false;
+    if (opts.flash_attn) {
+        mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    }
 
     MtmdContextPtr mctx(mtmd_init_from_file(opts.mmproj.c_str(), model, mparams));
     if (!mctx) {
@@ -584,6 +870,7 @@ std::string run_generation_mtmd(
     // Size the context to hold the multimodal prompt + room to generate.
     const size_t mm_tokens = mtmd_helper_get_n_tokens(chunks.get());
     auto ctx = new_llama_context(model, opts, mm_tokens);
+    auto loras = load_loras(model, ctx.get(), opts.lora_adapters);
     auto sampler = make_sampler(model, opts);
 
     llama_pos new_n_past = 0;
@@ -614,6 +901,7 @@ std::string run_generation(
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const auto prompt_tokens = tokenize(vocab, prompt, add_special, true);
     auto ctx = new_llama_context(model, opts, prompt_tokens.size());
+    auto loras = load_loras(model, ctx.get(), opts.lora_adapters);
     auto sampler = make_sampler(model, opts);
 
     decode_tokens(ctx.get(), prompt_tokens, static_cast<int32_t>(opts.n_batch));
@@ -907,8 +1195,12 @@ int command_chat(const LlamaCommonOptions & opts,
     if (!opts.mmproj.empty()) {
         spinner.start("loading mmproj...");
         mtmd_context_params mparams = mtmd_context_params_default();
-        mparams.n_threads = opts.threads;
+        mparams.use_gpu       = opts.mmproj_use_gpu;
+        mparams.n_threads     = opts.threads;
         mparams.print_timings = false;
+        if (opts.flash_attn) {
+            mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        }
         mctx.reset(mtmd_init_from_file(opts.mmproj.c_str(), model.get(), mparams));
         spinner.stop();
         if (!mctx) {
@@ -917,6 +1209,7 @@ int command_chat(const LlamaCommonOptions & opts,
     }
 
     auto ctx     = new_llama_context(model.get(), opts, /*min_prompt_tokens=*/0);
+    auto loras   = load_loras(model.get(), ctx.get(), opts.lora_adapters);
     auto sampler = make_sampler(model.get(), opts);
     llama_memory_t mem = llama_get_memory(ctx.get());
 
@@ -1286,14 +1579,27 @@ int command_chat(const LlamaCommonOptions & opts,
         common_chat_templates_inputs inputs;
         inputs.messages = history;
         inputs.add_generation_prompt = true;
-        inputs.use_jinja = true;
+        inputs.use_jinja = opts.use_jinja;
+        inputs.chat_template_kwargs = opts.chat_template_kwargs;
+        // Resolve reasoning format: --reasoning-format wins; falls back
+        // to --reasoning; default keeps current behavior (DEEPSEEK in the
+        // parser, NONE in template inputs).
+        common_reasoning_format rf_inputs = COMMON_REASONING_FORMAT_NONE;
+        const std::string & rf_name =
+            !opts.reasoning_format.empty() ? opts.reasoning_format : opts.reasoning;
+        if (!rf_name.empty()) {
+            rf_inputs = common_reasoning_format_from_name(rf_name);
+            inputs.reasoning_format = rf_inputs;
+        }
         common_chat_params params = common_chat_templates_apply(templates.get(), inputs);
 
         // Parser config for streaming chat output. DEEPSEEK reasoning
         // format covers <think>...</think> spans (the de-facto standard
         // across DeepSeek, Qwen3-thinking, and most open reasoning models).
         common_chat_parser_params parser_params(params);
-        parser_params.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
+        parser_params.reasoning_format = rf_name.empty()
+            ? COMMON_REASONING_FORMAT_DEEPSEEK
+            : rf_inputs;
 
         std::vector<llama_token> generated;
         std::string reply;
@@ -1491,8 +1797,23 @@ int command_embed(const EmbedOptions & opts) {
     cfg.gpu_layers = opts.gpu_layers;
     cfg.n_ctx      = opts.n_ctx;
     cfg.n_batch    = opts.n_batch;
+    cfg.n_ubatch   = opts.n_ubatch;
     cfg.normalize  = opts.normalize;
     cfg.use_mmap   = opts.use_mmap;
+    cfg.use_mlock  = opts.use_mlock;
+    cfg.flash_attn = opts.flash_attn;
+    cfg.rope_freq_base   = opts.rope_freq_base;
+    cfg.rope_freq_scale  = opts.rope_freq_scale;
+    cfg.rope_scaling     = opts.rope_scaling;
+    cfg.yarn_orig_ctx    = opts.yarn_orig_ctx;
+    cfg.yarn_ext_factor  = opts.yarn_ext_factor;
+    cfg.yarn_attn_factor = opts.yarn_attn_factor;
+    cfg.yarn_beta_fast   = opts.yarn_beta_fast;
+    cfg.yarn_beta_slow   = opts.yarn_beta_slow;
+    cfg.main_gpu         = opts.main_gpu;
+    cfg.tensor_split     = opts.tensor_split;
+    cfg.split_mode       = opts.split_mode;
+    cfg.devices          = opts.devices;
     chimera_embed::Embedder embedder(cfg);
     std::unique_ptr<chimera_embed_cache::Cache> ecache;
     if (opts.cache_embeddings) {
@@ -2310,6 +2631,87 @@ struct ParsedCli {
     std::string srch_mode             = "hybrid";
 };
 
+// Bind flags shared by `gen` and `chat`. These all map to fields on
+// LlamaCommonOptions; the helper keeps the two subcommand bindings in
+// sync without copy-paste drift.
+void bind_llama_common_opts(CLI::App * cmd, LlamaCommonOptions & o) {
+    // Performance / cache
+    cmd->add_flag("--flash-attn", o.flash_attn, "Enable Flash Attention");
+    cmd->add_option("--cache-type-k", o.cache_type_k,
+        "KV cache K type: f32 | f16 | bf16 | q8_0 | q5_0 | q5_1 | q4_0 | q4_1 | iq4_nl")
+        ->check(CLI::IsMember({"f32","f16","bf16","q8_0","q5_0","q5_1","q4_0","q4_1","iq4_nl"}));
+    cmd->add_option("--cache-type-v", o.cache_type_v,
+        "KV cache V type (same values as --cache-type-k)")
+        ->check(CLI::IsMember({"f32","f16","bf16","q8_0","q5_0","q5_1","q4_0","q4_1","iq4_nl"}));
+    cmd->add_option("--ubatch-size", o.n_ubatch,
+        "Physical batch size (0 = follow --batch-size)");
+
+    // Penalties + sampling
+    cmd->add_option("--repeat-last-n", o.penalty_last_n,
+        "Tokens scanned for repeat penalty (0 = disable, -1 = ctx-size)");
+    cmd->add_option("--presence-penalty", o.penalty_present, "Presence penalty");
+    cmd->add_option("--frequency-penalty", o.penalty_freq, "Frequency penalty");
+    cmd->add_option("--mirostat", o.mirostat, "Mirostat: 0 disabled, 1 v1, 2 v2");
+    cmd->add_option("--mirostat-ent", o.mirostat_tau, "Mirostat target entropy (tau)");
+    cmd->add_option("--mirostat-lr",  o.mirostat_eta, "Mirostat learning rate (eta)");
+    cmd->add_option("--dry-multiplier", o.dry_multiplier, "DRY repetition penalty multiplier");
+    cmd->add_option("--dry-base", o.dry_base, "DRY repetition penalty base");
+    cmd->add_option("--dry-allowed-length", o.dry_allowed_length,
+        "DRY: tokens extending repetition beyond this receive penalty");
+    cmd->add_option("--dry-penalty-last-n", o.dry_penalty_last_n,
+        "DRY: tokens scanned for repetitions (-1 = ctx-size)");
+    cmd->add_option("--dry-sequence-breaker", o.dry_sequence_breakers,
+        "DRY sequence breaker (repeatable)");
+    cmd->add_option("--logit-bias", o.logit_bias,
+        "Bias a token (\"<id>(+|-|=)<bias>\"; repeatable)");
+    cmd->add_flag("--ignore-eos", o.ignore_eos, "Ignore end-of-stream tokens");
+
+    // Grammar / JSON schema (resolved later; mutually exclusive)
+    cmd->add_option("--grammar", o.grammar, "GBNF grammar");
+    cmd->add_option("--grammar-file", o.grammar_file, "Read GBNF grammar from file");
+    cmd->add_option("--json-schema", o.json_schema,
+        "Constrain output to a JSON schema (converted to grammar)");
+    cmd->add_option("--json-schema-file", o.json_schema_file,
+        "Read JSON schema from file");
+
+    // LoRA
+    cmd->add_option("--lora", o.lora_adapters,
+        "LoRA adapter as path[:scale] (scale defaults to 1.0; repeatable)");
+
+    // RoPE / YaRN
+    cmd->add_option("--rope-freq-base", o.rope_freq_base, "RoPE base frequency (0 = from model)");
+    cmd->add_option("--rope-freq-scale", o.rope_freq_scale, "RoPE frequency scale (0 = from model)");
+    cmd->add_option("--rope-scale", o.rope_freq_scale,
+        "Inverse of --rope-freq-scale; alias for compatibility");
+    cmd->add_option("--rope-scaling", o.rope_scaling,
+        "RoPE scaling: none | linear | yarn | longrope")
+        ->check(CLI::IsMember({"none","linear","yarn","longrope"}));
+    cmd->add_option("--yarn-orig-ctx",   o.yarn_orig_ctx,   "YaRN original context size");
+    cmd->add_option("--yarn-ext-factor", o.yarn_ext_factor, "YaRN extrapolation mix factor (negative = from model)");
+    cmd->add_option("--yarn-attn-factor",o.yarn_attn_factor,"YaRN magnitude scaling factor");
+    cmd->add_option("--yarn-beta-fast",  o.yarn_beta_fast,  "YaRN low correction dim");
+    cmd->add_option("--yarn-beta-slow",  o.yarn_beta_slow,  "YaRN high correction dim");
+
+    // Multi-GPU
+    cmd->add_option("--main-gpu", o.main_gpu,
+        "Index of the GPU used when --split-mode=none");
+    cmd->add_option("--tensor-split", o.tensor_split,
+        "Per-GPU offload proportions (comma-separated floats)");
+    cmd->add_option("--split-mode", o.split_mode,
+        "Multi-GPU split mode: none | layer | row | tensor")
+        ->check(CLI::IsMember({"none","layer","row","tensor"}));
+    cmd->add_option("--device", o.devices,
+        "Comma-separated device list (names from `ggml_backend_dev_by_name`)");
+
+    // Mmap / mlock
+    cmd->add_flag("!--no-mmap", o.use_mmap, "Disable mmap'ing model weights");
+    cmd->add_flag("--mlock", o.use_mlock, "Force the system to keep model in RAM");
+
+    // mmproj offload
+    cmd->add_flag("!--no-mmproj-offload", o.mmproj_use_gpu,
+        "Run the multimodal projector on CPU (defaults to GPU)");
+}
+
 void bind_gen_cmd(CLI::App & app, ParsedCli & p) {
     auto * cmd = app.add_subcommand("gen", "One-shot llama text generation");
     cmd->add_option("-m,--model", p.prompt_opts.model, "GGUF model")->required();
@@ -2331,6 +2733,7 @@ void bind_gen_cmd(CLI::App & app, ParsedCli & p) {
         "Multimodal projector (mmproj GGUF) for vision/audio input");
     cmd->add_option("--image", p.prompt_opts.images,
         "Image to feed alongside the prompt (repeatable; requires --mmproj)");
+    bind_llama_common_opts(cmd, p.prompt_opts);
     p.prompt_cmd = cmd;
 }
 
@@ -2379,6 +2782,24 @@ void bind_chat_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--color", p.color_arg,
         "Colorize input/output: auto | always | never")
         ->check(CLI::IsMember({"auto", "always", "never"}));
+
+    // Chat template + jinja + reasoning
+    cmd->add_option("--chat-template-file", p.chat_opts.chat_template_file,
+        "Read the chat template override from a file");
+    cmd->add_option("--chat-template-kwargs", p.chat_opts.chat_template_kwargs,
+        "Extra key=value pairs passed to the jinja template (repeatable)");
+    cmd->add_flag("!--no-jinja", p.chat_opts.use_jinja,
+        "Disable the jinja chat template renderer (default: enabled)");
+    cmd->add_option("--reasoning", p.chat_opts.reasoning,
+        "Reasoning format: none | deepseek | granite | ...");
+    cmd->add_option("--reasoning-format", p.chat_opts.reasoning_format,
+        "Alias of --reasoning");
+    cmd->add_option("--reasoning-budget", p.chat_opts.reasoning_budget,
+        "Token budget for reasoning content (-1 = disabled)");
+    cmd->add_option("--reasoning-budget-message", p.chat_opts.reasoning_budget_message,
+        "Message injected before the closing thought tag when the budget is exhausted");
+
+    bind_llama_common_opts(cmd, p.chat_opts);
     p.chat_cmd = cmd;
 }
 
@@ -2419,6 +2840,29 @@ void bind_embed_cmd(CLI::App & app, ParsedCli & p) {
         "(default: $CHIMERA_DB or platform default)");
     cmd->add_flag("!--no-normalize", p.embed_opts.normalize,
         "Do not L2-normalize the output vector");
+    cmd->add_option("--ubatch-size", p.embed_opts.n_ubatch,
+        "Physical batch size (0 = follow --batch-size)");
+    cmd->add_flag("--flash-attn", p.embed_opts.flash_attn, "Enable Flash Attention");
+    cmd->add_flag("!--no-mmap", p.embed_opts.use_mmap, "Disable mmap'ing model weights");
+    cmd->add_flag("--mlock", p.embed_opts.use_mlock, "Force the system to keep model in RAM");
+    cmd->add_option("--rope-freq-base",  p.embed_opts.rope_freq_base,  "RoPE base frequency (0 = from model)");
+    cmd->add_option("--rope-freq-scale", p.embed_opts.rope_freq_scale, "RoPE frequency scale (0 = from model)");
+    cmd->add_option("--rope-scale",      p.embed_opts.rope_freq_scale, "Alias of --rope-freq-scale");
+    cmd->add_option("--rope-scaling",    p.embed_opts.rope_scaling,
+        "RoPE scaling: none | linear | yarn | longrope")
+        ->check(CLI::IsMember({"none","linear","yarn","longrope"}));
+    cmd->add_option("--yarn-orig-ctx",    p.embed_opts.yarn_orig_ctx,    "YaRN original context size");
+    cmd->add_option("--yarn-ext-factor",  p.embed_opts.yarn_ext_factor,  "YaRN extrapolation mix factor");
+    cmd->add_option("--yarn-attn-factor", p.embed_opts.yarn_attn_factor, "YaRN magnitude scaling factor");
+    cmd->add_option("--yarn-beta-fast",   p.embed_opts.yarn_beta_fast,   "YaRN low correction dim");
+    cmd->add_option("--yarn-beta-slow",   p.embed_opts.yarn_beta_slow,   "YaRN high correction dim");
+    cmd->add_option("--main-gpu",     p.embed_opts.main_gpu,     "Index of the GPU used when --split-mode=none");
+    cmd->add_option("--tensor-split", p.embed_opts.tensor_split, "Per-GPU offload proportions (comma-separated)");
+    cmd->add_option("--split-mode",   p.embed_opts.split_mode,
+        "Multi-GPU split mode: none | layer | row | tensor")
+        ->check(CLI::IsMember({"none","layer","row","tensor"}));
+    cmd->add_option("--device", p.embed_opts.devices,
+        "Comma-separated device list");
     p.embed_cmd = cmd;
 }
 
@@ -2728,7 +3172,15 @@ int dispatch_cli(ParsedCli & p) {
         persist_cfg.persist  = p.chat_persist;
         persist_cfg.resume   = p.chat_resume;
         persist_cfg.db_path  = p.chat_db_path;
-        return command_chat(p.chat_opts, resolved_system, p.template_override,
+        std::string resolved_template = p.template_override;
+        if (!p.chat_opts.chat_template_file.empty()) {
+            if (!resolved_template.empty()) {
+                fail(ExitCode::BadInput,
+                    "use only one of --chat-template / --chat-template-file");
+            }
+            resolved_template = read_file(p.chat_opts.chat_template_file);
+        }
+        return command_chat(p.chat_opts, resolved_system, resolved_template,
                             parse_color_mode(p.color_arg), persist_cfg);
     }
     if (*p.tokenize_cmd)     return command_tokenize    (p.tokenize_opts);

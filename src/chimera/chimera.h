@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -28,6 +29,7 @@ struct LlamaCommonOptions {
     std::vector<std::string> images;  // images to feed alongside the prompt (gen only)
     uint32_t n_ctx = 4096;
     uint32_t n_batch = 512;
+    uint32_t n_ubatch = 0;          // 0 = follow n_batch (preserves legacy behavior)
     int threads = -1;
     int gpu_layers = 0;
     int n_predict = 256;
@@ -38,6 +40,64 @@ struct LlamaCommonOptions {
     float min_p = 0.05f;
     float repeat_penalty = 1.1f;
     bool use_mmap = true;
+    bool use_mlock = false;
+
+    // Perf / cache
+    bool        flash_attn = false;
+    std::string cache_type_k;       // empty = leave default (f16); else f16/q8_0/...
+    std::string cache_type_v;
+
+    // Sampler — penalties / mirostat / dry / logit bias
+    int   penalty_last_n   = 64;
+    float penalty_present  = 0.0f;
+    float penalty_freq     = 0.0f;
+    int   mirostat         = 0;
+    float mirostat_tau     = 5.0f;
+    float mirostat_eta     = 0.1f;
+    float dry_multiplier   = 0.0f;
+    float dry_base         = 1.75f;
+    int   dry_allowed_length = 2;
+    int   dry_penalty_last_n = -1;
+    std::vector<std::string> dry_sequence_breakers; // empty = leave upstream default
+    std::vector<std::string> logit_bias;            // "<id>(+|-|=)<bias>" or "<id>=<bias>"
+    bool  ignore_eos = false;
+
+    // Grammar / JSON-schema (mutually exclusive at CLI parse time)
+    std::string grammar;
+    std::string grammar_file;
+    std::string json_schema;
+    std::string json_schema_file;
+
+    // LoRA adapters: "path[:scale]" entries (repeatable)
+    std::vector<std::string> lora_adapters;
+
+    // RoPE / YaRN
+    float    rope_freq_base   = 0.0f;
+    float    rope_freq_scale  = 0.0f;
+    std::string rope_scaling;          // empty | none | linear | yarn | longrope
+    uint32_t yarn_orig_ctx    = 0;
+    float    yarn_ext_factor  = -1.0f;
+    float    yarn_attn_factor = 1.0f;
+    float    yarn_beta_fast   = 32.0f;
+    float    yarn_beta_slow   = 1.0f;
+
+    // Multi-GPU / device selection
+    int         main_gpu = 0;
+    std::string tensor_split;          // "0.5,0.5" comma-separated
+    std::string split_mode;            // empty | none | layer | row
+    std::string devices;               // comma-separated dev names
+
+    // Mmproj offload
+    bool mmproj_use_gpu = true;
+
+    // Chat-only: jinja / chat template
+    std::string chat_template_file;    // contents read into template_override
+    std::map<std::string, std::string> chat_template_kwargs;
+    bool use_jinja = true;             // default ON; --no-jinja flips
+    std::string reasoning;             // none | deepseek | ... (free-form, mapped via common_reasoning_format_from_name)
+    int  reasoning_budget = -1;
+    std::string reasoning_format;      // alias of `reasoning` if specified
+    std::string reasoning_budget_message;
 };
 
 struct EmbedOptions {
@@ -50,8 +110,27 @@ struct EmbedOptions {
     int gpu_layers = 0;
     uint32_t n_ctx = 0;            // 0 = use model's default training context
     uint32_t n_batch = 512;
+    uint32_t n_ubatch = 0;         // 0 = follow n_batch
     bool normalize = true;
     bool use_mmap = true;
+    bool use_mlock = false;
+    bool flash_attn = false;
+
+    // RoPE / YaRN
+    float    rope_freq_base   = 0.0f;
+    float    rope_freq_scale  = 0.0f;
+    std::string rope_scaling;
+    uint32_t yarn_orig_ctx    = 0;
+    float    yarn_ext_factor  = -1.0f;
+    float    yarn_attn_factor = 1.0f;
+    float    yarn_beta_fast   = 32.0f;
+    float    yarn_beta_slow   = 1.0f;
+
+    // Multi-GPU
+    int         main_gpu = 0;
+    std::string tensor_split;
+    std::string split_mode;
+    std::string devices;
 
     // Opt-in persistent embedding cache. When true, embed(text) -> vector
     // is memoized in `cache_db` (or the platform default if empty) so
