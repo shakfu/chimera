@@ -1175,6 +1175,19 @@ int command_chat(const LlamaCommonOptions & opts,
                  const ChatPersistence & persist_cfg = {}) {
     const bool color_on = apply_color_mode(color_mode);
 
+    // Honest no-op warning: --reasoning-budget is parsed into opts but
+    // requires chaining `common_reasoning_budget_init` into the sampler
+    // path, which means restructuring chat_sample_loop to apply samplers
+    // directly to the token-data array rather than via the opaque
+    // common_sampler_sample call. That rework is out of scope for now —
+    // flag a warning so the user isn't silently misled when they set it.
+    if (opts.reasoning_budget >= 0) {
+        std::cerr << "chimera: warning: --reasoning-budget is parsed but "
+                     "not yet enforced at the sampler level; the model "
+                     "will continue to think freely. See "
+                     "doc/dev/cli-api-coverage.md for status.\n";
+    }
+
     Spinner spinner;
     spinner.start("loading model...");
     auto model = load_llama_model(opts);
@@ -2370,7 +2383,16 @@ std::vector<std::string> backend_registry_names() {
 
 }  // namespace
 
-int command_info() {
+int command_info(bool list_devices_only = false) {
+    if (list_devices_only) {
+        const size_t n_dev = ggml_backend_dev_count();
+        for (size_t i = 0; i < n_dev; ++i) {
+            auto * d = ggml_backend_dev_get(i);
+            const char * dn = ggml_backend_dev_name(d);
+            std::cout << (dn ? dn : "?") << '\n';
+        }
+        return 0;
+    }
     std::cout << "chimera " << CHIMERA_VERSION << "\n"
               << platform_label() << "\n\n";
 
@@ -2561,6 +2583,7 @@ struct ParsedCli {
     CLI::App * db_backup_cmd    = nullptr;
     CLI::App * db_vacuum_cmd    = nullptr;
     CLI::App * info_cmd         = nullptr;
+    bool       info_list_devices = false;
     CLI::App * index_create_cmd = nullptr;
     CLI::App * index_ingest_cmd = nullptr;
     CLI::App * index_list_cmd   = nullptr;
@@ -2877,6 +2900,18 @@ void bind_whisper_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_flag("--translate", p.whisper_opts.translate, "Translate to English");
     cmd->add_flag("--timestamps", p.whisper_opts.timestamps, "Print segment timestamps");
     cmd->add_flag("--no-context", p.whisper_opts.no_context, "Disable previous-text conditioning");
+    cmd->add_option("--prompt", p.whisper_opts.initial_prompt,
+        "Initial prompt for vocabulary/style biasing (params.initial_prompt)");
+    cmd->add_flag("--carry-initial-prompt", p.whisper_opts.carry_initial_prompt,
+        "Prepend --prompt to every decode window (heavier conditioning)");
+    cmd->add_option("--beam-size", p.whisper_opts.beam_size,
+        "Beam width; >0 switches to beam-search sampling");
+    cmd->add_option("--best-of", p.whisper_opts.best_of,
+        "Number of candidates considered by greedy sampling");
+    cmd->add_option("--temperature", p.whisper_opts.temperature,
+        "Initial decoding temperature");
+    cmd->add_flag("--no-fallback", p.whisper_opts.no_fallback,
+        "Disable temperature-fallback ladder (sets temperature_inc<0)");
     // Note: CLI11 forbids multi-char short flags, so the upstream
     // whisper-cli aliases (-of/-otxt/-osrt/...) are long-only here.
     cmd->add_option("--output-file", p.whisper_opts.output_file_base,
@@ -2930,6 +2965,10 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Inpaint mask (single-channel; requires --init-image)");
     cmd->add_option("--strength", p.sd_opts.strength,
         "img2img denoising strength (0=preserve init, 1=full noise)");
+    cmd->add_option("--guidance", p.sd_opts.guidance,
+        "Distilled guidance scale (Flux / SD3); leave unset for upstream default");
+    cmd->add_option("--flow-shift", p.sd_opts.flow_shift,
+        "Flux/SD3 timestep shift; leave unset for upstream default");
     p.sd_cmd = cmd;
 }
 #endif
@@ -3022,6 +3061,9 @@ void bind_db_cmd(CLI::App & app, ParsedCli & p) {
 
 void bind_info_cmd(CLI::App & app, ParsedCli & p) {
     p.info_cmd = app.add_subcommand("info", "Print versions of bundled component");
+    p.info_cmd->add_flag("--list-devices", p.info_list_devices,
+        "Print only the available ggml device names, one per line "
+        "(suitable for piping into `--device` on gen/chat/embed)");
 }
 
 void bind_index_cmd(CLI::App & app, ParsedCli & p) {
@@ -3208,7 +3250,7 @@ int dispatch_cli(ParsedCli & p) {
     if (*p.db_status_cmd)    return command_db_status   (p.db_path_override);
     if (*p.db_backup_cmd)    return command_db_backup   (p.db_path_override, p.db_backup_dst);
     if (*p.db_vacuum_cmd)    return command_db_vacuum   (p.db_path_override);
-    if (*p.info_cmd)         return command_info        ();
+    if (*p.info_cmd)         return command_info        (p.info_list_devices);
     if (*p.index_create_cmd) {
         return command_index_create(p.idx_db_path, p.idx_name, p.idx_embedding_model,
                                      p.idx_ctx_size, p.idx_threads, p.idx_gpu_layers,

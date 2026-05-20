@@ -41,6 +41,8 @@ struct GenerateRequest {
     int64_t seed      = -1;
     float cfg_scale   = 7.0f;
     float strength    = 0.75f;  // only used when init is set (img2img)
+    float guidance    = -1.0f;  // distilled guidance (Flux/SD3); -1 = upstream default
+    float flow_shift  = -1.0f;  // Flux/SD3 timestep shift;       -1 = upstream default
     std::string sample_method;  // empty -> SD default
     std::string scheduler;      // empty -> SD default
 

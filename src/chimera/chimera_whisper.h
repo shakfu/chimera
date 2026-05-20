@@ -56,6 +56,15 @@ struct TranscribeRequest {
 
     int  threads      = -1;     // -1 = leave whisper's default
     std::string initial_prompt; // optional priming text (params.initial_prompt)
+    bool  carry_initial_prompt = false; // params.carry_initial_prompt
+
+    // Decoding strategy: when beam_size > 0, switch to BEAM_SEARCH and
+    // use the given beam width; otherwise stay on greedy with best_of.
+    // Negative / zero sentinels leave whisper.cpp's defaults in place.
+    int   beam_size   = -1;
+    int   best_of     = -1;
+    float temperature = -1.0f;
+    bool  no_fallback = false;  // sets temperature_inc to a negative value
 
     // When true, whisper produces per-token timing data which transcribe()
     // groups into Word entries on each Segment. Required for OpenAI's

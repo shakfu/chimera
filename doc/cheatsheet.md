@@ -159,6 +159,12 @@ chimera whisper -m ggml-base.en.bin -i speech.wav \
     --output-csv --output-lrc
 chimera whisper -m ggml-base.en.bin -i speech.wav \
     --output-json-full        # per-word timing in JSON
+
+# Decoding strategy
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --beam-size 5 --temperature 0 --no-fallback
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --prompt "JFK inaugural address, 1961."     # vocabulary biasing
 ```
 
 Non-WAV input? Convert first:
@@ -196,6 +202,12 @@ chimera sd -p "a lovely plump cat" -o out.png \
     --llm Qwen3-4B-Q8_0.gguf \
     --cfg-scale 1.0 --offload-to-cpu --diffusion-fa \
     -H 1024 -W 512
+
+# Flux / SD3: distilled guidance + flow-matching shift
+chimera sd -p "..." -o out.png \
+    --diffusion-model flux1-dev.gguf --vae ae.safetensors \
+    --t5xxl t5xxl_fp16.safetensors --clip-l clip_l.safetensors \
+    --guidance 3.5 --flow-shift 1.15
 ```
 
 ---
@@ -398,11 +410,16 @@ chimera db status --db /tmp/scratch.db                # arbitrary file
 
 ```sh
 chimera info
+chimera info --list-devices       # one device name per line; pipes into --device
 ```
 
 Prints chimera version, the platform tag, llama / whisper / sd
 version + ggml view + backend registries + enumerated devices, plus
 sqlite + sqlite-vec versions. Useful for bug reports.
+
+`--list-devices` is a parsing-friendly variant: just the device names
+("CUDA0", "Vulkan1", "CPU", ...), one per line, suitable for piping
+into `--device` on `gen` / `chat` / `embed`.
 
 ---
 

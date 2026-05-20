@@ -294,7 +294,25 @@ TranscribeResult transcribe(whisper_context * ctx, const TranscribeRequest & req
         fail(ExitCode::Runtime, "whisper context is null");
     }
 
-    whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+    const whisper_sampling_strategy strat = req.beam_size > 0
+        ? WHISPER_SAMPLING_BEAM_SEARCH
+        : WHISPER_SAMPLING_GREEDY;
+    whisper_full_params params = whisper_full_default_params(strat);
+    if (strat == WHISPER_SAMPLING_BEAM_SEARCH) {
+        params.beam_search.beam_size = req.beam_size;
+    }
+    if (req.best_of > 0) {
+        params.greedy.best_of = req.best_of;
+    }
+    if (req.temperature >= 0.0f) {
+        params.temperature = req.temperature;
+    }
+    if (req.no_fallback) {
+        // whisper.cpp convention: negative temperature_inc disables the
+        // temperature-fallback ladder in whisper_full_with_state.
+        params.temperature_inc = -1.0f;
+    }
+    params.carry_initial_prompt = req.carry_initial_prompt;
     // -1 is "auto" upstream but whisper.cpp's default expects a positive
     // value (otherwise it constructs a std::vector(n_threads) and throws).
     if (req.threads > 0) {
@@ -643,6 +661,12 @@ int command_whisper(const WhisperOptions & opts) {
     req.no_context      = opts.no_context;
     req.emit_timestamps = opts.timestamps || any_format;
     req.threads         = opts.threads;
+    req.initial_prompt        = opts.initial_prompt;
+    req.carry_initial_prompt  = opts.carry_initial_prompt;
+    req.beam_size             = opts.beam_size;
+    req.best_of               = opts.best_of;
+    req.temperature           = opts.temperature;
+    req.no_fallback           = opts.no_fallback;
     // -ojf needs per-word timing on top of segment-level timing.
     req.word_timestamps = opts.out_json_full;
     // Stream each finalized segment as soon as whisper.cpp emits it. Same

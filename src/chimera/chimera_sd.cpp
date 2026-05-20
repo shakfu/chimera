@@ -251,6 +251,8 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
     gp.clip_skip       = req.clip_skip;
     gp.sample_params.sample_steps    = req.steps;
     gp.sample_params.guidance.txt_cfg = req.cfg_scale;
+    if (req.guidance   >= 0.0f) gp.sample_params.guidance.distilled_guidance = req.guidance;
+    if (req.flow_shift >= 0.0f) gp.sample_params.flow_shift                   = req.flow_shift;
     gp.sample_params.sample_method = req.sample_method.empty()
         ? SAMPLE_METHOD_COUNT
         : str_to_sample_method(req.sample_method.c_str());
@@ -390,6 +392,8 @@ int command_sd(const SdOptions & opts) {
     req.strength         = opts.strength;
     req.sample_method    = opts.sample_method;
     req.scheduler        = opts.scheduler;
+    req.guidance         = opts.guidance;
+    req.flow_shift       = opts.flow_shift;
 
     if (!opts.init_image.empty()) {
         req.init = chimera_sd::decode_image_file(opts.init_image, 3);

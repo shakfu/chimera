@@ -161,6 +161,15 @@ struct WhisperOptions {
     bool timestamps = false;
     bool no_context = false;
 
+    // Decoding-strategy knobs (mirror whisper-cli). Empty / negative-one
+    // sentinels mean "leave whisper.cpp's default in place".
+    std::string initial_prompt;       // -p / --prompt
+    bool        carry_initial_prompt = false; // --carry-initial-prompt
+    int         beam_size  = -1;      // --beam-size N -> WHISPER_SAMPLING_BEAM_SEARCH
+    int         best_of    = -1;      // --best-of N   (greedy.best_of)
+    float       temperature = -1.0f;  // --temperature
+    bool        no_fallback = false;  // --no-fallback (sets temperature_inc<0)
+
     // Output-format flags mirroring whisper-cli. Multiple can be enabled
     // at once; each writes "<output_file_base>.<ext>" after transcription
     // finishes. When output_file_base is empty, the input WAV's stem is
@@ -202,6 +211,8 @@ struct SdOptions {
     int64_t seed = -1;
     float cfg_scale = 7.0f;
     float strength = 0.75f;  // img2img denoising strength (0 = preserve, 1 = full noise)
+    float guidance = -1.0f;  // distilled guidance (Flux / SD3); -1 = upstream default
+    float flow_shift = -1.0f;// Flux/SD3 timestep shift; -1 = upstream default
     bool offload_to_cpu = false;
     bool diffusion_fa = false;   // flash-attention in the diffusion model
 };

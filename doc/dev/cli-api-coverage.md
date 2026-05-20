@@ -23,7 +23,7 @@ Status legend: ✅ exposed · 🔀 renamed · 🟡 partial · ❌ missing · �
 | `gen` (llama-cli) | ~80 CLI-relevant | 32 | 1 | ~2 | ~50 |
 | `chat` (llama-cli, interactive) | ~85 | 37 | 0 | ~2 | ~55 |
 | `embed` (llama-embedding) | ~14 | 12 | 1 | 1 | 1 |
-| `whisper` (whisper-cli) | 58 | 13 | 1 | ~10 | ~34 |
+| `whisper` (whisper-cli) | 58 | 19 | 1 | ~4 | ~34 |
 | `sd` (sd cli) | 107 | 22 | 6 | ~30 | ~50 |
 
 "Real gaps" are flags whose absence we'd consider filing an issue for. "Deliberately out of scope" covers things like llama-cli's REPL plumbing (chimera replaces it with `chat`), perplexity/imatrix/training knobs, anything tied solely to llama-server, and obscure research/debug flags. The next two columns of the per-subcommand tables make each call individually.
@@ -120,8 +120,8 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 
 All five priorities from the original audit landed on 2026-05-20 (`--flash-attn`, grammar/json-schema, DRY + repeat-last-n, `--lora` in gen/chat, reasoning family). Residual items:
 
-1. **`--reasoning-budget` enforcement** — flag is parsed but not yet wired through to the sampler; upstream requires manual tokenization of the reasoning start/end tags. Follow-up.
-2. **`--list-devices`** — not added under `chat`/`gen`/`embed`; cleaner as a `chimera info` extension.
+1. **`--reasoning-budget` enforcement** — flag is parsed and now emits a `warning: parsed but not yet enforced` to stderr when set. Proper integration requires chaining `common_reasoning_budget_init` (returns a `llama_sampler *`) into the sample loop via `llama_sampler_apply` on a token-data array, which means restructuring `chat_sample_loop` to bypass the opaque `common_sampler_sample` call. Tags can be sourced from `common_chat_params.thinking_start_tag` / `thinking_end_tag` (populated by `common_chat_templates_apply`). Tracked.
+2. ~~**`--list-devices`**~~ ✅ Landed 2026-05-20 as `chimera info --list-devices`.
 3. **`--mmproj-auto`** — not modeled by `mtmd_context_params` at llama.cpp `b9119`. Revisit on next pin bump.
 
 ### Deliberately omitted (do not re-flag)
@@ -194,13 +194,13 @@ whisper-cli has a flat ~58-flag surface. Chimera exposes 5 of them. The result i
 | `-l / --language` | `-l,--language` | ✅ | |
 | `-dl / --detect-language` | — | ❌ | Useful as exit-after-detect mode. |
 | `-tr / --translate` | `--translate` | ✅ | |
-| `--prompt` | — | ❌ | Initial-prompt biasing; commonly used. **Worth filing.** |
-| `--carry-initial-prompt` | — | ❌ | Pairs with `--prompt`. |
-| `-bs / --beam-size` | — | ❌ | Decoding-strategy basics. **Worth filing.** |
-| `-bo / --best-of` | — | ❌ | Same group. |
-| `-tp / --temperature` | — | ❌ | |
-| `-tpi / --temperature-inc` | — | ❌ | Temperature fallback ladder. |
-| `-nf / --no-fallback` | — | ❌ | |
+| `--prompt` | `--prompt` | ✅ | Landed 2026-05-20. Initial-prompt biasing (`whisper_full_params.initial_prompt`). |
+| `--carry-initial-prompt` | `--carry-initial-prompt` | ✅ | Landed 2026-05-20. |
+| `-bs / --beam-size` | `--beam-size` | ✅ | Landed 2026-05-20. Sets `WHISPER_SAMPLING_BEAM_SEARCH` when N>0. |
+| `-bo / --best-of` | `--best-of` | ✅ | Landed 2026-05-20. |
+| `-tp / --temperature` | `--temperature` | ✅ | Landed 2026-05-20. |
+| `-tpi / --temperature-inc` | — | ❌ | Temperature fallback ladder; `--no-fallback` covers the disable case. |
+| `-nf / --no-fallback` | `--no-fallback` | ✅ | Landed 2026-05-20. Sets `temperature_inc<0`. |
 | `-mc / --max-context` | — | ❌ | |
 | `-ml / --max-len` | — | ❌ | |
 | `-sow / --split-on-word` | — | ❌ | |
@@ -231,8 +231,8 @@ whisper-cli has a flat ~58-flag surface. Chimera exposes 5 of them. The result i
 
 1. ~~**Output-format family** (`-osrt/-ovtt/-oj/-ojf/-ocsv/-olrc`).~~ ✅ Landed 2026-05-20.
 2. **VAD bundle** (`--vad` + the seven knobs) — current whisper.cpp default mode is becoming "vad on"; not having it is increasingly anomalous.
-3. **`--prompt` / `--carry-initial-prompt`** — required for vocabulary/style biasing; trivial to expose.
-4. **Decoding strategy** (`--beam-size`, `--best-of`, `--temperature`, `--no-fallback`) — current chimera always uses upstream defaults with no escape hatch.
+3. ~~**`--prompt` / `--carry-initial-prompt`**.~~ ✅ Landed 2026-05-20.
+4. ~~**Decoding strategy** (`--beam-size`, `--best-of`, `--temperature`, `--no-fallback`).~~ ✅ Landed 2026-05-20.
 5. **Offset/duration** (`-ot`, `-on`, `-d`) — slice-the-audio is a common ask.
 
 ### Deliberately omitted
@@ -298,7 +298,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--seed` | `--seed` | ✅ | |
 | `--cfg-scale` | `--cfg-scale` | ✅ | |
 | `--img-cfg-scale` | — | ❌ | Separate img-cond CFG (Flux). |
-| `--guidance` | — | ❌ | Flux/SD3 guidance scale (distinct from cfg). **Worth filing** — needed for Flux. |
+| `--guidance` | `--guidance` | ✅ | Landed 2026-05-20. Maps to `sd_sample_params_t.guidance.distilled_guidance`; `-1` sentinel leaves upstream default. |
 | `--clip-skip` | `--clip-skip` | ✅ | |
 | `--sampling-method` | `--sample-method` | 🔀 | Naming drift (`sampling` vs `sample`). Document. |
 | `--scheduler` | `--scheduler` | ✅ | |
@@ -306,7 +306,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--rng` / `--sampler-rng` | — | ❌ | Reproducibility/cpu-vs-cuda RNG choice. **Worth filing.** |
 | `--prediction` | — | ❌ | epsilon / v-prediction override. |
 | `--eta` | — | ❌ | DDIM-style stochasticity. |
-| `--flow-shift` | — | ❌ | Flow-matching shift; **needed for SD3 / Flux**. **Worth filing.** |
+| `--flow-shift` | `--flow-shift` | ✅ | Landed 2026-05-20. Maps to `sd_sample_params_t.flow_shift`. |
 | `--timestep-shift` | — | ❌ | |
 | `--moe-boundary` | — | ❌ | High-noise/low-noise MoE boundary. |
 | `--slg-scale` / `--skip-layer-start` / `--skip-layer-end` / `--skip-layers` | — | ❌ | Skip-layer guidance. |
@@ -354,7 +354,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 
 ### Notable gaps worth filing
 
-1. **`--guidance` and `--flow-shift`** — without these, Flux and SD3 work but with default-only guidance / shift. Same shape as the Z-Image fix that triggered this audit.
+1. ~~**`--guidance` and `--flow-shift`**.~~ ✅ Landed 2026-05-20.
 2. **`--clip_g` (alongside `--clip-l`)** — required for SDXL split-checkpoint layouts. Surprising omission given we ship `--clip-l`.
 3. **`--control-image` + `--control-strength`** — ControlNet is one of the most-asked-for sd features; we ship `--control-net` model loading? Actually we *don't* (see above). Both halves are missing — bundle into a single "ControlNet support" issue.
 4. **`--vae-tiling` family** — the no-VRAM-shame way to render large images. One toggle, three knobs.
@@ -403,13 +403,13 @@ Three big slabs of upstream surface area are correctly out of scope and should s
 
 In priority order (highest user impact first). Items struck through landed on 2026-05-20.
 
-1. **sd: Flux/SD3 guidance pair** (`--guidance`, `--flow-shift`) — direct analog of the Z-Image fix.
+1. ~~**sd: Flux/SD3 guidance pair** (`--guidance`, `--flow-shift`).~~ ✅ Landed 2026-05-20.
 2. **sd: ControlNet bundle** (`--control-net`, `--control-image`, `--control-strength`).
 3. ~~**whisper: output-format family** (`-osrt`, `-oj`, `-ovtt`, `-ojf`, `-ocsv`, `-olrc`).~~ ✅
 4. **sd: VAE-tiling bundle** (`--vae-tiling` + tile-size/overlap).
 5. ~~**llama: `--grammar` / `--json-schema` / `--json-schema-file`** in `gen`.~~ ✅
 6. ~~**All three: `--flash-attn`**.~~ ✅
 7. ~~**llama: `--lora` in `gen`/`chat`**.~~ ✅
-8. **whisper: `--prompt` + decoding-strategy basics** (`--beam-size`, `--best-of`, `--temperature`).
+8. ~~**whisper: `--prompt` + decoding-strategy basics** (`--beam-size`, `--best-of`, `--temperature`, `--no-fallback`).~~ ✅ Landed 2026-05-20.
 9. **sd: `--lora-model-dir`, `--clip_g`, `--type`** — finishing the model-loading story.
 10. **embed: `--embd-output-format` + `--embd-separator` + `--attention`**.

@@ -6,6 +6,14 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Added
 
+- `chimera sd` `--guidance` and `--flow-shift`. Both map to `sd_sample_params_t` (`guidance.distilled_guidance`, `flow_shift`). Sentinel `-1` leaves the upstream default in place, so existing invocations are unchanged. Closes the Flux/SD3 generation-side gap that paralleled the earlier Z-Image model-loading fix.
+
+- `chimera whisper` decoding-strategy flags: `--prompt` (vocabulary/style biasing — the most-requested missing flag), `--carry-initial-prompt`, `--beam-size N` (switches to `WHISPER_SAMPLING_BEAM_SEARCH`), `--best-of N` (greedy), `--temperature`, `--no-fallback` (sets `temperature_inc<0` to disable the temperature-fallback ladder). Wired through `chimera_whisper::TranscribeRequest`. Smoke-validated on `ggml-base.en` + JFK sample with `--beam-size 5 --temperature 0 --no-fallback --prompt`.
+
+- `chimera info --list-devices` prints one ggml device name per line (suitable for piping directly into `--device` on gen/chat/embed). Matches `llama-cli --list-devices` shape.
+
+- `chimera chat --reasoning-budget` now emits a `warning: parsed but not yet enforced` to stderr when set, so users aren't silently misled while the proper sampler-chain integration (`common_reasoning_budget_init` + restructuring `chat_sample_loop` to apply samplers via `llama_sampler_apply` on a token-data array) remains a follow-up.
+
 - Whisper output formats on `chimera whisper`. New flags: `--output-file <base>` (default: input WAV stem), `--output-txt`, `--output-srt`, `--output-vtt`, `--output-json`, `--output-json-full`, `--output-csv`, `--output-lrc`. Multiple may be combined; each writes `<base>.<ext>`. SRT/VTT use canonical timestamp separators (`,` vs `.`), CSV header is `start_ms,end_ms,text` with proper quoting, LRC uses `[MM:SS.cc]`, JSON is minimal `{language?, text, duration, segments[]}` with `--output-json-full` adding per-word timing. Whisper's segment-level timestamps are auto-enabled whenever any format file is requested (independent of `--timestamps`, which still controls inline streaming) so format writers don't emit garbage `t0`/`t1`. CLI11 forbids multi-char short flags, so the upstream `-osrt` / `-of` etc. aliases are long-only here. Smoke-validated on `ggml-base.en` + JFK sample: all six format files parse cleanly with correct timestamps.
 
 - Broad llama.cpp CLI coverage uplift on `gen` / `chat` / `embed`. 20 flag groups landed (~40 new options total), driven by the audit in `doc/dev/cli-api-coverage.md`. Highlights:
