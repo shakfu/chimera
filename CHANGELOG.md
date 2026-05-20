@@ -4,6 +4,27 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Added
+
+- `POST /v1/images/generations` / `/v1/images/edits` / `/v1/images/variations` — image wave 1 of the server CLI/HTTP parity work tracked in `docs/dev/server-api-coverage.md`. Fourteen per-request fields wired into the shared `fill_common_image_fields()` helper, so all three endpoints pick them up at once. All map to existing `chimera_sd::GenerateRequest` fields — engine unchanged.
+  - **Sampler / generation core:** `clip_skip`, `guidance` (Flux/SD3 distilled guidance), `flow_shift` (Flux/SD3 timestep shift), `img_cfg_scale` (separate img-cond CFG), `eta` (DDIM stochasticity), `timestep_shift`. Sentinel defaults on `GenerateRequest` (`-1.0f` for the floats, `0` for `shifted_timestep`) preserve upstream behavior for omitted keys.
+  - **VRAM-safety toggle:** `vae_tiling` plus `vae_tile_size`, `vae_relative_tile_size`, `vae_tile_overlap`. Toggle accepts bool / number / string — multipart fields arrive as strings, JSON bodies as bool. Uses the shared `coerce_bool` helper.
+  - **Skip-layer guidance:** `skip_layers` (JSON array of ints `[7,8,9]` or comma-separated string `"7,8,9"` — matches the CLI's `--skip-layers` shape) plus `slg_scale`, `skip_layer_start`, `skip_layer_end`. Non-integer entries → HTTP 400 with the offending token in the message; wrong-shape value (e.g. a bare number instead of array/string) → 400 with an explicit message naming both accepted forms.
+  - **Custom sigma schedule:** `sigmas` — same array-or-CSV shape as `skip_layers`, validates the same way.
+  - **`coerce_bool` promoted to the shared header.** Audio wave 1 had inlined it as a lambda; with image wave 1 needing it for `vae_tiling`, it now lives in `chimera_serve_internal.h` alongside the other coerce helpers. Implementation accepts JSON bool, numeric (0 = false, non-zero = true), and the strings `"true"/"1"/"yes"/"on"` (truthy) — anything else falls through to the default. The audio handler was updated to use the shared symbol.
+  - **Array-or-CSV parsing pattern is open-coded twice** (skip_layers and sigmas, ~25 LOC each). Promoted lazily — if a third caller wants the same shape, factor into `parse_int_csv_or_array()` / `parse_float_csv_or_array()` helpers. For now the small differences (int vs float, error-message field naming) and the cost of the abstraction don't justify it.
+  - **Smoke:** `make test` 44/44. Manual against a live `chimera serve --enable-image sd_xl_turbo_1.0.q8_0.gguf`: successful generation with `clip_skip + cfg_scale + seed` returned a base64 PNG (HTTP 200); validation paths return 400 with chimera-shaped errors for `sigmas: "foo,bar"`, `skip_layers: [1,"oops",3]`, and `skip_layers: 42` (wrong type).
+  - **Unrelated:** a Metal-side crash surfaced when running two image generations back-to-back on the same server context (deep in `ggml_metal_graph_compute` during CLIP text-model compute). Reproduces without wave-1 fields set — this is pre-existing sd-cpp/Metal behavior with consecutive requests, not caused by wave-1 wiring. Worth a separate bug ticket.
+
+- `POST /v1/audio/transcriptions` / `/v1/audio/translations` — audio wave 1 of the server CLI/HTTP parity work tracked in `docs/dev/server-api-coverage.md`. Nine per-request fields are now read from the multipart body; all map to existing `chimera_whisper::TranscribeRequest` fields, so the engine is unchanged and the gain is purely handler-side (~70 LOC in `chimera_serve_audio.cpp`).
+  - **Decoding strategy:** `temperature` (was previously parsed and discarded — now wired through to `treq.temperature`), `beam_size`, `best_of`, `no_fallback`.
+  - **Region of audio:** `offset_ms`, `duration_ms` — slice a long upload without re-encoding the source. Verified end-to-end: posting JFK (11 s) with `offset_ms=4000 duration_ms=4000` returns only the 4–8 s fragment.
+  - **Segment shaping:** `max_len`, `split_on_word` — pair naturally with `response_format=srt`/`vtt`.
+  - **Stereo speaker diarization:** `diarize=true`. Mono uploads return HTTP 400 with a chimera-shaped error before transcription runs. Stereo uploads get an energy-ratio classifier (matching the CLI's algorithm: per-segment sum of `|amplitude|` for each 16 kHz channel; 1.1× ratio threshold picks the label) applied as a post-transcribe walk over `result.segments` — each segment gets `Segment.speaker` set (structured) and `Segment.text` prefixed with `(speaker N)`. Joined `result.text` is rebuilt from the stamped segments so `response_format=text` reflects speakers too, not just SRT/VTT/verbose_json.
+  - **`coerce_bool` inlined locally** at first — promoted to `chimera_serve_internal.h` once image wave 1 needed it (see entry above). Audio handler now uses the shared symbol.
+  - **Diarize classifier is duplicated** between `command_whisper` and `make_audio_transcribe_handler` (~25 LOC each). Two callers isn't enough to justify promoting it to `chimera_whisper::estimate_diarization_speaker` — the code is small, mechanical, self-contained, and a future third caller can drive the refactor.
+  - Smoke: `make test` 44/44. Manual: stereo (L=2×, R=0.1×) of JFK → response prefixed with `(speaker 0)`; mono → 400; offset/duration slice returns the expected fragment.
+
 ## [0.1.6]
 
 ### Added

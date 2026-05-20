@@ -1,6 +1,6 @@
 # chimera
 
-A single statically-linked C++ executable that bundles [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), [SQLite](https://sqlite.org), and [sqlite-vec](https://github.com/asg017/sqlite-vec) into a busybox-style multitool. The same binary handles text generation, interactive chat with persistent history, speech-to-text, text-to-image, a personal RAG / vector store, and an OpenAI-compatible HTTP server — all sharing a single ggml backend set and one SQLite database.
+A single statically-linked C++ executable that bundles [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), [SQLite](https://sqlite.org), and [sqlite-vec](https://github.com/asg017/sqlite-vec) into a busybox-style multitool. The same binary handles text generation, interactive chat with persistent history, speech-to-text, text-to-image, a personal RAG / vector store, and an OpenAI-compatible HTTP server exposing all three inference capabilities at once — all sharing a single ggml backend set and one SQLite database.
 
 If you want the same capabilities from Python instead of a native binary, see [**cyllama**](https://github.com/shakfu/cyllama) — chimera's sibling project, which exposes llama.cpp / whisper.cpp / stable-diffusion.cpp as Cython bindings with a high-level Python API.
 

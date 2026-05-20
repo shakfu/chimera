@@ -10,6 +10,7 @@
 
 #include "chimera_serve_internal.h"
 
+#include <cctype>
 #include <cstdint>
 #include <ctime>
 #include <memory>
@@ -193,6 +194,114 @@ bool fill_common_image_fields(const json &                  fields,
     if (fields.contains("sample_method"))   req.sample_method = coerce_string (fields["sample_method"]);
     if (fields.contains("scheduler"))       req.scheduler     = coerce_string (fields["scheduler"]);
     if (fields.contains("strength"))        req.strength      = coerce_float  (fields["strength"],      req.strength);
+
+    // Image wave 1 — per-request fields that already exist on
+    // GenerateRequest. Sentinel defaults (negative / zero / empty) on
+    // the struct mean omitted keys leave the upstream sd default in
+    // place; we only override when the caller supplies a value.
+    if (fields.contains("clip_skip"))       req.clip_skip      = coerce_int   (fields["clip_skip"],       req.clip_skip);
+    if (fields.contains("guidance"))        req.guidance       = coerce_float (fields["guidance"],        req.guidance);
+    if (fields.contains("flow_shift"))      req.flow_shift     = coerce_float (fields["flow_shift"],      req.flow_shift);
+    if (fields.contains("img_cfg_scale"))   req.img_cfg_scale  = coerce_float (fields["img_cfg_scale"],   req.img_cfg_scale);
+    if (fields.contains("eta"))             req.eta            = coerce_float (fields["eta"],             req.eta);
+    if (fields.contains("timestep_shift"))  req.shifted_timestep = coerce_int (fields["timestep_shift"],  req.shifted_timestep);
+    // VAE tiling. Toggle plus three numeric knobs. The toggle accepts
+    // bool / number / string forms (multipart fields arrive as strings).
+    if (fields.contains("vae_tiling"))           req.vae_tiling             = coerce_bool (fields["vae_tiling"],           req.vae_tiling);
+    if (fields.contains("vae_tile_size"))        req.vae_tile_size          = coerce_int  (fields["vae_tile_size"],        req.vae_tile_size);
+    if (fields.contains("vae_relative_tile_size"))req.vae_relative_tile_size= coerce_float(fields["vae_relative_tile_size"],req.vae_relative_tile_size);
+    if (fields.contains("vae_tile_overlap"))     req.vae_tile_overlap       = coerce_float(fields["vae_tile_overlap"],     req.vae_tile_overlap);
+    // Skip-layer guidance (SLG). `skip_layers` accepts either a JSON
+    // array of ints (idiomatic) or a comma-separated string (mirrors
+    // the CLI). Empty / absent disables SLG regardless of the scalar
+    // knobs.
+    if (fields.contains("skip_layers")) {
+        const auto & sl = fields["skip_layers"];
+        std::vector<int> out;
+        if (sl.is_array()) {
+            for (const auto & e : sl) {
+                if (e.is_number_integer()) out.push_back(e.get<int>());
+                else if (e.is_number()) out.push_back(static_cast<int>(e.get<double>()));
+                else if (e.is_string()) {
+                    try { out.push_back(std::stoi(e.get<std::string>())); }
+                    catch (const std::exception &) {
+                        err = "skip_layers contains non-integer entry: '" + e.get<std::string>() + "'";
+                        return false;
+                    }
+                } else {
+                    err = "skip_layers array entries must be integers";
+                    return false;
+                }
+            }
+        } else if (sl.is_string()) {
+            const std::string s = sl.get<std::string>();
+            size_t pos = 0;
+            while (pos < s.size()) {
+                size_t comma = s.find(',', pos);
+                std::string tok = s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.front()))) tok.erase(tok.begin());
+                while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.back())))  tok.pop_back();
+                if (!tok.empty()) {
+                    try { out.push_back(std::stoi(tok)); }
+                    catch (const std::exception &) {
+                        err = "skip_layers contains non-integer entry: '" + tok + "'";
+                        return false;
+                    }
+                }
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
+        } else {
+            err = "skip_layers must be an array of ints or a comma-separated string";
+            return false;
+        }
+        req.skip_layers = std::move(out);
+    }
+    if (fields.contains("slg_scale"))        req.slg_scale        = coerce_float(fields["slg_scale"],        req.slg_scale);
+    if (fields.contains("skip_layer_start")) req.skip_layer_start = coerce_float(fields["skip_layer_start"], req.skip_layer_start);
+    if (fields.contains("skip_layer_end"))   req.skip_layer_end   = coerce_float(fields["skip_layer_end"],   req.skip_layer_end);
+    // Custom sigma schedule. Same array-or-CSV shape as skip_layers.
+    if (fields.contains("sigmas")) {
+        const auto & sg = fields["sigmas"];
+        std::vector<float> out;
+        if (sg.is_array()) {
+            for (const auto & e : sg) {
+                if (e.is_number()) out.push_back(static_cast<float>(e.get<double>()));
+                else if (e.is_string()) {
+                    try { out.push_back(std::stof(e.get<std::string>())); }
+                    catch (const std::exception &) {
+                        err = "sigmas contains non-float entry: '" + e.get<std::string>() + "'";
+                        return false;
+                    }
+                } else {
+                    err = "sigmas array entries must be numbers";
+                    return false;
+                }
+            }
+        } else if (sg.is_string()) {
+            const std::string s = sg.get<std::string>();
+            size_t pos = 0;
+            while (pos < s.size()) {
+                size_t comma = s.find(',', pos);
+                std::string tok = s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.front()))) tok.erase(tok.begin());
+                while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.back())))  tok.pop_back();
+                if (!tok.empty()) {
+                    try { out.push_back(std::stof(tok)); }
+                    catch (const std::exception &) {
+                        err = "sigmas contains non-float entry: '" + tok + "'";
+                        return false;
+                    }
+                }
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
+        } else {
+            err = "sigmas must be an array of numbers or a comma-separated string";
+            return false;
+        }
+        req.custom_sigmas = std::move(out);
+    }
     return true;
 }
 

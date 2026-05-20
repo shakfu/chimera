@@ -351,6 +351,16 @@ std::string coerce_string(const json & v, const std::string & dflt) {
     return v.dump();
 }
 
+bool coerce_bool(const json & v, bool dflt) {
+    if (v.is_boolean()) return v.get<bool>();
+    if (v.is_number())  return v.get<double>() != 0.0;
+    if (v.is_string()) {
+        const auto s = v.get<std::string>();
+        return s == "true" || s == "1" || s == "yes" || s == "on";
+    }
+    return dflt;
+}
+
 namespace {
 
 // Signal handling. The shutdown_handler closes the task queue, which causes

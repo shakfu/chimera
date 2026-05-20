@@ -4,9 +4,12 @@
 
 #include "chimera_serve_internal.h"
 
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace chimera_serve {
 
@@ -203,6 +206,11 @@ server_http_context::handler_t make_audio_transcribe_handler(
         auto audio = chimera_whisper::resample_linear(
             wav.samples, wav.sample_rate, /*WHISPER_SAMPLE_RATE=*/16000);
 
+        // Audio wave 1 — read the per-request tuning knobs that already
+        // exist on TranscribeRequest. Each field is read only when
+        // present so the sentinel defaults on TranscribeRequest take
+        // effect for omitted keys. The coerce_* family (incl. bool)
+        // lives in chimera_serve_internal.h; the image handler shares it.
         chimera_whisper::TranscribeRequest treq;
         treq.audio_16k_mono  = std::move(audio);
         treq.language        = lang;
@@ -211,6 +219,64 @@ server_http_context::handler_t make_audio_transcribe_handler(
         treq.emit_timestamps = true;   // needed for verbose_json/srt/vtt
         treq.initial_prompt  = prompt;
         treq.word_timestamps = want_word_ts;
+        // Decoding strategy (per-request).
+        if (fields.contains("temperature"))
+            treq.temperature = coerce_float(fields["temperature"], treq.temperature);
+        if (fields.contains("beam_size"))
+            treq.beam_size   = coerce_int  (fields["beam_size"],   treq.beam_size);
+        if (fields.contains("best_of"))
+            treq.best_of     = coerce_int  (fields["best_of"],     treq.best_of);
+        if (fields.contains("no_fallback"))
+            treq.no_fallback = coerce_bool (fields["no_fallback"], treq.no_fallback);
+        // Region of audio (slice the upload without re-encoding).
+        if (fields.contains("offset_ms"))
+            treq.offset_ms   = coerce_int  (fields["offset_ms"],   treq.offset_ms);
+        if (fields.contains("duration_ms"))
+            treq.duration_ms = coerce_int  (fields["duration_ms"], treq.duration_ms);
+        // Segment shaping (pairs naturally with response_format=srt/vtt).
+        if (fields.contains("max_len"))
+            treq.max_len       = coerce_int (fields["max_len"],       treq.max_len);
+        if (fields.contains("split_on_word"))
+            treq.split_on_word = coerce_bool(fields["split_on_word"], treq.split_on_word);
+
+        // Stereo speaker diarization. The CLI does this in command_whisper
+        // — same algorithm, ported here. Each channel is resampled to
+        // 16 kHz independently; per-segment energy ratio (1.1× threshold)
+        // picks the label. Mono input + diarize=true is a 400 BadRequest.
+        const bool want_diarize =
+            fields.contains("diarize") && coerce_bool(fields["diarize"], false);
+        std::vector<std::vector<float>> diarize_16k;
+        if (want_diarize) {
+            if (wav.channels != 2 || wav.per_channel.size() != 2) {
+                return err_res(400,
+                    "diarize=true requires a 2-channel (stereo) WAV upload; "
+                    "got " + std::to_string(wav.channels) + "-channel audio");
+            }
+            diarize_16k.resize(2);
+            for (int c = 0; c < 2; ++c) {
+                diarize_16k[c] = chimera_whisper::resample_linear(
+                    wav.per_channel[c], wav.sample_rate, /*WHISPER_SAMPLE_RATE=*/16000);
+            }
+        }
+        auto estimate_speaker = [&](int64_t t0, int64_t t1) -> std::string {
+            if (diarize_16k.size() != 2) return "";
+            const int64_t n_samples = static_cast<int64_t>(diarize_16k[0].size());
+            const auto clamp = [&](int64_t t) -> int64_t {
+                int64_t s = (t * 16000) / 100;   // 10ms units → 16 kHz samples
+                if (s < 0)         s = 0;
+                if (s > n_samples) s = n_samples;
+                return s;
+            };
+            const int64_t is0 = clamp(t0);
+            const int64_t is1 = clamp(t1);
+            double e0 = 0.0, e1 = 0.0;
+            for (int64_t j = is0; j < is1; ++j) {
+                e0 += std::fabs(diarize_16k[0][j]);
+                e1 += std::fabs(diarize_16k[1][j]);
+            }
+            const char * id = (e0 > 1.1 * e1) ? "0" : (e1 > 1.1 * e0) ? "1" : "?";
+            return std::string("(speaker ") + id + ")";
+        };
 
         chimera_whisper::TranscribeResult result;
         {
@@ -222,6 +288,25 @@ server_http_context::handler_t make_audio_transcribe_handler(
             } catch (const ChimeraError & e) {
                 return err_res(500, std::string("transcription failed: ") + e.what());
             }
+        }
+
+        // Stamp segments with speaker labels for the chosen response_format.
+        // Mirrors command_whisper: write to Segment.speaker (structured)
+        // and prefix Segment.text so the SRT/VTT/verbose_json/text writers
+        // render the label without needing format-specific changes.
+        if (want_diarize) {
+            for (auto & s : result.segments) {
+                s.speaker = estimate_speaker(s.t0, s.t1);
+                if (!s.speaker.empty()) s.text = s.speaker + ' ' + s.text;
+            }
+            // result.text is the joined transcript; rebuild it so the
+            // plain-text response_format also reflects the speakers.
+            std::string joined;
+            for (const auto & s : result.segments) {
+                if (!joined.empty()) joined += ' ';
+                joined += s.text;
+            }
+            result.text = std::move(joined);
         }
 
         // Response language: detected language if "auto" was requested,

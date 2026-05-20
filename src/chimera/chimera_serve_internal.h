@@ -60,6 +60,10 @@ int         coerce_int   (const json & v, int dflt);
 int64_t     coerce_int64 (const json & v, int64_t dflt);
 float       coerce_float (const json & v, float dflt);
 std::string coerce_string(const json & v, const std::string & dflt = "");
+// Booleans arrive as `true`/`false` from JSON bodies but as the strings
+// "true"/"false"/"1"/"0"/"yes"/"no"/"on"/"off" from multipart form fields.
+// Accept all of those forms; treat numerics as truthy-when-nonzero.
+bool        coerce_bool  (const json & v, bool dflt);
 
 // ----------------------------------------------------------------------------
 // Audio — POST /v1/audio/{transcriptions,translations}. Compiled only when
