@@ -6,6 +6,8 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Added
 
+- Vulkan build validated end-to-end via `make build-vulkan`. `chimera info` reports llama/whisper/sd all built and loaded on the Vulkan backend; both an AMD iGPU (Radeon 610M, RADV) and an NVIDIA RTX 4060 enumerate as Vulkan devices on the same host, so dispatch is not vendor-locked. Resulting binary is 92M on Linux x86_64 — roughly half the CUDA build (169M) because Vulkan ships compact SPIR-V shaders rather than per-arch CUDA cubins, making it the smaller-footprint option when raw CUDA perf isn't required.
+
 - Split-checkpoint and Z-Image support on `chimera sd`. New flags `--diffusion-model`, `--vae`, `--clip-l`, `--t5xxl`, `--llm`, `--offload-to-cpu`, and `--diffusion-fa` map to the same-named `sd_ctx_params_t` fields (`diffusion_model_path`, `vae_path`, `clip_l_path`, `t5xxl_path`, `llm_path`, `offload_params_to_cpu`, `diffusion_flash_attn`). `-m,--model` is no longer required — pass it for combined SD/SDXL checkpoints, or use `--diffusion-model` + component paths for split layouts (Z-Image, Flux, SD3). `chimera_sd::load_model` gained a `LoadParams` overload; the single-path overload is kept for the existing `serve` caller. Validated end-to-end on Z-Image-Turbo (`z_image_turbo-Q6_K.gguf` + `ae.safetensors` + `Qwen3-4B-Q8_0.gguf`) via `scripts/case/z_turbo.sh`, on a CUDA build (RTX 4060, sd.cpp `master-596-90e87bc`, CUDA backend for all three of llama/whisper/sd).
 
 ## [0.1.5]
