@@ -4,6 +4,26 @@ A single statically-linked C++ executable that bundles [llama.cpp](https://githu
 
 If you want the same capabilities from Python instead of a native binary, see [**cyllama**](https://github.com/shakfu/cyllama) — chimera's sibling project, which exposes llama.cpp / whisper.cpp / stable-diffusion.cpp as Cython bindings with a high-level Python API.
 
+## Who it's for
+
+chimera targets CLI-first users who run more than one ggml-backed modality (text + audio + image) and want them sharing one process, one ggml backend set, one SQLite database, and one OpenAI-compatible HTTP surface — rather than running, configuring, and gluing together three separate servers. It is most useful when:
+
+- You want faithful upstream flag coverage (`gen`, `chat`, `embed` expose most llama.cpp sampler / RoPE / YaRN / multi-GPU / cache / adapter flags directly), not a curated subset.
+- You distribute a single static binary across machines and don't want a Python or Node runtime on the target host.
+- You build against multiple ggml backends (CPU, CUDA, ROCm, SYCL, Vulkan, Metal) from the same source tree, and want to verify the linked backend with `chimera info` rather than runtime probing.
+- You're building on top of the HTTP server and need text, audio, image, embeddings, RAG, and chat-history routes in one origin.
+
+chimera is not a GUI application. The optional embedded web UI (`make build-with-webui`) bakes in upstream llama.cpp's chat UI for the `/` endpoint, but there is no model browser, launcher, or settings panel. Users who primarily want point-and-click are better served by Ollama, LM Studio, or Jan.
+
+## Project properties
+
+- **Three engines, one ggml.** llama.cpp, whisper.cpp, and stable-diffusion.cpp all link against a single shared copy of ggml (`--sd-shared-ggml` in the deps build). One process can host an LLM, a Whisper model, and a Stable Diffusion pipeline without three separately-configured servers.
+- **Shared persistence.** Chat history, embedding caches, and vector-store collections live in a single SQLite database (sqlite-vec for ANN search). `chat`, `serve`, `index`, and `search` read and write the same file.
+- **OpenAI-compatible HTTP across modalities.** `chimera serve` exposes `/v1/chat/completions`, `/v1/embeddings`, `/v1/audio/transcriptions`, `/v1/images/generations`, plus chimera-specific RAG, KV-slot-snapshot, and chat-history routes.
+- **Upstream-pin discipline.** Vendored llama.cpp / whisper.cpp / sd.cpp versions are pinned in `scripts/manage.py`. `make bump-check` diffs the currently-vendored upstream-server headers against a target llama.cpp version, and `chimera_pin_check.cpp` static-asserts on the struct fields chimera relies on — so a version bump that silently retypes or renames a depended-on field fails at compile time rather than at runtime.
+- **Backend matrix.** CPU, CUDA, ROCm (HIP), SYCL, Vulkan, and Metal are first-class build targets in the Makefile. `chimera info` reports built / loaded / registered backends and enumerated devices.
+- **Flag-coverage audit.** [`doc/dev/cli-api-coverage.md`](doc/dev/cli-api-coverage.md) tracks which upstream flags chimera exposes and which are deliberately skipped, so the gap between chimera's CLI and upstream's is auditable rather than implicit.
+
 ## Subcommands
 
 | Command    | Purpose                                                                |
