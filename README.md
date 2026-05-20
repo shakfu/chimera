@@ -22,7 +22,7 @@ chimera is not a GUI application. The optional embedded web UI (`make build-with
 - **OpenAI-compatible HTTP across modalities.** `chimera serve` exposes `/v1/chat/completions`, `/v1/embeddings`, `/v1/audio/transcriptions`, `/v1/images/generations`, plus chimera-specific RAG, KV-slot-snapshot, and chat-history routes.
 - **Upstream-pin discipline.** Vendored llama.cpp / whisper.cpp / sd.cpp versions are pinned in `scripts/manage.py`. `make bump-check` diffs the currently-vendored upstream-server headers against a target llama.cpp version, and `chimera_pin_check.cpp` static-asserts on the struct fields chimera relies on — so a version bump that silently retypes or renames a depended-on field fails at compile time rather than at runtime.
 - **Backend matrix.** CPU, CUDA, ROCm (HIP), SYCL, Vulkan, and Metal are first-class build targets in the Makefile. `chimera info` reports built / loaded / registered backends and enumerated devices.
-- **Flag-coverage audit.** [`doc/dev/cli-api-coverage.md`](doc/dev/cli-api-coverage.md) tracks which upstream flags chimera exposes and which are deliberately skipped, so the gap between chimera's CLI and upstream's is auditable rather than implicit.
+- **Flag-coverage audit.** [`docs/dev/cli-api-coverage.md`](docs/dev/cli-api-coverage.md) tracks which upstream flags chimera exposes and which are deliberately skipped, so the gap between chimera's CLI and upstream's is auditable rather than implicit.
 
 ## Subcommands
 
@@ -42,7 +42,7 @@ chimera is not a GUI application. The optional embedded web UI (`make build-with
 
 A top-level `-v,--verbose` flag re-enables native backend logging (silenced by default).
 
-See [`doc/cheatsheet.md`](doc/cheatsheet.md) for a one-page command reference, and [`doc/serve.md`](doc/serve.md) for the HTTP server.
+See [`docs/cheatsheet.md`](docs/cheatsheet.md) for a one-page command reference, and [`docs/serve.md`](docs/serve.md) for the HTTP server.
 
 ## Build
 
@@ -60,7 +60,7 @@ Output: `build/chimera`.
 
 Run `make deps` alone if you just want to (re)build the third-party libs, or `make rebuild` after touching only chimera source.
 
-Experimental: `make build-with-webui` is identical to `make build` but flips `-DCHIMERA_WEBUI_EMBED=ON`, which xxd-bakes upstream llama.cpp's prebuilt web chat UI bundle (`GET /` + `/bundle.{js,css}`) into the chimera binary. Adds ~6 MB to the stripped binary (~7 MB unstripped) — the asset bytes are in the data section and `strip` can't drop them. No Node toolchain required. The UI is pinned to whichever llama.cpp version chimera vendored. Disable at runtime with `chimera serve --no-webui`. See [`doc/dev/webui.md`](doc/dev/webui.md) for the wiring and the seams.
+Experimental: `make build-with-webui` is identical to `make build` but flips `-DCHIMERA_WEBUI_EMBED=ON`, which xxd-bakes upstream llama.cpp's prebuilt web chat UI bundle (`GET /` + `/bundle.{js,css}`) into the chimera binary. Adds ~6 MB to the stripped binary (~7 MB unstripped) — the asset bytes are in the data section and `strip` can't drop them. No Node toolchain required. The UI is pinned to whichever llama.cpp version chimera vendored. Disable at runtime with `chimera serve --no-webui`. See [`docs/dev/webui.md`](docs/dev/webui.md) for the wiring and the seams.
 
 ### System dependencies
 
@@ -153,7 +153,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="not-used")
 ```
 
-Supported endpoints, by default: `/v1/chat/completions`, `/v1/completions`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic compat), `/v1/responses`, `/v1/models`, `/v1/embeddings`, `/infill`, `/tokenize`, `/detokenize`, `/apply-template`, `/health`, `/metrics`, `/props`. Opt-in endpoints add `/v1/audio/{transcriptions,translations}`, `/v1/images/{generations,edits,variations}`, `/v1/rerank`, and `/v1/vector_stores/*`. See [`doc/serve.md`](doc/serve.md) for the full surface and [`doc/dev/server.md`](doc/dev/server.md) for the implementation notes (what's bound, what's deliberately not, why).
+Supported endpoints, by default: `/v1/chat/completions`, `/v1/completions`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic compat), `/v1/responses`, `/v1/models`, `/v1/embeddings`, `/infill`, `/tokenize`, `/detokenize`, `/apply-template`, `/health`, `/metrics`, `/props`. Opt-in endpoints add `/v1/audio/{transcriptions,translations}`, `/v1/images/{generations,edits,variations}`, `/v1/rerank`, and `/v1/vector_stores/*`. See [`docs/serve.md`](docs/serve.md) for the full surface and [`docs/dev/server.md`](docs/dev/server.md) for the implementation notes (what's bound, what's deliberately not, why).
 
 ### Vector store / RAG (`index`, `search`)
 
@@ -166,7 +166,7 @@ chimera index ingest -n notes -g 'docs/**/*.md'
 chimera search       -n notes -q "how does X work?" -k 5
 ```
 
-The same index is queryable over HTTP when `chimera serve --enable-rag` is running (`POST /v1/vector_stores/:name/search`). See [`doc/dev/sqlite.md`](doc/dev/sqlite.md) for the schema, migration model, and the phased plan.
+The same index is queryable over HTTP when `chimera serve --enable-rag` is running (`POST /v1/vector_stores/:name/search`). See [`docs/dev/sqlite.md`](docs/dev/sqlite.md) for the schema, migration model, and the phased plan.
 
 ### Persistent chat history
 
@@ -333,10 +333,10 @@ The whisper/sd silencers cannot live in `chimera.cpp` because their headers woul
 
 | File                                         | Audience      | Contents                                                                                  |
 |----------------------------------------------|---------------|-------------------------------------------------------------------------------------------|
-| [`doc/cheatsheet.md`](doc/cheatsheet.md)     | user          | One-page command + curl reference.                                                        |
-| [`doc/serve.md`](doc/serve.md)               | user          | `chimera serve` walkthrough: flags, endpoints, errors, SDK setup.                         |
-| [`doc/dev/server.md`](doc/dev/server.md)     | maintainer    | What's bound on the HTTP surface, what's deliberately not, threading model, gotchas.      |
-| [`doc/dev/sqlite.md`](doc/dev/sqlite.md)     | maintainer    | Schema, migration discipline, phased RAG + chat-persistence plan, open design questions.  |
+| [`docs/cheatsheet.md`](docs/cheatsheet.md)     | user          | One-page command + curl reference.                                                        |
+| [`docs/serve.md`](docs/serve.md)               | user          | `chimera serve` walkthrough: flags, endpoints, errors, SDK setup.                         |
+| [`docs/dev/server.md`](docs/dev/server.md)     | maintainer    | What's bound on the HTTP surface, what's deliberately not, threading model, gotchas.      |
+| [`docs/dev/sqlite.md`](docs/dev/sqlite.md)     | maintainer    | Schema, migration discipline, phased RAG + chat-persistence plan, open design questions.  |
 | [`CHANGELOG.md`](CHANGELOG.md)               | everyone      | Per-release feature notes.                                                                |
 
 ## Origin

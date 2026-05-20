@@ -65,7 +65,7 @@ if a concrete user request shows up.
   aimed at (one process = one model is core to the busybox identity).
   Users who need multi-model routing should run one chimera per model
   behind a real reverse proxy. Wontfix. See
-  [`doc/dev/server-router-mode.md`](doc/dev/server-router-mode.md)
+  [`docs/dev/server-router-mode.md`](docs/dev/server-router-mode.md)
   for the full decision record (architecture, port cost, the
   concurrency / single-GPU analysis, when to revisit).
 - **HTTPS direct serving** (`--ssl-cert-file` / `--ssl-key-file`) —
