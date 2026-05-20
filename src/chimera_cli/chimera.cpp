@@ -3641,6 +3641,87 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "Path to a ControlNet model. Required to enable per-request "
         "control_image (multipart file) + control_strength on /v1/images/* — "
         "without it, requests with control_image return HTTP 400.");
+    // Split-checkpoint layouts (Flux / SD3 / Z-Image / Qwen-Image).
+    // Mirror the `chimera sd` CLI flag names with a --sd- prefix.
+    // --enable-image becomes optional when --sd-diffusion-model is set.
+    cmd->add_option("--sd-diffusion-model", p.serve_opts.sd_diffusion_model,
+        "Separate UNet/DiT file (split-checkpoint layouts: Flux, Z-Image, SD3, ...)");
+    cmd->add_option("--sd-vae", p.serve_opts.sd_vae,
+        "Separate VAE for split-checkpoint layouts");
+    cmd->add_option("--sd-clip-l", p.serve_opts.sd_clip_l,
+        "CLIP-L text encoder (SDXL / SD3 split layouts)");
+    cmd->add_option("--sd-clip-g", p.serve_opts.sd_clip_g,
+        "CLIP-G text encoder (SDXL split layouts)");
+    cmd->add_option("--sd-t5xxl", p.serve_opts.sd_t5xxl,
+        "T5-XXL text encoder (Flux / SD3)");
+    cmd->add_option("--sd-llm", p.serve_opts.sd_llm,
+        "LLM text encoder (e.g. Qwen3 for Z-Image)");
+    cmd->add_option("--sd-llm-vision", p.serve_opts.sd_llm_vision,
+        "LLM-Vision encoder (e.g. Qwen-Image vision-conditioning)");
+    cmd->add_option("--sd-clip-vision", p.serve_opts.sd_clip_vision,
+        "CLIP-Vision encoder (image-conditioning models)");
+    cmd->add_option("--sd-taesd", p.serve_opts.sd_taesd,
+        "Tiny AutoEncoder (TAESD) model for fast preview decode");
+    cmd->add_option("--sd-embd-dir", p.serve_opts.sd_embd_dir,
+        "Directory of textual-inversion embeddings to register at context init "
+        "(non-recursive; .gguf/.safetensors/.pt)");
+    cmd->add_option("--sd-type", p.serve_opts.sd_type,
+        "Weights type override (f16/f32/bf16/q8_0/q5_1/q5_0/q4_1/q4_0/q4_k/q3_k/q2_k/iq4_nl/...)");
+    cmd->add_option("--sd-tensor-type-rules", p.serve_opts.sd_tensor_type_rules,
+        "Per-tensor wtype override rules (sd.cpp's --tensor-type-rules syntax)");
+    cmd->add_option("--sd-high-noise-diffusion-model", p.serve_opts.sd_high_noise_diffusion_model,
+        "Optional second diffusion model for two-stage 'high noise' workflows");
+    // 5d perf / offload long-tail.
+    cmd->add_flag("--sd-fa", p.serve_opts.sd_flash_attn,
+        "Enable global flash-attention across all sd graphs "
+        "(distinct from --sd-diffusion-fa which only flips the diffusion model)");
+    cmd->add_flag("--sd-diffusion-fa", p.serve_opts.sd_diffusion_flash_attn,
+        "Enable flash-attention in the diffusion model only");
+    cmd->add_flag("--sd-diffusion-conv-direct", p.serve_opts.sd_diffusion_conv_direct,
+        "Conv-direct kernels in the diffusion model");
+    cmd->add_flag("--sd-vae-conv-direct", p.serve_opts.sd_vae_conv_direct,
+        "Conv-direct kernels in the VAE");
+    cmd->add_flag("--sd-no-mmap", p.serve_opts.sd_no_mmap,
+        "Disable mmap for sd model loading (chimera defaults to mmap=on)");
+    cmd->add_option("--sd-max-vram", p.serve_opts.sd_max_vram,
+        "Soft cap on VRAM use in GiB (0 = leave the upstream default; sd.cpp may swap to CPU above the cap)");
+    cmd->add_flag("--sd-offload-to-cpu", p.serve_opts.sd_offload_to_cpu,
+        "Offload sd model parameters to CPU memory");
+    cmd->add_flag("--sd-clip-on-cpu", p.serve_opts.sd_keep_clip_on_cpu,
+        "Keep the CLIP / text-encoder pass on CPU even when a GPU backend is available");
+    cmd->add_flag("--sd-vae-on-cpu", p.serve_opts.sd_keep_vae_on_cpu,
+        "Keep the VAE encode/decode on CPU");
+    cmd->add_flag("--sd-control-net-cpu", p.serve_opts.sd_keep_control_net_on_cpu,
+        "Keep the ControlNet on CPU even when a GPU backend is available");
+    cmd->add_flag("--sd-force-sdxl-vae-conv-scale", p.serve_opts.sd_force_sdxl_vae_conv_scale,
+        "Apply the SDXL VAE conv-scale numerics fix");
+    cmd->add_option("--sd-rng", p.serve_opts.sd_rng,
+        "RNG type: std_default | cuda | cpu (empty = upstream default)")
+        ->check(CLI::IsMember({"std_default","cuda","cpu"}));
+    cmd->add_option("--sd-sampler-rng", p.serve_opts.sd_sampler_rng,
+        "Sampler RNG type: std_default | cuda | cpu (empty = upstream default; "
+        "cpu matches ComfyUI seeds across implementations)")
+        ->check(CLI::IsMember({"std_default","cuda","cpu"}));
+    cmd->add_option("--sd-prediction", p.serve_opts.sd_prediction,
+        "Prediction-type override: eps | v | edm_v | flow | flux_flow | flux2_flow "
+        "(empty = model default)")
+        ->check(CLI::IsMember({"eps","v","edm_v","flow","flux_flow","flux2_flow"}));
+    cmd->add_option("--sd-lora-apply-mode", p.serve_opts.sd_lora_apply_mode,
+        "LoRA application mode: auto | immediately | at_runtime (empty = upstream default)")
+        ->check(CLI::IsMember({"auto","immediately","at_runtime"}));
+    cmd->add_option("--sd-threads", p.serve_opts.sd_threads,
+        "Threads for the sd context (-1 = leave sd.cpp default)");
+    // 5e PhotoMaker on serve.
+    cmd->add_option("--sd-photo-maker", p.serve_opts.sd_photo_maker,
+        "Path to a PhotoMaker model. Required to enable per-request PhotoMaker "
+        "(pm_id_images / pm_id_image_set / pm_style_strength) on /v1/images/*.");
+    cmd->add_option("--sd-pm-id-dir", p.serve_opts.sd_pm_id_dir,
+        "Root directory of named PhotoMaker identity sets. Each subdirectory "
+        "becomes one set, addressable per-request as pm_id_image_set: \"<name>\". "
+        "Scanned eagerly at startup; non-image files inside subdirs are skipped.");
+    cmd->add_option("--sd-pm-id-embed-path", p.serve_opts.sd_pm_id_embed_path,
+        "Path to a precomputed PhotoMaker ID embedding (.bin). Applied to every "
+        "PM request unless the request later supplies its own override.");
 #endif
     cmd->add_option("--enable-rag", p.serve_opts.rag_embedding_model,
         "Embedding GGUF to load alongside the LLM (enables /v1/vector_stores/*)");

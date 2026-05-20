@@ -359,6 +359,164 @@ bool fill_common_image_fields(const json &                  fields,
 //
 // Returns nullptr on success; otherwise an HTTP error response that
 // the caller should propagate.
+// Decode a base64 string (with or without a `data:<mime>;base64,` URI
+// prefix) into raw bytes. Returns false + sets `err` on any non-base64
+// character (after the optional prefix), letting the caller surface a
+// precise 400 that names the index of the offending image.
+bool base64_decode(const std::string & input, std::vector<uint8_t> & out, std::string & err) {
+    out.clear();
+    static constexpr int8_t T[256] = {
+        // Built ASCII-by-ASCII to keep the constant table self-checking.
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, // 0x00
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, // 0x10
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63, // 0x20 — '+' = 62, '/' = 63
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-2,-1,-1, // 0x30 — '0'..'9' = 52..61, '=' = -2 sentinel
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14, // 0x40 — 'A'..'O'
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1, // 0x50 — 'P'..'Z'
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40, // 0x60 — 'a'..'o'
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1, // 0x70 — 'p'..'z'
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    };
+    // Strip optional data-URI prefix `data:<anything>;base64,`.
+    size_t start = 0;
+    if (input.rfind("data:", 0) == 0) {
+        const size_t comma = input.find(',', 5);
+        if (comma == std::string::npos) {
+            err = "base64 data URI is missing the ',' separator";
+            return false;
+        }
+        start = comma + 1;
+    }
+    uint32_t buf  = 0;
+    int      bits = 0;
+    for (size_t i = start; i < input.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(input[i]);
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+        const int8_t v = T[c];
+        if (v == -2) break;  // hit '=' padding; stop
+        if (v < 0) {
+            err = "invalid base64 character at offset " + std::to_string(i - start);
+            return false;
+        }
+        buf = (buf << 6) | static_cast<uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<uint8_t>((buf >> bits) & 0xff));
+        }
+    }
+    return true;
+}
+
+// Optional per-request PhotoMaker. Two shapes accepted:
+//   pm_id_images: [base64-data-uri-or-raw, ...]   (option C)
+//   pm_id_image_set: "<name>"                     (option E)
+// pm_id_images wins if both are present (explicit per-request beats
+// admin-curated default — same precedence as other override pairs in
+// chimera). pm_style_strength is optional in both cases; if not given,
+// the upstream sd default applies. The server-init default embed path
+// (--sd-pm-id-embed-path) is injected automatically when the request
+// triggers PM and no per-request override is given.
+//
+// Gating:
+//   - PM not loaded (no --sd-photo-maker)         → 400
+//   - pm_id_image_set without --sd-pm-id-dir      → 400
+//   - pm_id_image_set names an unknown subdir     → 400 (listing known names)
+//   - pm_id_images is not an array                → 400
+//   - pm_id_images is empty after decode          → 400
+//   - any base64 element fails to decode/load     → 400 (naming the index)
+//
+// Returns nullptr on success (PM not requested, or attached cleanly);
+// otherwise an HTTP error response the caller should propagate.
+server_http_res_ptr maybe_attach_pm(
+    const json &                  fields,
+    const PmServeState &          pm,
+    chimera_sd::GenerateRequest & sreq) {
+    auto err_res = [](int code, const std::string & msg) {
+        auto r = std::make_unique<server_http_res>();
+        r->status = code;
+        r->data = json{{ "error", { { "message", msg }, { "code", code }, { "type", "invalid_request_error" } }}}.dump();
+        return r;
+    };
+    const bool has_imgs = fields.contains("pm_id_images");
+    const bool has_set  = fields.contains("pm_id_image_set");
+    const bool has_pm_request = has_imgs || has_set;
+    if (!has_pm_request) return nullptr;
+    if (!pm.model_loaded) {
+        return err_res(400,
+            "PhotoMaker request fields supplied (pm_id_images / pm_id_image_set) "
+            "but the server has no PhotoMaker model loaded; restart chimera serve "
+            "with --sd-photo-maker <path> to enable per-request PhotoMaker");
+    }
+    // Option C: explicit base64 array — wins over option E if both present.
+    if (has_imgs) {
+        const auto & arr = fields["pm_id_images"];
+        if (!arr.is_array()) {
+            return err_res(400, "pm_id_images must be a JSON array of base64 image strings");
+        }
+        std::vector<chimera_sd::PixelImage> imgs;
+        imgs.reserve(arr.size());
+        for (size_t i = 0; i < arr.size(); ++i) {
+            if (!arr[i].is_string()) {
+                return err_res(400, "pm_id_images[" + std::to_string(i) + "] is not a string");
+            }
+            std::vector<uint8_t> bytes;
+            std::string err;
+            if (!base64_decode(arr[i].get<std::string>(), bytes, err)) {
+                return err_res(400, "pm_id_images[" + std::to_string(i) + "]: " + err);
+            }
+            try {
+                imgs.push_back(chimera_sd::decode_image_bytes(bytes.data(), bytes.size(), 3));
+            } catch (const ChimeraError & e) {
+                return err_res(415,
+                    "pm_id_images[" + std::to_string(i) + "] could not be decoded as an image: " + e.what());
+            }
+        }
+        if (imgs.empty()) {
+            return err_res(400, "pm_id_images was supplied but contains zero images");
+        }
+        sreq.pm_id_images = std::move(imgs);
+    } else {
+        // Option E: named set from --sd-pm-id-dir.
+        if (pm.id_sets == nullptr || pm.id_sets->empty()) {
+            return err_res(400,
+                "pm_id_image_set was supplied but the server has no PhotoMaker "
+                "identity directory configured (--sd-pm-id-dir)");
+        }
+        const std::string name = coerce_string(fields["pm_id_image_set"]);
+        const auto it = pm.id_sets->find(name);
+        if (it == pm.id_sets->end()) {
+            std::string known;
+            for (const auto & kv : *pm.id_sets) {
+                if (!known.empty()) known += ", ";
+                known += kv.first;
+            }
+            return err_res(400,
+                "pm_id_image_set '" + name + "' not found (known sets: " + known + ")");
+        }
+        // Copy the cached PixelImages into the request. The cache lives
+        // for the server's lifetime; the request lives for one call. We
+        // copy rather than borrow so that GenerateRequest's owning
+        // `std::vector<PixelImage>` shape is preserved (matches the CLI
+        // call path). The byte cost is per-request but bounded by the
+        // identity set's pixel-buffer total (~8 MB for ten 512² RGB
+        // crops — fine for a server doing identity work).
+        sreq.pm_id_images = it->second;
+    }
+    if (fields.contains("pm_style_strength")) {
+        sreq.pm_style_strength = coerce_float(fields["pm_style_strength"], sreq.pm_style_strength);
+    }
+    sreq.pm_id_embed_path = pm.default_id_embed_path;  // server-init default
+    return nullptr;
+}
+
 server_http_res_ptr maybe_attach_control(
     const server_http_req &       req,
     const json &                  fields,
@@ -393,8 +551,9 @@ server_http_res_ptr maybe_attach_control(
 }
 
 server_http_context::handler_t make_image_generations_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded) {
-    return [ctx, &ctx_mutex, control_net_loaded](const server_http_req & req) -> server_http_res_ptr {
+    sd_ctx_t * ctx, std::mutex & ctx_mutex,
+    bool control_net_loaded, PmServeState pm) {
+    return [ctx, &ctx_mutex, control_net_loaded, pm](const server_http_req & req) -> server_http_res_ptr {
         json fields = json::object();
         if (!req.body.empty()) {
             try { fields = json::parse(req.body); }
@@ -423,14 +582,18 @@ server_http_context::handler_t make_image_generations_handler(
         if (auto e = maybe_attach_control(req, fields, control_net_loaded, sreq)) {
             return e;
         }
+        if (auto e = maybe_attach_pm(fields, pm, sreq)) {
+            return e;
+        }
         return run_image_generate(ctx, ctx_mutex, std::move(sreq), fields);
     };
 }
 
 // POST /v1/images/edits — img2img + optional mask (inpaint). Multipart.
 server_http_context::handler_t make_image_edits_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded) {
-    return [ctx, &ctx_mutex, control_net_loaded](const server_http_req & req) -> server_http_res_ptr {
+    sd_ctx_t * ctx, std::mutex & ctx_mutex,
+    bool control_net_loaded, PmServeState pm) {
+    return [ctx, &ctx_mutex, control_net_loaded, pm](const server_http_req & req) -> server_http_res_ptr {
         auto err_res = [](int code, const std::string & msg) {
             auto r = std::make_unique<server_http_res>();
             r->status = code;
@@ -479,6 +642,9 @@ server_http_context::handler_t make_image_edits_handler(
         if (auto e = maybe_attach_control(req, fields, control_net_loaded, sreq)) {
             return e;
         }
+        if (auto e = maybe_attach_pm(fields, pm, sreq)) {
+            return e;
+        }
         return run_image_generate(ctx, ctx_mutex, std::move(sreq), fields);
     };
 }
@@ -486,8 +652,9 @@ server_http_context::handler_t make_image_edits_handler(
 // POST /v1/images/variations — img2img with no prompt. We pass an empty
 // prompt; SD will produce variations driven by the init latent + noise.
 server_http_context::handler_t make_image_variations_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded) {
-    return [ctx, &ctx_mutex, control_net_loaded](const server_http_req & req) -> server_http_res_ptr {
+    sd_ctx_t * ctx, std::mutex & ctx_mutex,
+    bool control_net_loaded, PmServeState pm) {
+    return [ctx, &ctx_mutex, control_net_loaded, pm](const server_http_req & req) -> server_http_res_ptr {
         auto err_res = [](int code, const std::string & msg) {
             auto r = std::make_unique<server_http_res>();
             r->status = code;
@@ -520,6 +687,9 @@ server_http_context::handler_t make_image_variations_handler(
             sreq.height = sreq.init.height;
         }
         if (auto e = maybe_attach_control(req, fields, control_net_loaded, sreq)) {
+            return e;
+        }
+        if (auto e = maybe_attach_pm(fields, pm, sreq)) {
             return e;
         }
         return run_image_generate(ctx, ctx_mutex, std::move(sreq), fields);

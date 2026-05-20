@@ -17,6 +17,9 @@
 #include "chimera_embed.h"
 #include "chimera_embed_cache.h"
 #include "chimera_vector_store.h"
+#ifdef CHIMERA_HAS_SD
+#include "chimera_sd.h"
+#endif
 #ifdef CHIMERA_HAS_WHISPER
 #  include "chimera_whisper.h"
 #endif
@@ -31,6 +34,7 @@
 
 #include <cstdint>
 #include <map>
+#include <vector>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -92,6 +96,24 @@ server_http_context::handler_t make_audio_transcribe_handler(
 // ----------------------------------------------------------------------------
 
 #ifdef CHIMERA_HAS_SD
+// Cache for PhotoMaker identity sets (step 5e, option E). Built once
+// at server start by scanning `--sd-pm-id-dir` for subdirectories;
+// each subdir's images are decoded eagerly and cached here, addressable
+// per-request by `pm_id_image_set: "<subdir-name>"`. The handlers borrow
+// the cached PixelImages by reference (no per-request copy of the
+// pixel buffers needed) since the cache outlives all requests.
+using PmIdSetCache = std::map<std::string, std::vector<chimera_sd::PixelImage>>;
+
+// Bundle of PM-on-serve state passed to the image handler factories.
+// `model_loaded` is true when `--sd-photo-maker` was set at startup —
+// per-request `pm_id_images` / `pm_id_image_set` against a server with
+// PM not loaded return HTTP 400.
+struct PmServeState {
+    bool                model_loaded         = false;
+    std::string         default_id_embed_path;  // --sd-pm-id-embed-path
+    const PmIdSetCache * id_sets             = nullptr;
+};
+
 // `control_net_loaded` reports whether the server was started with a
 // ControlNet model (`--sd-control-net`). The handlers gate per-request
 // `control_image` on this flag — a request that supplies one without a
@@ -99,11 +121,14 @@ server_http_context::handler_t make_audio_transcribe_handler(
 // handler for VAD: opt-in server-init, with a precise error when the
 // per-request feature is asked for but unavailable.
 server_http_context::handler_t make_image_generations_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded);
+    sd_ctx_t * ctx, std::mutex & ctx_mutex,
+    bool control_net_loaded, PmServeState pm);
 server_http_context::handler_t make_image_edits_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded);
+    sd_ctx_t * ctx, std::mutex & ctx_mutex,
+    bool control_net_loaded, PmServeState pm);
 server_http_context::handler_t make_image_variations_handler(
-    sd_ctx_t * ctx, std::mutex & ctx_mutex, bool control_net_loaded);
+    sd_ctx_t * ctx, std::mutex & ctx_mutex,
+    bool control_net_loaded, PmServeState pm);
 #endif
 
 // ----------------------------------------------------------------------------

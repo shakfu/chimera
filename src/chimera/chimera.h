@@ -507,6 +507,64 @@ struct ServeOptions {
     // ControlNet model loaded at startup, requests with control_image
     // return HTTP 400.
     std::string sd_control_net;     // --sd-control-net <path>
+    // SD split-checkpoint flags (step 5c). All optional. Mirror the
+    // `chimera sd` CLI flag spelling with a --sd- prefix. Combined
+    // with --enable-image <combined.gguf> these let chimera serve
+    // load Flux / SD3 / Z-Image / Qwen-Image split layouts the same
+    // way the CLI does.
+    std::string sd_diffusion_model;            // --sd-diffusion-model
+    std::string sd_vae;                        // --sd-vae
+    std::string sd_clip_l;                     // --sd-clip-l
+    std::string sd_clip_g;                     // --sd-clip-g
+    std::string sd_t5xxl;                      // --sd-t5xxl
+    std::string sd_llm;                        // --sd-llm
+    std::string sd_llm_vision;                 // --sd-llm-vision
+    std::string sd_clip_vision;                // --sd-clip-vision
+    std::string sd_taesd;                      // --sd-taesd
+    std::string sd_embd_dir;                   // --sd-embd-dir
+    std::string sd_type;                       // --sd-type (wtype override)
+    std::string sd_tensor_type_rules;          // --sd-tensor-type-rules
+    std::string sd_high_noise_diffusion_model; // --sd-high-noise-diffusion-model
+    // SD perf / offload long-tail (step 5d). All optional. Sentinel
+    // defaults match `chimera_sd::LoadParams` so omitted flags leave
+    // the upstream behavior untouched. `sd_no_mmap` inverts chimera's
+    // default of mmap=on (CLI side calls this `--no-mmap` for the same
+    // reason). Enum-string fields are CLI11-validated.
+    bool        sd_flash_attn                = false;
+    bool        sd_diffusion_flash_attn      = false;
+    bool        sd_diffusion_conv_direct     = false;
+    bool        sd_vae_conv_direct           = false;
+    bool        sd_no_mmap                   = false;
+    float       sd_max_vram                  = 0.0f;
+    bool        sd_offload_to_cpu            = false;
+    bool        sd_keep_clip_on_cpu          = false;
+    bool        sd_keep_vae_on_cpu           = false;
+    bool        sd_keep_control_net_on_cpu   = false;
+    bool        sd_force_sdxl_vae_conv_scale = false;
+    std::string sd_rng;                      // empty = upstream default
+    std::string sd_sampler_rng;              // empty = upstream default
+    std::string sd_prediction;               // empty = upstream default
+    std::string sd_lora_apply_mode;          // empty = upstream default
+    int         sd_threads                   = -1; // -1 = whatever sd.cpp's default is
+
+    // PhotoMaker on serve (step 5e). Three knobs:
+    //   --sd-photo-maker        : PM model file, loaded into the sd
+    //                             context at server start
+    //   --sd-pm-id-dir          : root directory of identity sets. Each
+    //                             subdirectory becomes a named set,
+    //                             addressable per-request as
+    //                             `pm_id_image_set: "<subdir-name>"`
+    //                             (option E from the design notes).
+    //   --sd-pm-id-embed-path   : optional default precomputed embedding;
+    //                             per-request `pm_id_embed_path` (if
+    //                             ever added) would override.
+    // Per-request `pm_id_images` (base64 JSON array) bypasses the cache
+    // entirely (option C). A request that supplies neither field while
+    // PM is loaded leaves PM unused; one that supplies either against a
+    // PM-less server returns 400.
+    std::string sd_photo_maker;
+    std::string sd_pm_id_dir;
+    std::string sd_pm_id_embed_path;
 
     // Opt-in vector store / RAG. When non-empty, the named GGUF embedding
     // model is loaded alongside the LLM and the POST/GET /v1/vector_stores/*

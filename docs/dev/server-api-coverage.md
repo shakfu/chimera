@@ -1,7 +1,7 @@
 # Chimera Serve — CLI/HTTP Parity Inventory
 
-Report date: 2026-05-20
-Last status update: 2026-05-20 (audio wave 1+2 + image wave 1+2 + step 5a (audio LoadParams + VAD) + step 5b (sd LoadParams + ControlNet) landed)
+Report date: 2026-05-21
+Last status update: 2026-05-21 (waves 1–4 + steps 5a–5e landed; full sd LoadParams surface exposed on serve, 30 --sd-* flags + per-request PhotoMaker. Only step 6 (per-request LoRA) remains.)
 Companion to [cli-api-coverage.md](cli-api-coverage.md), which audits the
 CLI subcommand surface against upstream. This document audits the
 **HTTP server surface** (`chimera serve`) against the matching CLI
@@ -95,6 +95,7 @@ Handlers in `src/chimera/chimera_serve_images.cpp`.
 | `hires` (+ `hires_upscaler`, `hires_upscale_model`, `hires_width`, `hires_height`, `hires_scale`, `hires_steps`, `hires_denoising_strength`, `hires_upscale_tile_size`) | ✅ Landed 2026-05-20 (image wave 2) — hires-fix two-pass upscale. All upscaler types work; the `Model` upscaler's model file loads per-request from the `hires_upscale_model` path (`sd_hires_params_t.model_path` is per-request, not context-init — the earlier note saying "Model upscaler waits on step 5" was overstated). |
 | `control_image` (multipart file) + `control_strength` | ✅ Landed 2026-05-20 (step 5b) — per-request ControlNet conditioning. Gated on the server having been started with `--sd-control-net <path>`; a `control_image` upload without a ControlNet loaded returns HTTP 400. Available on all three image endpoints (`/generations`, `/edits`, `/variations`). |
 | `cache_mode`, `cache_option`, `scm_mask`, `scm_policy` | ✅ Landed 2026-05-20 (image wave 2) — inference cache + sampler-cached-memory. Validated via the shared `chimera_sd::parse_cache_options()` so HTTP errors are identical to CLI errors (modulo the `--cache-mode` wording — see design notes). |
+| `pm_id_images`, `pm_id_image_set`, `pm_style_strength` | ✅ Landed 2026-05-21 (step 5e) — per-request PhotoMaker. `pm_id_images` is a JSON base64 array (raw or `data:<mime>;base64,` URI); `pm_id_image_set` references a subdirectory of `--sd-pm-id-dir` scanned at server start. Explicit `pm_id_images` wins if both are given. Gated on `--sd-photo-maker <path>` at server start; PM fields without a PM model return HTTP 400. Available on all three image endpoints. |
 
 ### Chat / completions / embeddings
 
@@ -184,9 +185,15 @@ All map to existing `GenerateRequest` fields. **Wave 1 (14 fields) landed 2026-0
   `no_auto_resize_ref_image` — IP-adapter-style style/identity
   conditioning. JSON-shape decision: OpenAI's body has no precedent
   for repeatable image uploads; chimera would invent the field name.
-- PhotoMaker bundle (`pm_id_images_dir` → multipart files, `pm_id_embed_path`,
-  `pm_style_strength`) — requires `--photo-maker` model loaded at
-  startup. Same multipart-plural shape question as ref-images.
+- ~~PhotoMaker bundle — requires `--photo-maker` model loaded at
+  startup. Same multipart-plural shape question as ref-images.~~
+  ✅ Landed 2026-05-21 as step 5e. Sidestepped the multipart-plural
+  shape question by accepting a **JSON base64 array** (`pm_id_images`)
+  for explicit per-request identity, and a **named identity-set**
+  shape (`pm_id_image_set: "<name>"`) that references a subdirectory
+  of `--sd-pm-id-dir` scanned eagerly at server start. The
+  explicit-base64 form wins over the named-set form when both are
+  given. See step 5e in the [Recommended order](#recommended-order).
 - `lora` — per-request LoRA selection. **Design question:** should the
   server load a fixed set of LoRAs at startup and let requests pick by
   name, or should requests reference filesystem paths the server
@@ -278,27 +285,56 @@ Pareto-shaped roadmap:
      `control_image` (multipart) + `control_strength` (JSON) wired in
      all three image handlers via the new `maybe_attach_control()`
      helper. Gated 400 when no ControlNet is loaded. ~70 LOC.
-   - **5c — SD split-checkpoint flags.** Pending. `--sd-diffusion-model`,
-     `--sd-vae`, `--sd-clip-l`, `--sd-clip-g`, `--sd-t5xxl`, `--sd-llm`,
-     `--sd-llm-vision`, `--sd-clip-vision`, `--sd-taesd`, `--sd-embd-dir`,
-     `--sd-type`, `--sd-tensor-type-rules`,
-     `--sd-high-noise-diffusion-model`. Unlocks serving Flux / SD3 /
-     Z-Image / Qwen-Image. Each flag is now one line in three places
-     (`ServeOptions`, the LoadParams build, the CLI binding).
-   - **5d — SD perf/offload long-tail.** Pending. `--sd-fa`,
-     `--sd-diffusion-fa`, `--sd-diffusion-conv-direct`,
+   - **5c — SD split-checkpoint flags.** ✅ Landed 2026-05-20. 13
+     flags: `--sd-diffusion-model`, `--sd-vae`, `--sd-clip-l`,
+     `--sd-clip-g`, `--sd-t5xxl`, `--sd-llm`, `--sd-llm-vision`,
+     `--sd-clip-vision`, `--sd-taesd`, `--sd-embd-dir`, `--sd-type`,
+     `--sd-tensor-type-rules`, `--sd-high-noise-diffusion-model`.
+     `chimera serve --enable-image <path>` is now optional when
+     `--sd-diffusion-model <path>` is set — same combined-or-split
+     allowance as `chimera sd`. Mechanical landing (~50 LOC) thanks to
+     the 5b LoadParams plumbing — each flag was one line in three
+     places (`ServeOptions`, the LoadParams build, the CLI binding).
+     Unlocks serving Flux, SD3, Z-Image, and Qwen-Image; the existing
+     per-request fields from image waves 1+2 (`guidance`, `flow_shift`,
+     `img_cfg_scale`, etc.) Just Work for Flux/SD3-class models without
+     further wiring.
+   - **5d — SD perf/offload long-tail.** ✅ Landed 2026-05-20. 16
+     flags: `--sd-fa`, `--sd-diffusion-fa`, `--sd-diffusion-conv-direct`,
      `--sd-vae-conv-direct`, `--sd-no-mmap`, `--sd-max-vram`,
      `--sd-offload-to-cpu`, `--sd-clip-on-cpu`, `--sd-vae-on-cpu`,
      `--sd-control-net-cpu`, `--sd-force-sdxl-vae-conv-scale`,
      `--sd-rng`, `--sd-sampler-rng`, `--sd-prediction`,
-     `--sd-lora-apply-mode`, `--sd-threads`.
-   - **5e — PhotoMaker on serve.** Pending separate phase (was
-     originally part of "the unblocking trio" but split out). Needs
-     both server-init (`--sd-photo-maker <path>`) AND a multipart
-     per-request bundle: `pm_id_images[]` (plural files, OpenAI body
-     has no precedent — chimera invents the shape), `pm_id_embed_path`,
-     `pm_style_strength`. Half the work is the multipart-files-plural
-     design.
+     `--sd-lora-apply-mode`, `--sd-threads`. Mechanical landing again
+     (~50 LOC); the four enum-string flags (`--sd-rng`,
+     `--sd-sampler-rng`, `--sd-prediction`, `--sd-lora-apply-mode`) get
+     `CLI::IsMember` validators that exit before model load with the
+     accepted-set listed in the error. `--sd-no-mmap` is inverted
+     polarity (chimera defaults mmap=on; the flag flips it off) — same
+     semantic as the CLI side. After 5d the full `chimera_sd::LoadParams`
+     surface is exposed on serve — 30 `--sd-*` flags total across 5b/5c/5d.
+   - **5e — PhotoMaker on serve.** ✅ Landed 2026-05-21. Three new
+     server-init flags (`--sd-photo-maker <path>`, `--sd-pm-id-dir
+     <dir>`, `--sd-pm-id-embed-path <file>`) and a per-request JSON
+     bundle (`pm_id_images`, `pm_id_image_set`, `pm_style_strength`).
+     The multipart-files-plural design question is sidestepped:
+     identity images travel as a **JSON base64 array** rather than
+     repeatable multipart parts. Two complementary shapes accepted —
+     **(C)** explicit `pm_id_images: ["<base64 or data-URI>", ...]`
+     for per-request identity images, and **(E)** `pm_id_image_set:
+     "<name>"` referencing a named subdirectory of `--sd-pm-id-dir`
+     scanned eagerly at startup. (C) wins if both are supplied —
+     explicit per-request beats admin-curated default, same precedence
+     as elsewhere in chimera. `--sd-pm-id-embed-path` is the
+     server-init default ID-embedding applied to every PM request.
+     Gating: any PM field against a server without `--sd-photo-maker`
+     returns 400 with the missing-flag hint; `pm_id_image_set` against
+     a server without `--sd-pm-id-dir` returns 400; an unknown set
+     name returns 400 listing the known names; a malformed base64
+     element returns 400 naming the offending index. Available on
+     all three image endpoints. ~250 LOC (the bulk is the
+     self-contained `base64_decode()` for the JSON array path and the
+     `PmIdSetCache` eager-scan at server start).
 6. **Per-request LoRA selection.** Pending. Choose between "named
    adapters loaded at startup" (safer) vs. "paths resolved at request
    time" (more flexible, security implications). Mirrors the choice
@@ -311,8 +347,11 @@ loads fresh each `generate_image()` call, so wave 2's
 `hires_upscale_model` per-request field already works without
 server-init plumbing. Removed from the roadmap.
 
-Steps 1–4 closed the entire per-request gap (40 fields). Steps 5a and
-5b closed the highest-impact server-init gaps (VAD on audio, ControlNet
-on SD). Remaining work (5c, 5d, 5e, 6) is mostly mechanical now that
-the `LoadParams` routing exists on both modalities — each new flag is a
-one-line addition in three places.
+Steps 1–4 closed the entire per-request gap (40 fields). Steps 5a–5e
+closed the server-init gap: audio LoadParams + VAD (5a), sd LoadParams
++ ControlNet (5b), sd split-checkpoint flags (5c, 13 flags), sd
+perf/offload long-tail (5d, 16 flags), PhotoMaker (5e, 3 server-init
+flags + 3 per-request fields). The full `chimera_sd::LoadParams`
+surface is exposed on serve. Remaining work — step 6 (per-request
+LoRA) — needs API-shape design (named-adapters-at-startup vs.
+paths-resolved-at-request) rather than more mechanical wiring.

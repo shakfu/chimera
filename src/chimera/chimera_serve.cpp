@@ -642,25 +642,108 @@ int command_serve(const ServeOptions & opts) {
     // CHIMERA_HAS_SD is undefined.
     SdContextPtr sd_ctx;
     std::mutex   sd_mutex;
-    if (!opts.sd_model.empty()) {
-        std::cout << "chimera serve: loading image model " << opts.sd_model << "...\n";
-        // SD LoadParams routing (step 5b). Replaces the simple
-        // load_model(path, vae_decode_only) overload so server-init
-        // flags like --sd-control-net can land in the sd_ctx_params.
+    // SD load is gated on either --enable-image (combined checkpoint)
+    // or --sd-diffusion-model (split-checkpoint layouts: Flux / SD3 /
+    // Z-Image / Qwen-Image). Mirrors the CLI's `chimera sd` allowance
+    // — `chimera_sd.cpp:740` enforces the same shape.
+    if (!opts.sd_model.empty() || !opts.sd_diffusion_model.empty()) {
+        const std::string & shown =
+            !opts.sd_model.empty() ? opts.sd_model : opts.sd_diffusion_model;
+        std::cout << "chimera serve: loading image model " << shown << "...\n";
+        // SD LoadParams routing. Phase 5b plumbed the LoadParams
+        // overload through; 5c fills in the split-checkpoint fields.
         // vae_decode_only=false because /v1/images/edits and
         // /variations both need the encode path (img2img).
         chimera_sd::LoadParams slp;
-        slp.model           = opts.sd_model;
-        slp.vae_decode_only = false;
-        slp.control_net     = opts.sd_control_net;
+        slp.model                      = opts.sd_model;
+        slp.diffusion_model            = opts.sd_diffusion_model;
+        slp.vae                        = opts.sd_vae;
+        slp.clip_l                     = opts.sd_clip_l;
+        slp.clip_g                     = opts.sd_clip_g;
+        slp.t5xxl                      = opts.sd_t5xxl;
+        slp.llm                        = opts.sd_llm;
+        slp.llm_vision                 = opts.sd_llm_vision;
+        slp.clip_vision                = opts.sd_clip_vision;
+        slp.taesd                      = opts.sd_taesd;
+        slp.embd_dir                   = opts.sd_embd_dir;
+        slp.wtype                      = opts.sd_type;
+        slp.tensor_type_rules          = opts.sd_tensor_type_rules;
+        slp.high_noise_diffusion_model = opts.sd_high_noise_diffusion_model;
+        slp.control_net                = opts.sd_control_net;
+        slp.photo_maker                = opts.sd_photo_maker;
+        slp.vae_decode_only            = false;
+        // 5d perf / offload long-tail.
+        slp.flash_attn                 = opts.sd_flash_attn;
+        slp.diffusion_flash_attn       = opts.sd_diffusion_flash_attn;
+        slp.diffusion_conv_direct      = opts.sd_diffusion_conv_direct;
+        slp.vae_conv_direct            = opts.sd_vae_conv_direct;
+        slp.enable_mmap                = !opts.sd_no_mmap; // chimera default is mmap=on
+        slp.max_vram                   = opts.sd_max_vram;
+        slp.offload_to_cpu             = opts.sd_offload_to_cpu;
+        slp.keep_clip_on_cpu           = opts.sd_keep_clip_on_cpu;
+        slp.keep_vae_on_cpu            = opts.sd_keep_vae_on_cpu;
+        slp.keep_control_net_on_cpu    = opts.sd_keep_control_net_on_cpu;
+        slp.force_sdxl_vae_conv_scale  = opts.sd_force_sdxl_vae_conv_scale;
+        slp.rng_type                   = opts.sd_rng;
+        slp.sampler_rng_type           = opts.sd_sampler_rng;
+        slp.prediction                 = opts.sd_prediction;
+        slp.lora_apply_mode            = opts.sd_lora_apply_mode;
+        if (opts.sd_threads > 0) slp.threads = opts.sd_threads;
         sd_ctx = chimera_sd::load_model(slp);
         if (!sd_ctx) {
             std::cerr << "chimera serve: failed to load image model: "
-                      << opts.sd_model << "\n";
+                      << shown << "\n";
             ctx_http.stop();
             ctx_server.terminate();
             return static_cast<int>(ExitCode::Load);
         }
+    }
+
+    // PhotoMaker identity-set cache (step 5e, option E). Each
+    // subdirectory of --sd-pm-id-dir becomes one named set, addressable
+    // per-request via `pm_id_image_set: "<subdir-name>"`. Scanned
+    // eagerly at startup so a misconfigured set fails fast instead of
+    // surfacing on the first request that references it. Non-image
+    // files inside a subdir are skipped silently (README.md, .DS_Store);
+    // an empty subdir is an error because the user implicitly meant
+    // for the named set to be usable.
+    PmIdSetCache pm_id_sets;
+    if (!opts.sd_pm_id_dir.empty()) {
+        namespace fs = std::filesystem;
+        const fs::path root = opts.sd_pm_id_dir;
+        std::error_code ec;
+        if (!fs::is_directory(root, ec)) {
+            std::cerr << "chimera serve: --sd-pm-id-dir is not a directory: "
+                      << opts.sd_pm_id_dir << "\n";
+            ctx_http.stop(); ctx_server.terminate();
+            return static_cast<int>(ExitCode::BadInput);
+        }
+        for (const auto & sub : fs::directory_iterator(root, ec)) {
+            if (!sub.is_directory()) continue;
+            std::vector<fs::path> files;
+            for (const auto & f : fs::directory_iterator(sub.path(), ec)) {
+                if (f.is_regular_file()) files.push_back(f.path());
+            }
+            std::sort(files.begin(), files.end());
+            std::vector<chimera_sd::PixelImage> imgs;
+            for (const auto & p : files) {
+                try {
+                    imgs.push_back(chimera_sd::decode_image_file(p.string(), 3));
+                } catch (const ChimeraError &) {
+                    // Skip non-image files (README, .DS_Store, etc).
+                }
+            }
+            if (imgs.empty()) {
+                std::cerr << "chimera serve: --sd-pm-id-dir subdirectory '"
+                          << sub.path().filename().string()
+                          << "' contains no decodable images\n";
+                ctx_http.stop(); ctx_server.terminate();
+                return static_cast<int>(ExitCode::BadInput);
+            }
+            pm_id_sets.emplace(sub.path().filename().string(), std::move(imgs));
+        }
+        std::cout << "chimera serve: loaded " << pm_id_sets.size()
+                  << " PhotoMaker identity set(s) from " << opts.sd_pm_id_dir << "\n";
     }
 #endif
 
@@ -840,13 +923,28 @@ int command_serve(const ServeOptions & opts) {
     if (sd_ctx) {
         ctx_http.post("/v1/images/generations",
                       ex_wrapper(make_image_generations_handler(
-                          sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty())));
+                          sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty(),
+                          PmServeState{
+                              /*model_loaded=*/!opts.sd_photo_maker.empty(),
+                              opts.sd_pm_id_embed_path,
+                              &pm_id_sets,
+                          })));
         ctx_http.post("/v1/images/edits",
                       ex_wrapper(make_image_edits_handler(
-                          sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty())));
+                          sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty(),
+                          PmServeState{
+                              /*model_loaded=*/!opts.sd_photo_maker.empty(),
+                              opts.sd_pm_id_embed_path,
+                              &pm_id_sets,
+                          })));
         ctx_http.post("/v1/images/variations",
                       ex_wrapper(make_image_variations_handler(
-                          sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty())));
+                          sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty(),
+                          PmServeState{
+                              /*model_loaded=*/!opts.sd_photo_maker.empty(),
+                              opts.sd_pm_id_embed_path,
+                              &pm_id_sets,
+                          })));
     }
 #endif
     // /v1/rerank takes {"query": "...", "documents": ["..."]} and returns
