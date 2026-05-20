@@ -154,12 +154,26 @@ struct TokenizeOptions {
 struct WhisperOptions {
     std::string model;
     std::string input;
-    std::string output;
+    std::string output;           // streamed text destination (legacy chimera flag)
     std::string language;
     int threads = -1;
     bool translate = false;
     bool timestamps = false;
     bool no_context = false;
+
+    // Output-format flags mirroring whisper-cli. Multiple can be enabled
+    // at once; each writes "<output_file_base>.<ext>" after transcription
+    // finishes. When output_file_base is empty, the input WAV's stem is
+    // used as the base. `out_json_full` includes per-token timing info
+    // (forces word-level timestamps on).
+    std::string output_file_base;
+    bool out_txt       = false;
+    bool out_srt       = false;
+    bool out_vtt       = false;
+    bool out_json      = false;
+    bool out_json_full = false;
+    bool out_csv       = false;
+    bool out_lrc       = false;
 };
 int command_whisper(const WhisperOptions & opts);
 #endif

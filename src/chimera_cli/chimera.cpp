@@ -2877,6 +2877,19 @@ void bind_whisper_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_flag("--translate", p.whisper_opts.translate, "Translate to English");
     cmd->add_flag("--timestamps", p.whisper_opts.timestamps, "Print segment timestamps");
     cmd->add_flag("--no-context", p.whisper_opts.no_context, "Disable previous-text conditioning");
+    // Note: CLI11 forbids multi-char short flags, so the upstream
+    // whisper-cli aliases (-of/-otxt/-osrt/...) are long-only here.
+    cmd->add_option("--output-file", p.whisper_opts.output_file_base,
+        "Base name for format files (default: input WAV stem). "
+        "Each --output-* flag writes <base>.<ext>.");
+    cmd->add_flag("--output-txt",  p.whisper_opts.out_txt,  "Write .txt (one line per segment)");
+    cmd->add_flag("--output-srt",  p.whisper_opts.out_srt,  "Write .srt subtitles");
+    cmd->add_flag("--output-vtt",  p.whisper_opts.out_vtt,  "Write .vtt (WebVTT) subtitles");
+    cmd->add_flag("--output-json", p.whisper_opts.out_json, "Write .json (segments + text)");
+    cmd->add_flag("--output-json-full", p.whisper_opts.out_json_full,
+        "Write .json with per-word timestamps (implies word-level timing)");
+    cmd->add_flag("--output-csv",  p.whisper_opts.out_csv,  "Write .csv (start_ms,end_ms,text)");
+    cmd->add_flag("--output-lrc",  p.whisper_opts.out_lrc,  "Write .lrc karaoke");
     p.whisper_cmd = cmd;
 }
 #endif

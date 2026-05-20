@@ -440,6 +440,170 @@ std::string whisper_system_info_raw() {
 
 }  // namespace chimera_whisper
 
+// ---- output-format writers ---------------------------------------------
+//
+// Each writer takes a fully-realized TranscribeResult and a destination
+// stream. Timestamp formatting matches whisper-cli:
+//   .srt -> "HH:MM:SS,mmm" (comma decimal)
+//   .vtt -> "HH:MM:SS.mmm" (period decimal)
+//   .lrc -> "[MM:SS.cc]"   (centiseconds)
+//   .csv -> integer milliseconds, text quoted with doubled inner quotes
+//   .json -> minimal {language,text,segments[]} (or per-word data for ojf)
+
+namespace {
+
+std::string ts_srt(int64_t t10ms) {
+    int64_t ms = t10ms * 10;
+    const int64_t h = ms / 3600000; ms %= 3600000;
+    const int64_t m = ms / 60000;   ms %= 60000;
+    const int64_t s = ms / 1000;    ms %= 1000;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%02lld:%02lld:%02lld,%03lld",
+                  (long long)h, (long long)m, (long long)s, (long long)ms);
+    return buf;
+}
+
+std::string ts_vtt(int64_t t10ms) {
+    std::string s = ts_srt(t10ms);
+    for (char & c : s) if (c == ',') { c = '.'; break; }
+    return s;
+}
+
+std::string ts_lrc(int64_t t10ms) {
+    // whisper.cpp timestamps are in units of 10ms = 1 centisecond.
+    const int64_t cs = t10ms;
+    const int64_t m  = (cs / 100) / 60;
+    const int64_t s  = (cs / 100) % 60;
+    const int64_t cc = cs % 100;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%02lld:%02lld.%02lld",
+                  (long long)m, (long long)s, (long long)cc);
+    return buf;
+}
+
+std::string json_escape(const std::string & in) {
+    std::string out;
+    out.reserve(in.size() + 8);
+    for (unsigned char c : in) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out;
+}
+
+std::string csv_quote(const std::string & in) {
+    std::string out = "\"";
+    for (char c : in) {
+        if (c == '"') out += "\"\"";
+        else          out += c;
+    }
+    out += '"';
+    return out;
+}
+
+void write_txt(std::ostream & out, const chimera_whisper::TranscribeResult & r) {
+    for (const auto & s : r.segments) out << s.text << '\n';
+}
+
+void write_srt(std::ostream & out, const chimera_whisper::TranscribeResult & r) {
+    int i = 1;
+    for (const auto & s : r.segments) {
+        out << i++ << '\n'
+            << ts_srt(s.t0) << " --> " << ts_srt(s.t1) << '\n'
+            << s.text << "\n\n";
+    }
+}
+
+void write_vtt(std::ostream & out, const chimera_whisper::TranscribeResult & r) {
+    out << "WEBVTT\n\n";
+    for (const auto & s : r.segments) {
+        out << ts_vtt(s.t0) << " --> " << ts_vtt(s.t1) << '\n'
+            << s.text << "\n\n";
+    }
+}
+
+void write_csv(std::ostream & out, const chimera_whisper::TranscribeResult & r) {
+    out << "start_ms,end_ms,text\n";
+    for (const auto & s : r.segments) {
+        out << (s.t0 * 10) << ',' << (s.t1 * 10) << ',' << csv_quote(s.text) << '\n';
+    }
+}
+
+void write_lrc(std::ostream & out, const chimera_whisper::TranscribeResult & r) {
+    for (const auto & s : r.segments) {
+        out << '[' << ts_lrc(s.t0) << ']' << s.text << '\n';
+    }
+}
+
+void write_json(std::ostream & out, const chimera_whisper::TranscribeResult & r, bool full) {
+    out << "{\n";
+    if (!r.detected_language.empty()) {
+        out << "  \"language\": \"" << json_escape(r.detected_language) << "\",\n";
+    }
+    out << "  \"text\": \"" << json_escape(r.text) << "\",\n";
+    out << "  \"duration\": " << r.audio_duration_s << ",\n";
+    out << "  \"segments\": [\n";
+    for (size_t i = 0; i < r.segments.size(); ++i) {
+        const auto & s = r.segments[i];
+        out << "    {\"start_ms\": " << (s.t0 * 10)
+            << ", \"end_ms\": "      << (s.t1 * 10)
+            << ", \"text\": \""      << json_escape(s.text) << "\"";
+        if (full && !s.words.empty()) {
+            out << ", \"words\": [";
+            for (size_t j = 0; j < s.words.size(); ++j) {
+                const auto & w = s.words[j];
+                out << "{\"start_ms\": " << (w.t0 * 10)
+                    << ", \"end_ms\": "  << (w.t1 * 10)
+                    << ", \"text\": \""  << json_escape(w.text) << "\"}";
+                if (j + 1 < s.words.size()) out << ", ";
+            }
+            out << "]";
+        }
+        out << "}";
+        if (i + 1 < r.segments.size()) out << ",";
+        out << "\n";
+    }
+    out << "  ]\n}\n";
+}
+
+// Path stem helper: strips trailing extension from a filename.
+std::string strip_ext(const std::string & path) {
+    const auto slash = path.find_last_of("/\\");
+    const auto dot   = path.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+        return path;
+    }
+    return path.substr(0, dot);
+}
+
+void emit_format_file(const std::string & path,
+                      void (*writer)(std::ostream &, const chimera_whisper::TranscribeResult &),
+                      const chimera_whisper::TranscribeResult & r) {
+    std::ofstream f(path);
+    if (!f) {
+        fail(ExitCode::Runtime, "failed to open output file: " + path);
+    }
+    writer(f, r);
+    std::cerr << "wrote " << path << '\n';
+}
+
+}  // namespace
+
 // ---- CLI subcommand ----------------------------------------------------
 
 int command_whisper(const WhisperOptions & opts) {
@@ -465,13 +629,22 @@ int command_whisper(const WhisperOptions & opts) {
         out = &out_file;
     }
 
+    const bool any_format = opts.out_txt || opts.out_srt || opts.out_vtt ||
+                            opts.out_json || opts.out_json_full ||
+                            opts.out_csv || opts.out_lrc;
+    // SRT/VTT/CSV/LRC/JSON all need segment-level timestamps. Whisper.cpp
+    // returns garbage t0/t1 when no_timestamps=true, so force segment
+    // timing on whenever any format file is requested, independent of the
+    // user-facing --timestamps flag (which only controls inline streaming).
     chimera_whisper::TranscribeRequest req;
     req.audio_16k_mono  = std::move(audio);
     req.language        = opts.language;
     req.translate       = opts.translate;
     req.no_context      = opts.no_context;
-    req.emit_timestamps = opts.timestamps;
+    req.emit_timestamps = opts.timestamps || any_format;
     req.threads         = opts.threads;
+    // -ojf needs per-word timing on top of segment-level timing.
+    req.word_timestamps = opts.out_json_full;
     // Stream each finalized segment as soon as whisper.cpp emits it. Same
     // visible behavior as before the refactor.
     req.on_segment = [&](const chimera_whisper::Segment & s) {
@@ -485,6 +658,32 @@ int command_whisper(const WhisperOptions & opts) {
         *out << s.text << '\n' << std::flush;
     };
 
-    (void) chimera_whisper::transcribe(ctx.get(), req);
+    auto result = chimera_whisper::transcribe(ctx.get(), req);
+
+    if (any_format) {
+        const std::string base = opts.output_file_base.empty()
+            ? strip_ext(opts.input)
+            : opts.output_file_base;
+        if (opts.out_txt)  emit_format_file(base + ".txt",  write_txt, result);
+        if (opts.out_srt)  emit_format_file(base + ".srt",  write_srt, result);
+        if (opts.out_vtt)  emit_format_file(base + ".vtt",  write_vtt, result);
+        if (opts.out_csv)  emit_format_file(base + ".csv",  write_csv, result);
+        if (opts.out_lrc)  emit_format_file(base + ".lrc",  write_lrc, result);
+        if (opts.out_json) {
+            std::ofstream f(base + ".json");
+            if (!f) fail(ExitCode::Runtime, "failed to open output file: " + base + ".json");
+            write_json(f, result, /*full=*/false);
+            std::cerr << "wrote " << (base + ".json") << '\n';
+        }
+        if (opts.out_json_full) {
+            const std::string path = base + ".json";
+            // If both -oj and -ojf are set, the full variant wins because
+            // it's a strict superset of -oj's output.
+            std::ofstream f(path);
+            if (!f) fail(ExitCode::Runtime, "failed to open output file: " + path);
+            write_json(f, result, /*full=*/true);
+            std::cerr << "wrote " << path << " (full)\n";
+        }
+    }
     return 0;
 }

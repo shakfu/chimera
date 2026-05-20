@@ -35,6 +35,32 @@ chimera gen -m model.gguf -p "..." -n 128 \
     --temp 0.8 --top-k 40 --top-p 0.95 --seed 42
 chimera gen -m vl.gguf -p "describe this" \
     --mmproj mmproj.gguf --image img.png
+
+# Structured output (mutually exclusive group)
+chimera gen -m model.gguf -p "Pick a fruit:" \
+    --grammar 'root ::= "apple" | "banana" | "cherry"'
+chimera gen -m model.gguf -p "Extract:" --json-schema-file schema.json
+
+# Perf / KV-quant / LoRA
+chimera gen -m model.gguf -p "..." --flash-attn \
+    --cache-type-k q8_0 --cache-type-v q8_0 --ubatch-size 256
+chimera gen -m model.gguf -p "..." --lora adapter.gguf:0.7    # repeatable
+
+# Repetition + presence/frequency penalties + Mirostat / DRY
+chimera gen -m model.gguf -p "..." \
+    --repeat-penalty 1.1 --repeat-last-n 256 \
+    --presence-penalty 0.3 --frequency-penalty 0.3
+chimera gen -m model.gguf -p "..." --mirostat 2 --mirostat-ent 5.0
+chimera gen -m model.gguf -p "..." --dry-multiplier 0.8 --dry-base 1.75 \
+    --dry-allowed-length 2 --dry-sequence-breaker '\n'
+
+# Long-context (RoPE / YaRN)
+chimera gen -m model.gguf -p "..." -c 32768 \
+    --rope-scaling yarn --yarn-orig-ctx 8192
+
+# Multi-GPU
+chimera gen -m model.gguf -p "..." --split-mode layer \
+    --tensor-split 0.6,0.4 --main-gpu 0
 ```
 
 ---
@@ -48,6 +74,14 @@ chimera chat -m model.gguf --system-prompt-file system.txt
 chimera chat -m vl.gguf --mmproj mmproj.gguf
 chimera chat -m model.gguf --color {auto|always|never}
 
+# Chat template / Jinja
+chimera chat -m model.gguf --chat-template-file template.jinja
+chimera chat -m model.gguf --chat-template-kwargs enable_thinking=true
+chimera chat -m model.gguf --no-jinja             # opt out of Jinja renderer
+
+# Reasoning models (DeepSeek-R1 / o1-style)
+chimera chat -m model.gguf --reasoning deepseek --reasoning-budget 2048
+
 # Persistent chats (off by default; data goes to the SQLite DB)
 chimera chat -m model.gguf --persist             # save every turn
 chimera chat --resume 42                         # resume saved chat #42
@@ -55,6 +89,8 @@ chimera chat --resume last                       # most recent
 chimera chat --list                              # list saved chats, no model load
 chimera chat --search "secret password"          # FTS5 over messages, no model load
 ```
+
+The same sampler / RoPE / multi-GPU / LoRA / grammar flags shown under `gen` also work here.
 
 Slash commands inside the REPL:
 
@@ -99,6 +135,8 @@ chimera embed -m bge.gguf -p "..." --pooling mean     # mean|cls|last|none
 chimera embed -m bge.gguf -p "..." --no-normalize
 chimera embed -m bge.gguf -p "..." --cache-embeddings   # memoize to SQLite
 chimera embed -m bge.gguf -p "..." --cache-embeddings --cache-db /tmp/cache.db
+chimera embed -m bge.gguf -p "..." --flash-attn --ubatch-size 256
+chimera embed -m bge.gguf -p "..." --no-mmap --mlock     # pin model in RAM
 ```
 
 ---
@@ -111,6 +149,16 @@ chimera whisper -m ggml-base.en.bin -i speech.wav -o out.txt
 chimera whisper -m ggml-base.en.bin -i speech.wav --timestamps
 chimera whisper -m ggml-base.en.bin -i speech.wav --language auto
 chimera whisper -m ggml-base.en.bin -i speech.wav --translate
+
+# Structured output files. Combinable. Each writes <output-file>.<ext>;
+# --output-file defaults to the input WAV's stem. Segment timestamps are
+# auto-enabled when any format file is requested.
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --output-file out --output-srt --output-vtt --output-json
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --output-csv --output-lrc
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --output-json-full        # per-word timing in JSON
 ```
 
 Non-WAV input? Convert first:
@@ -138,6 +186,16 @@ chimera sd -m sd.gguf -p "in the masked area" -o out.png \
 
 # batch of N images: out.png becomes out_001.png ... out_NNN.png
 chimera sd -m sd.gguf -p "..." -o out.png -b 4
+
+# Split-checkpoint models (Z-Image, Flux, SD3): use component paths
+# instead of -m. --offload-to-cpu + --diffusion-fa are the Z-Image-Turbo
+# recipe; -W/-H/--cfg-scale per the upstream docs.
+chimera sd -p "a lovely plump cat" -o out.png \
+    --diffusion-model z_image_turbo-Q6_K.gguf \
+    --vae ae.safetensors \
+    --llm Qwen3-4B-Q8_0.gguf \
+    --cfg-scale 1.0 --offload-to-cpu --diffusion-fa \
+    -H 1024 -W 512
 ```
 
 ---
