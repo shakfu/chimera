@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -193,6 +194,59 @@ struct WhisperOptions {
     bool out_json_full = false;
     bool out_csv       = false;
     bool out_lrc       = false;
+
+    // Region-of-audio selection (mirror whisper-cli -ot/-on/-d). Both
+    // are in milliseconds; 0 means "leave whisper's default (process
+    // everything)" in place.
+    int offset_ms   = 0;
+    int duration_ms = 0;
+
+    // Voice Activity Detection. `vad` toggles the feature; the rest are
+    // tuning knobs on `whisper_vad_params`. Negative-one sentinels (or
+    // empty string for the model path) leave the upstream default in
+    // place. `vad` defaults off so existing invocations are unchanged.
+    bool        vad = false;
+    std::string vad_model;
+    float       vad_threshold              = -1.0f;
+    int         vad_min_speech_duration_ms = -1;
+    int         vad_min_silence_duration_ms = -1;
+    float       vad_max_speech_duration_s  = -1.0f;
+    int         vad_speech_pad_ms          = -1;
+    float       vad_samples_overlap        = -1.0f;
+
+    // Segment shaping (paired with the --output-srt / --output-vtt
+    // family). max_len/max_tokens=0 leaves whisper's default (no cap).
+    int  max_len       = 0;     // max segment length in characters
+    int  max_tokens    = 0;     // max tokens per segment
+    bool split_on_word = false; // when max_len>0, split on word boundary
+
+    // Decoder fallback thresholds (mirror whisper-cli -tpi/-et/-lpt/-nth).
+    // NaN sentinels leave whisper's default in place; `logprob_thold`
+    // is normally negative upstream, so a negative-as-sentinel scheme
+    // doesn't work for that field — use NaN consistently. `--no-fallback`
+    // still wins (sets temperature_inc<0 after this is applied).
+    float temperature_inc = std::numeric_limits<float>::quiet_NaN();
+    float entropy_thold   = std::numeric_limits<float>::quiet_NaN();
+    float logprob_thold   = std::numeric_limits<float>::quiet_NaN();
+    float no_speech_thold = std::numeric_limits<float>::quiet_NaN();
+
+    // Perf / experimental.
+    int  audio_ctx = 0;          // 0 = use default audio context size
+    bool tinydiarize = false;    // tdrz_enable — needs a tdrz-trained model
+
+    // Token suppression. Empty string and `false` leave the defaults.
+    std::string suppress_regex;  // regex applied to token strings
+    bool        suppress_nst = false; // suppress non-speech tokens
+
+    // Context-params side (mirrors whisper_context_params; applied at
+    // load_model time). `no_gpu` inverts whisper's default of GPU on so
+    // existing invocations are unchanged.
+    bool flash_attn = false;
+    bool no_gpu     = false;
+    int  gpu_device = 0;          // CUDA device index
+
+    // Parallel decode (whisper_full_parallel). 1 keeps the serial path.
+    int processors = 1;
 };
 int command_whisper(const WhisperOptions & opts);
 #endif
@@ -206,6 +260,7 @@ struct SdOptions {
     std::string clip_g;           // CLIP-G text encoder (SDXL split layouts)
     std::string t5xxl;            // T5-XXL text encoder
     std::string llm;              // LLM text encoder (e.g. Qwen3 for Z-Image)
+    std::string high_noise_diffusion_model; // optional second diffusion model for two-stage pairs
     std::string control_net;      // ControlNet model file
     std::string wtype;            // weights type override (f16, q8_0, ...)
     std::string prompt;
@@ -230,6 +285,16 @@ struct SdOptions {
     float guidance = -1.0f;  // distilled guidance (Flux / SD3); -1 = upstream default
     float flow_shift = -1.0f;// Flux/SD3 timestep shift; -1 = upstream default
     float control_strength = 0.9f; // ControlNet conditioning strength (only used with --control-image)
+
+    // Skip-layer guidance (SLG). `skip_layers` is a comma-separated
+    // list of integer layer indices ("7,8,9"); empty disables SLG
+    // regardless of the other knobs. Negative-one sentinels for the
+    // scalar fields leave the upstream default in place.
+    std::string skip_layers;
+    float       slg_scale         = -1.0f;
+    float       skip_layer_start  = -1.0f;
+    float       skip_layer_end    = -1.0f;
+
     bool offload_to_cpu = false;
     bool diffusion_fa = false;   // flash-attention in the diffusion model
     bool diffusion_conv_direct = false; // conv-direct kernels in the diffusion model

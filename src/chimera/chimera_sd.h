@@ -66,6 +66,16 @@ struct GenerateRequest {
     PixelImage control;
     float      control_strength = 0.9f;
 
+    // Optional skip-layer guidance (SLG). `skip_layers` is borrowed by
+    // generate() into `sd_slg_params_t.layers` for the duration of the
+    // call, so it must outlive the request. An empty vector disables
+    // SLG regardless of the scalar fields. Negative-one sentinels for
+    // the scalars leave the upstream default in place.
+    std::vector<int> skip_layers;
+    float            slg_scale         = -1.0f;
+    float            skip_layer_start  = -1.0f;
+    float            skip_layer_end    = -1.0f;
+
     // Optional VAE tiling (lowers peak VRAM at a small quality cost).
     // Mirrors sd_tiling_params_t. Negative-one sentinels leave the upstream
     // default in place (only `enabled` is checked unconditionally).
@@ -95,6 +105,7 @@ struct LoadParams {
     std::string clip_g;           // SDXL split-checkpoint CLIP-G text encoder
     std::string t5xxl;
     std::string llm;
+    std::string high_noise_diffusion_model; // optional second diffusion model for two-stage pairs
     std::string control_net;      // ControlNet model file
     std::string wtype;            // weights type override (empty = upstream default)
     bool        vae_decode_only       = true;

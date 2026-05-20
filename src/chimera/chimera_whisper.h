@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -72,6 +73,60 @@ struct TranscribeRequest {
     // default. Maps to whisper's `params.token_timestamps`.
     bool word_timestamps = false;
 
+    // Region-of-audio selection. Both in milliseconds; 0 leaves whisper's
+    // default (process the entire input) in place. Mirrors whisper-cli's
+    // -ot / -d.
+    int offset_ms   = 0;
+    int duration_ms = 0;
+
+    // Voice Activity Detection (whisper.cpp >= v1.7.5). When `vad` is
+    // true, whisper loads `vad_model_path` and runs the VAD preprocessor
+    // before transcription; otherwise the fields are ignored. The
+    // numeric knobs map 1:1 to `whisper_vad_params`; negative sentinels
+    // (or empty string for the path) leave the upstream default in
+    // place.
+    bool        vad = false;
+    std::string vad_model_path;
+    float       vad_threshold              = -1.0f;
+    int         vad_min_speech_duration_ms = -1;
+    int         vad_min_silence_duration_ms = -1;
+    float       vad_max_speech_duration_s  = -1.0f;
+    int         vad_speech_pad_ms          = -1;
+    float       vad_samples_overlap        = -1.0f;
+
+    // Segment shaping. Mirrors whisper_full_params.{max_len, max_tokens,
+    // split_on_word}. Zeros leave the whisper.cpp defaults.
+    int  max_len       = 0;
+    int  max_tokens    = 0;
+    bool split_on_word = false;
+
+    // Decoder fallback thresholds. NaN sentinels (default) leave the
+    // upstream values in place — we cannot use a negative sentinel
+    // here because whisper's default `logprob_thold` is itself
+    // negative.
+    float temperature_inc = std::numeric_limits<float>::quiet_NaN();
+    float entropy_thold   = std::numeric_limits<float>::quiet_NaN();
+    float logprob_thold   = std::numeric_limits<float>::quiet_NaN();
+    float no_speech_thold = std::numeric_limits<float>::quiet_NaN();
+
+    // audio_ctx=0 keeps the model's default audio context size.
+    int audio_ctx = 0;
+
+    // Tinydiarize (speaker-turn detection). Requires a tdrz-trained
+    // model; setting this on a non-tdrz model is harmless (the flag is
+    // ignored upstream).
+    bool tinydiarize = false;
+
+    // Token suppression. Empty regex / false flag leave the defaults.
+    // The regex is matched against token strings by whisper.cpp.
+    std::string suppress_regex;
+    bool        suppress_nst = false;
+
+    // Number of parallel processors. >1 routes through whisper_full_parallel
+    // which splits the input into N chunks; upstream warns this can degrade
+    // accuracy at chunk boundaries, so default 1 keeps the serial path.
+    int processors = 1;
+
     // Optional callback invoked from whisper's new_segment_callback for each
     // finalized segment as it arrives. Used by the CLI for streaming output;
     // HTTP handlers can omit this and read TranscribeResult::segments after.
@@ -87,9 +142,21 @@ struct TranscribeResult {
 
 // ---- model lifecycle ---------------------------------------------------
 
+// Knobs that map to whisper_context_params (applied at context init,
+// not per-call). All have whisper.cpp defaults; the fields are set to
+// match those defaults so a default-constructed LoadParams reproduces
+// the previous `load_model(path)` behavior.
+struct LoadParams {
+    std::string model;
+    bool use_gpu    = true;   // whisper_context_default_params() default
+    bool flash_attn = false;  // upstream default
+    int  gpu_device = 0;      // CUDA device index
+};
+
 // Load a whisper model. Returns an empty pointer on failure; caller decides
 // whether to fail() or just refuse to register the audio route.
 WhisperContextPtr load_model(const std::string & path);
+WhisperContextPtr load_model(const LoadParams & params);
 
 // ---- WAV I/O ------------------------------------------------------------
 

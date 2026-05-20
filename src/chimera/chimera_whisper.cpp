@@ -224,8 +224,17 @@ void streaming_segment_cb(struct whisper_context * /*ctx*/, struct whisper_state
 namespace chimera_whisper {
 
 WhisperContextPtr load_model(const std::string & path) {
+    LoadParams p;
+    p.model = path;
+    return load_model(p);
+}
+
+WhisperContextPtr load_model(const LoadParams & params) {
     whisper_context_params cparams = whisper_context_default_params();
-    WhisperContextPtr ctx(whisper_init_from_file_with_params(path.c_str(), cparams));
+    cparams.use_gpu    = params.use_gpu;
+    cparams.flash_attn = params.flash_attn;
+    cparams.gpu_device = params.gpu_device;
+    WhisperContextPtr ctx(whisper_init_from_file_with_params(params.model.c_str(), cparams));
     return ctx;
 }
 
@@ -343,15 +352,88 @@ TranscribeResult transcribe(whisper_context * ctx, const TranscribeRequest & req
         params.initial_prompt = req.initial_prompt.c_str();
     }
 
+    // Region-of-audio selection. whisper_full's default is 0/0 (process
+    // the entire input); writing 0/0 explicitly is harmless and keeps
+    // the wiring uniform.
+    params.offset_ms   = req.offset_ms;
+    params.duration_ms = req.duration_ms;
+
+    // Voice Activity Detection. The model file is required when `vad`
+    // is true; without it whisper.cpp will refuse to initialize the VAD
+    // context. Tuning knobs default to the upstream values via
+    // `whisper_vad_default_params()`; we override only the fields the
+    // caller provided (non-sentinel).
+    params.vad = req.vad;
+    if (req.vad) {
+        if (req.vad_model_path.empty()) {
+            fail(ExitCode::BadInput,
+                 "--vad requires --vad-model (path to a whisper VAD model file)");
+        }
+        params.vad_model_path = req.vad_model_path.c_str();
+        params.vad_params     = whisper_vad_default_params();
+        if (req.vad_threshold >= 0.0f)
+            params.vad_params.threshold = req.vad_threshold;
+        if (req.vad_min_speech_duration_ms >= 0)
+            params.vad_params.min_speech_duration_ms = req.vad_min_speech_duration_ms;
+        if (req.vad_min_silence_duration_ms >= 0)
+            params.vad_params.min_silence_duration_ms = req.vad_min_silence_duration_ms;
+        if (req.vad_max_speech_duration_s >= 0.0f)
+            params.vad_params.max_speech_duration_s = req.vad_max_speech_duration_s;
+        if (req.vad_speech_pad_ms >= 0)
+            params.vad_params.speech_pad_ms = req.vad_speech_pad_ms;
+        if (req.vad_samples_overlap >= 0.0f)
+            params.vad_params.samples_overlap = req.vad_samples_overlap;
+    }
+
+    // Segment shaping. Zero leaves the default; `split_on_word` is a
+    // plain bool with no sentinel (it only takes effect when max_len>0
+    // upstream, so an unintentional `true` here is benign).
+    if (req.max_len > 0)    params.max_len    = req.max_len;
+    if (req.max_tokens > 0) params.max_tokens = req.max_tokens;
+    params.split_on_word = req.split_on_word;
+
+    // Decoder fallback thresholds. NaN means "leave the default".
+    // --no-fallback (applied above) sets temperature_inc<0 — if the
+    // caller also passed --temperature-inc, the explicit value wins
+    // here, but the --no-fallback override below restores the disable.
+    if (!std::isnan(req.temperature_inc)) params.temperature_inc = req.temperature_inc;
+    if (!std::isnan(req.entropy_thold))   params.entropy_thold   = req.entropy_thold;
+    if (!std::isnan(req.logprob_thold))   params.logprob_thold   = req.logprob_thold;
+    if (!std::isnan(req.no_speech_thold)) params.no_speech_thold = req.no_speech_thold;
+    if (req.no_fallback) {
+        // Reassert here so --no-fallback always wins over an explicit
+        // --temperature-inc, mirroring whisper-cli's flag precedence.
+        params.temperature_inc = -1.0f;
+    }
+
+    if (req.audio_ctx > 0)  params.audio_ctx  = req.audio_ctx;
+    if (req.tinydiarize)    params.tdrz_enable = true;
+
+    if (!req.suppress_regex.empty()) {
+        // suppress_regex is a borrowed const char* — request outlives this call.
+        params.suppress_regex = req.suppress_regex.c_str();
+    }
+    if (req.suppress_nst) params.suppress_nst = true;
+
     StreamingCallbackCtx cb_ctx{&req.on_segment};
     if (req.on_segment) {
         params.new_segment_callback = streaming_segment_cb;
         params.new_segment_callback_user_data = &cb_ctx;
     }
 
-    if (whisper_full(ctx, params,
-                     req.audio_16k_mono.data(),
-                     static_cast<int>(req.audio_16k_mono.size())) != 0) {
+    // When processors > 1, whisper.cpp splits the input across N
+    // independent decoder states. Accuracy degrades slightly at chunk
+    // boundaries (per upstream docs), so we only use the parallel path
+    // when the caller explicitly asks for it.
+    const int rc = req.processors > 1
+        ? whisper_full_parallel(ctx, params,
+                                req.audio_16k_mono.data(),
+                                static_cast<int>(req.audio_16k_mono.size()),
+                                req.processors)
+        : whisper_full(ctx, params,
+                       req.audio_16k_mono.data(),
+                       static_cast<int>(req.audio_16k_mono.size()));
+    if (rc != 0) {
         fail(ExitCode::Generate, "whisper_full failed");
     }
 
@@ -632,7 +714,12 @@ int command_whisper(const WhisperOptions & opts) {
     auto wav = chimera_whisper::load_wav_file(opts.input);
     auto audio = chimera_whisper::resample_linear(wav.samples, wav.sample_rate, WHISPER_SAMPLE_RATE);
 
-    auto ctx = chimera_whisper::load_model(opts.model);
+    chimera_whisper::LoadParams lp;
+    lp.model      = opts.model;
+    lp.use_gpu    = !opts.no_gpu;
+    lp.flash_attn = opts.flash_attn;
+    lp.gpu_device = opts.gpu_device;
+    auto ctx = chimera_whisper::load_model(lp);
     if (!ctx) {
         fail(ExitCode::Load, "failed to load whisper model: " + opts.model);
     }
@@ -667,6 +754,28 @@ int command_whisper(const WhisperOptions & opts) {
     req.best_of               = opts.best_of;
     req.temperature           = opts.temperature;
     req.no_fallback           = opts.no_fallback;
+    req.offset_ms             = opts.offset_ms;
+    req.duration_ms           = opts.duration_ms;
+    req.vad                       = opts.vad;
+    req.vad_model_path            = opts.vad_model;
+    req.vad_threshold             = opts.vad_threshold;
+    req.vad_min_speech_duration_ms  = opts.vad_min_speech_duration_ms;
+    req.vad_min_silence_duration_ms = opts.vad_min_silence_duration_ms;
+    req.vad_max_speech_duration_s   = opts.vad_max_speech_duration_s;
+    req.vad_speech_pad_ms           = opts.vad_speech_pad_ms;
+    req.vad_samples_overlap         = opts.vad_samples_overlap;
+    req.max_len            = opts.max_len;
+    req.max_tokens         = opts.max_tokens;
+    req.split_on_word      = opts.split_on_word;
+    req.temperature_inc    = opts.temperature_inc;
+    req.entropy_thold      = opts.entropy_thold;
+    req.logprob_thold      = opts.logprob_thold;
+    req.no_speech_thold    = opts.no_speech_thold;
+    req.audio_ctx          = opts.audio_ctx;
+    req.tinydiarize        = opts.tinydiarize;
+    req.suppress_regex     = opts.suppress_regex;
+    req.suppress_nst       = opts.suppress_nst;
+    req.processors         = opts.processors;
     // -ojf needs per-word timing on top of segment-level timing.
     req.word_timestamps = opts.out_json_full;
     // Stream each finalized segment as soon as whisper.cpp emits it. Same

@@ -6,6 +6,21 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Added
 
+- `chimera whisper` coverage closer — 22 new flags spanning the remaining unforced gaps in `doc/dev/cli-api-coverage.md`. Defaults are all chosen so existing invocations are byte-identical; every numeric knob uses a sentinel (0, `-1.0f`, or `NaN`) that leaves the upstream `whisper_full_params` / `whisper_context_params` / `whisper_vad_params` field untouched. Groups:
+  - Region of audio: `--offset <ms>`, `--duration <ms>` (whisper-cli `-ot` / `-d`). The sample-offset form `-on` is not exposed by `whisper_full_params` (it's internal to whisper-cli's WAV reader) so only the ms-based forms are wired.
+  - Voice activity detection: `--vad` (toggle) plus `--vad-model <path>` (required when `--vad` is set; chimera fails with `BadInput` otherwise), `--vad-threshold`, `--vad-min-speech-duration-ms`, `--vad-min-silence-duration-ms`, `--vad-max-speech-duration-s`, `--vad-speech-pad-ms`, `--vad-samples-overlap`. The tuning knobs map 1:1 to `whisper_vad_params` and inherit `whisper_vad_default_params()` when not provided.
+  - Segment shaping (pairs naturally with `--output-srt` / `--output-vtt` already landed): `--max-len <chars>`, `--max-tokens <N>`, `--split-on-word`.
+  - Decoder-fail fallback thresholds: `--temperature-inc`, `--entropy-thold`, `--logprob-thold`, `--no-speech-thold`. Sentinel is `NaN` (not negative-one) because `logprob_thold`'s upstream default is itself negative. `--no-fallback` still wins — it reasserts `temperature_inc<0` after the explicit-value override.
+  - Perf / advanced: `--audio-ctx <N>` (halve for tiny.en speedups), `--tinydiarize` (`tdrz_enable`; requires a tdrz-trained model).
+  - Token suppression: `--suppress-regex <re>` (matched against token strings) and `--suppress-nst` (suppress non-speech tokens).
+  - Context-params (applied at `whisper_init_from_file_with_params`): `--flash-attn`, `--no-gpu` (inverts whisper's default of GPU on), `--device <N>` (CUDA device index). Plumbed via a new `chimera_whisper::LoadParams` struct + `load_model(LoadParams)` overload; the original `load_model(std::string)` is kept as a delegate so `chimera_serve.cpp`'s audio wire-up is untouched.
+  - Parallel decode: `--processors <N>`. `N=1` keeps the serial path (`whisper_full`); `N>1` routes through `whisper_full_parallel`, which splits the input into N independent decoder states. Upstream warns this can degrade accuracy at chunk seams, so default 1 is intentional.
+  - Leaves the doc's bigger lifts as follow-ups: `--grammar` family (constrained decoding — needs the same grammar parser as `gen`/`chat`), exit-after-detect `--detect-language` (whisper-cli wrapper logic, not just a param), stereo `--diarize` (also wrapper logic), and `--dtw` token-level DTW (niche). All 44 tests still pass.
+
+- `chimera sd` skip-layer guidance + high-noise model loading slot:
+  - `--skip-layers <csv>`, `--slg-scale <f>`, `--skip-layer-start <f>`, `--skip-layer-end <f>` — comma-separated layer indices feed `sd_slg_params_t.layers` (e.g. `--skip-layers 7,8,9`); empty disables SLG regardless of the scalar knobs; non-integer entries fail with `BadInput` so a typo isn't silently dropped. Scalars use `-1.0f` sentinels to leave the upstream defaults in place.
+  - `--high-noise-diffusion-model <path>` — second diffusion model for two-stage workflows; maps to `sd_ctx_params_t.high_noise_diffusion_model_path`. The full `--high-noise-*` sampler family (per-stage cfg/guidance/scheduler/etc.) is video-only in sd.cpp's `vid_gen` mode and chimera-sd is img_gen-only today, so only the model-loading slot is exposed here — the rest is intentionally out of scope. Documented in `--help`.
+
 - `chimera sd` perf + RNG knobs (Tier 2 of the audit in `doc/dev/cli-api-coverage.md`):
   - `--diffusion-conv-direct` and `--vae-conv-direct`: wire `sd_ctx_params_t.diffusion_conv_direct` / `vae_conv_direct`. Measurable perf win on modern dGPUs.
   - `--rng <std_default|cuda|cpu>` and `--sampler-rng <std_default|cuda|cpu>`: map to `sd_ctx_params_t.rng_type` / `sampler_rng_type` via `str_to_rng_type`; unknown values exit with `BadInput`. `--sampler-rng cpu` is what matches ComfyUI seeds across implementations.

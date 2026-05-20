@@ -12,7 +12,11 @@ Status legend: ✅ exposed · 🔀 renamed · 🟡 partial · ❌ missing · �
 
 > Note: chimera's CLI definitions live in `src/chimera_cli/chimera.cpp` (`bind_*_cmd` helpers) and the option structs in `src/chimera/chimera.h`. Both files are referenced throughout this report.
 
-> **Status update 2026-05-20:** the 20 flag groups identified as Tier 1–4 priorities in the original llama section have all landed on `gen` / `chat` / `embed`. The tables and "Notable gaps" sections below have been edited in-place to reflect this; see the CHANGELOG entry under [Unreleased] for the full list. `sd` and `whisper` sections are unchanged.
+> **Status update 2026-05-20:** the 20 flag groups identified as Tier 1–4 priorities in the original llama section have all landed on `gen` / `chat` / `embed`. The tables and "Notable gaps" sections below have been edited in-place to reflect this; see the CHANGELOG entry under [Unreleased] for the full list.
+>
+> **Whisper coverage closer 2026-05-20:** the remaining whisper gaps flagged below — VAD bundle, offset/duration, segment shaping, decoder-fail thresholds, audio-ctx, tinydiarize, token suppression, context-params (`--flash-attn` / `--no-gpu` / `--device`), and `--processors` — all landed on `whisper`. The whisper table rows are flipped to ✅ in-place; the "Notable gaps worth filing" list is now empty save for the documented out-of-scope items.
+>
+> **sd partial:** skip-layer guidance + the `--high-noise-diffusion-model` model-loading slot landed; the rest of the `--high-noise-*` family stays out of scope (video-only).
 
 ---
 
@@ -23,12 +27,12 @@ Status legend: ✅ exposed · 🔀 renamed · 🟡 partial · ❌ missing · �
 | `gen` (llama-cli) | ~80 CLI-relevant | 32 | 1 | ~2 | ~50 |
 | `chat` (llama-cli, interactive) | ~85 | 37 | 0 | ~2 | ~55 |
 | `embed` (llama-embedding) | ~14 | 12 | 1 | 1 | 1 |
-| `whisper` (whisper-cli) | 58 | 19 | 1 | ~4 | ~34 |
+| `whisper` (whisper-cli) | 58 | 41 | 1 | ~3 | ~13 |
 | `sd` (sd cli) | 107 | 22 | 6 | ~30 | ~50 |
 
 "Real gaps" are flags whose absence we'd consider filing an issue for. "Deliberately out of scope" covers things like llama-cli's REPL plumbing (chimera replaces it with `chat`), perplexity/imatrix/training knobs, anything tied solely to llama-server, and obscure research/debug flags. The next two columns of the per-subcommand tables make each call individually.
 
-The headline finding is that **the sd surface is still by far the largest source of meaningful gaps** — even after landing the model-loading family, ~30 generation-side flags (CFG variants, sampler-RNG, VAE tiling/conv-direct, LoRA dir, ControlNet, PhotoMaker, hires-fix, video) remain unexposed. The llama coverage is intentionally minimal — chimera leans on its own DSL (`chat` REPL, `serve` HTTP) and the wrapped subcommands are deliberately thin. The whisper surface is the most "leaky" relative to size: classic output-format and VAD flags are absent and most of them are one-liners to add.
+The headline finding is that **the sd surface is still by far the largest source of meaningful gaps** — even after landing the model-loading family, SLG, and `--high-noise-diffusion-model`, ~25 generation-side flags (img-CFG, sigmas, eta, hires-fix, PhotoMaker, full high-noise sampler family, CPU-offload selectivity, etc.) remain unexposed. The llama coverage is intentionally minimal — chimera leans on its own DSL (`chat` REPL, `serve` HTTP) and the wrapped subcommands are deliberately thin. The whisper surface, previously the most "leaky" relative to size, is now ~73% covered after the 2026-05-20 closer (Batches 1–3 + VAD + offset/duration); residual gaps are constrained-decoding (`--grammar` family) and wrapper-logic features (`--detect-language` exit-after-detect, stereo `--diarize`).
 
 ---
 
@@ -190,7 +194,7 @@ whisper-cli has a flat ~58-flag surface. Chimera exposes 5 of them. The result i
 | `-m / --model` | `-m,--model` | ✅ | |
 | `-f / --file` | `-i,--input` | 🔀 | Renamed; upstream supports repeating; chimera takes one. |
 | `-t / --threads` | `-t,--threads` | ✅ | |
-| `-p / --processors` | — | ❌ | Splits decode across N processors. Cheap to add. |
+| `-p / --processors` | `--processors` | ✅ | Landed 2026-05-20. >1 routes through `whisper_full_parallel`; default 1 keeps the serial path. |
 | `-l / --language` | `-l,--language` | ✅ | |
 | `-dl / --detect-language` | — | ❌ | Useful as exit-after-detect mode. |
 | `-tr / --translate` | `--translate` | ✅ | |
@@ -199,29 +203,29 @@ whisper-cli has a flat ~58-flag surface. Chimera exposes 5 of them. The result i
 | `-bs / --beam-size` | `--beam-size` | ✅ | Landed 2026-05-20. Sets `WHISPER_SAMPLING_BEAM_SEARCH` when N>0. |
 | `-bo / --best-of` | `--best-of` | ✅ | Landed 2026-05-20. |
 | `-tp / --temperature` | `--temperature` | ✅ | Landed 2026-05-20. |
-| `-tpi / --temperature-inc` | — | ❌ | Temperature fallback ladder; `--no-fallback` covers the disable case. |
+| `-tpi / --temperature-inc` | `--temperature-inc` | ✅ | Landed 2026-05-20. NaN sentinel (not negative) because the field's upstream default is positive but `logprob_thold`'s isn't; same scheme across the four fallback knobs. `--no-fallback` still wins. |
 | `-nf / --no-fallback` | `--no-fallback` | ✅ | Landed 2026-05-20. Sets `temperature_inc<0`. |
 | `-mc / --max-context` | — | ❌ | |
-| `-ml / --max-len` | — | ❌ | |
-| `-sow / --split-on-word` | — | ❌ | |
+| `-ml / --max-len` | `--max-len` | ✅ | Landed 2026-05-20. 0 = unlimited (whisper default). Pairs with `--output-srt` / `--output-vtt`. |
+| `-sow / --split-on-word` | `--split-on-word` | ✅ | Landed 2026-05-20. Only takes effect when `--max-len > 0`. |
 | `-wt / --word-thold` | — | ❌ | |
-| `-et / --entropy-thold` / `-lpt / --logprob-thold` / `-nth / --no-speech-thold` | — | ❌ | Decoder-fail thresholds. |
-| `-ot / --offset-t` / `-on / --offset-n` / `-d / --duration` | — | ❌ | Region-of-audio selection. **Worth filing.** |
-| `-ac / --audio-ctx` | — | ❌ | Halve context for tiny.en speedups. |
-| `-fa / --flash-attn` / `-nfa / --no-flash-attn` | — | ❌ | Perf knob. |
-| `-ng / --no-gpu` | — | ❌ | No way to force CPU; chimera builds with GPU support. |
-| `-dev / --device` | — | ❌ | Specific GPU. |
-| `-di / --diarize` | — | ❌ | Stereo diarization. |
-| `-tdrz / --tinydiarize` | — | ❌ | tdrz-model diarization. |
+| `-et / --entropy-thold` / `-lpt / --logprob-thold` / `-nth / --no-speech-thold` | `--entropy-thold` / `--logprob-thold` / `--no-speech-thold` | ✅ | Landed 2026-05-20. NaN sentinel leaves the upstream default (necessary because `logprob_thold` defaults to a negative value). |
+| `-ot / --offset-t` / `-on / --offset-n` / `-d / --duration` | `--offset` / `--duration` | 🟡 | Landed 2026-05-20 for the ms-based pair (`-ot` / `-d`). `-on` (sample-offset) is not exposed by `whisper_full_params` — it's internal to whisper-cli's WAV reader, so deliberately skipped. |
+| `-ac / --audio-ctx` | `--audio-ctx` | ✅ | Landed 2026-05-20. 0 = model default; common tweak for tiny.en. |
+| `-fa / --flash-attn` / `-nfa / --no-flash-attn` | `--flash-attn` | 🟡 | Landed 2026-05-20 as `--flash-attn`. `--no-flash-attn` is redundant (default is off) so not added. |
+| `-ng / --no-gpu` | `--no-gpu` | ✅ | Landed 2026-05-20. Inverts whisper's default `use_gpu=true`. |
+| `-dev / --device` | `--device` | ✅ | Landed 2026-05-20. Single CUDA device index (whisper's `gpu_device` field). Not the comma-separated list shape used by llama-side `--device`. |
+| `-di / --diarize` | — | ❌ | Stereo diarization — implemented in whisper-cli as wrapper logic, not a `whisper_full_params` field. Out of scope for now. |
+| `-tdrz / --tinydiarize` | `--tinydiarize` | ✅ | Landed 2026-05-20. Requires a tdrz-trained model; silently ignored on others. |
 | `-otxt / -ovtt / -osrt / -ocsv / -olrc / -oj / -ojf` | `--output-txt` / `--output-vtt` / `--output-srt` / `--output-csv` / `--output-lrc` / `--output-json` / `--output-json-full` | ✅ | Landed 2026-05-20. CLI11 rejects multi-char short flags, so long-only here (no `-osrt` aliases). All combinable; segment-level timestamps auto-enabled when any format is requested. |
 | `-owts` | — | 🚫 | Karaoke video script; depends on font/ffmpeg toolchain. |
 | `-of / --output-file` | `--output-file` | ✅ | Landed 2026-05-20. Base name; defaults to input WAV's stem. Each enabled format writes `<base>.<ext>`. |
 | `-fp / --font-path` | — | 🚫 | Karaoke-only. |
 | `--timestamps` (chimera) ↔ `-nt / --no-timestamps` | `--timestamps` flag | 🔀 | Inverted polarity vs upstream default. Document this; don't change. |
 | `--no-context` | `--no-context` | ✅ | |
-| `--vad` | — | ❌ | Enables built-in VAD. **Worth filing** (post-v1.8 push from upstream). |
-| `--vad-model` / `--vad-threshold` / `--vad-min-speech-duration-ms` / `--vad-min-silence-duration-ms` / `--vad-max-speech-duration-s` / `--vad-speech-pad-ms` / `--vad-samples-overlap` | — | ❌ | All-or-nothing with `--vad`. Bundle as one issue. |
-| `-sns / --suppress-nst` / `--suppress-regex` | — | ❌ | Token suppression. |
+| `--vad` | `--vad` | ✅ | Landed 2026-05-20. Requires `--vad-model`; chimera fails with `BadInput` if the toggle is set without the model path. |
+| `--vad-model` / `--vad-threshold` / `--vad-min-speech-duration-ms` / `--vad-min-silence-duration-ms` / `--vad-max-speech-duration-s` / `--vad-speech-pad-ms` / `--vad-samples-overlap` | same | ✅ | Landed 2026-05-20. Numeric knobs inherit `whisper_vad_default_params()` when unset (negative-one sentinels). |
+| `-sns / --suppress-nst` / `--suppress-regex` | `--suppress-nst` / `--suppress-regex` | ✅ | Landed 2026-05-20. Regex is matched against token strings; empty string leaves the default. |
 | `--grammar` / `--grammar-rule` / `--grammar-penalty` | — | ❌ | Constrained decoding. |
 | `-dtw / --dtw` | — | ❌ | Token-level timestamps. |
 | `-oved / --ov-e-device` | — | 🚫 | OpenVINO-only. |
@@ -230,10 +234,13 @@ whisper-cli has a flat ~58-flag surface. Chimera exposes 5 of them. The result i
 ### Notable gaps worth filing
 
 1. ~~**Output-format family** (`-osrt/-ovtt/-oj/-ojf/-ocsv/-olrc`).~~ ✅ Landed 2026-05-20.
-2. **VAD bundle** (`--vad` + the seven knobs) — current whisper.cpp default mode is becoming "vad on"; not having it is increasingly anomalous.
+2. ~~**VAD bundle** (`--vad` + the seven knobs).~~ ✅ Landed 2026-05-20. `--vad` requires `--vad-model`; tuning knobs use `-1` sentinels to inherit `whisper_vad_default_params()`.
 3. ~~**`--prompt` / `--carry-initial-prompt`**.~~ ✅ Landed 2026-05-20.
 4. ~~**Decoding strategy** (`--beam-size`, `--best-of`, `--temperature`, `--no-fallback`).~~ ✅ Landed 2026-05-20.
-5. **Offset/duration** (`-ot`, `-on`, `-d`) — slice-the-audio is a common ask.
+5. ~~**Offset/duration** (`-ot`, `-d`).~~ ✅ Landed 2026-05-20 as `--offset` / `--duration` (ms-based). `-on` is internal to whisper-cli's WAV reader and not exposed by `whisper_full_params`, so deliberately skipped.
+6. ~~**Segment shaping + decoder thresholds + audio-ctx + tinydiarize + suppression + flash-attn/no-gpu/device + processors.**~~ ✅ Landed 2026-05-20 as Batches 1–3 of the whisper closer (see CHANGELOG).
+
+Remaining out-of-scope or deferred (do not re-flag): `--grammar` family (needs the same grammar parser as `gen`/`chat` — bigger lift, low demand for audio), `--detect-language` exit-after-detect mode (whisper-cli wrapper logic, not a `whisper_full_params` field), stereo `--diarize` (same — wrapper logic over two-channel WAVs), `--dtw` token-level DTW (niche), `-wt / --word-thold` (we already emit per-word timing in `--output-json-full`), OpenVINO device selection.
 
 ### Deliberately omitted
 
@@ -254,7 +261,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 |---|---|---|---|
 | `--model, -m` | `-m,--model` | ✅ | |
 | `--diffusion-model` | `--diffusion-model` | ✅ | Landed in the audit that prompted this report. |
-| `--high-noise-diffusion-model` | — | ❌ | Two-model "high noise" workflows (recent feature). |
+| `--high-noise-diffusion-model` | `--high-noise-diffusion-model` | ✅ | Landed 2026-05-20. Model-loading slot only; the full `--high-noise-*` sampler family is video-only and stays out of scope (chimera-sd is img_gen-only). |
 | `--vae` | `--vae` | ✅ | |
 | `--taesd` / `--tae` | — | ❌ | Tiny-AutoEncoder fast decode. **Worth filing**, low cost. |
 | `--clip_l` | `--clip-l` | 🔀 | **Naming drift.** Upstream uses underscore; chimera uses kebab. Stay with kebab in chimera (project convention) but document. |
@@ -309,7 +316,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--flow-shift` | `--flow-shift` | ✅ | Landed 2026-05-20. Maps to `sd_sample_params_t.flow_shift`. |
 | `--timestep-shift` | — | ❌ | |
 | `--moe-boundary` | — | ❌ | High-noise/low-noise MoE boundary. |
-| `--slg-scale` / `--skip-layer-start` / `--skip-layer-end` / `--skip-layers` | — | ❌ | Skip-layer guidance. |
+| `--slg-scale` / `--skip-layer-start` / `--skip-layer-end` / `--skip-layers` | same | ✅ | Landed 2026-05-20. `--skip-layers` parses a comma-separated int list into `sd_slg_params_t.layers`; empty disables SLG regardless of the other knobs; non-integer tokens fail with `BadInput`. Scalars use `-1.0f` sentinels. |
 | `--high-noise-*` (cfg-scale, img-cfg-scale, guidance, slg-scale, skip-layer-start/end, eta, sampling-method, skip-layers, steps) | — | ❌ | Entire high-noise group missing (pairs with `--high-noise-diffusion-model`). |
 
 ### Coverage table — img2img / inpaint / control
@@ -383,7 +390,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 
 ### 2. Flags chimera handles inconsistently across the three subcommands
 
-- **`--flash-attn`** — exists in upstream llama-cli, whisper-cli, *and* sd-cpp; not exposed in any of chimera's subcommands. (`--diffusion-fa` exists but is sd-internal, not the generic flag.) If we land it, do all three at once.
+- ~~**`--flash-attn`** — exists in upstream llama-cli, whisper-cli, *and* sd-cpp; not exposed in any of chimera's subcommands.~~ ✅ Landed on `gen`/`chat`/`embed` and `whisper` (2026-05-20). On `sd`, `--diffusion-fa` exists (sd-internal); the generic global `--fa` is still ❌.
 - **`--lora`** — exposed in `serve` but not in `gen`/`chat`/`embed`/`sd`. The asymmetry is a footgun.
 - **Output formatting** — `embed` lacks `--embd-output-format`, `whisper` lacks `-oj/-osrt/-ovtt`. Both subcommands' output stories are unevenly developed compared to upstream.
 

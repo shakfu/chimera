@@ -3019,6 +3019,71 @@ void bind_whisper_cmd(CLI::App & app, ParsedCli & p) {
         "Write .json with per-word timestamps (implies word-level timing)");
     cmd->add_flag("--output-csv",  p.whisper_opts.out_csv,  "Write .csv (start_ms,end_ms,text)");
     cmd->add_flag("--output-lrc",  p.whisper_opts.out_lrc,  "Write .lrc karaoke");
+    // Region-of-audio (whisper-cli -ot/-d). -on (sample-offset) is not
+    // exposed by whisper.cpp's whisper_full_params (it's internal to the
+    // CLI's WAV reader), so only the ms-based forms are wired here.
+    cmd->add_option("--offset",   p.whisper_opts.offset_ms,
+        "Start offset into the audio in milliseconds (0 = from the beginning)");
+    cmd->add_option("--duration", p.whisper_opts.duration_ms,
+        "Audio duration to process in milliseconds (0 = until the end)");
+    // Voice Activity Detection bundle.
+    cmd->add_flag("--vad", p.whisper_opts.vad,
+        "Enable VAD preprocessing (requires --vad-model)");
+    cmd->add_option("--vad-model", p.whisper_opts.vad_model,
+        "Path to a whisper VAD model file (e.g. silero v5)");
+    cmd->add_option("--vad-threshold", p.whisper_opts.vad_threshold,
+        "Probability threshold to consider a frame as speech");
+    cmd->add_option("--vad-min-speech-duration-ms",
+        p.whisper_opts.vad_min_speech_duration_ms,
+        "Minimum duration for a valid speech segment (ms)");
+    cmd->add_option("--vad-min-silence-duration-ms",
+        p.whisper_opts.vad_min_silence_duration_ms,
+        "Minimum silence duration to consider speech as ended (ms)");
+    cmd->add_option("--vad-max-speech-duration-s",
+        p.whisper_opts.vad_max_speech_duration_s,
+        "Maximum speech-segment duration before forcing a new segment (s)");
+    cmd->add_option("--vad-speech-pad-ms",
+        p.whisper_opts.vad_speech_pad_ms,
+        "Padding added before and after speech segments (ms)");
+    cmd->add_option("--vad-samples-overlap",
+        p.whisper_opts.vad_samples_overlap,
+        "Overlap in seconds when copying audio samples from speech segments");
+    // Segment shaping. --max-len pairs naturally with --output-srt/vtt.
+    cmd->add_option("--max-len", p.whisper_opts.max_len,
+        "Maximum segment length in characters (0 = unlimited)");
+    cmd->add_option("--max-tokens", p.whisper_opts.max_tokens,
+        "Maximum tokens per segment (0 = unlimited)");
+    cmd->add_flag("--split-on-word", p.whisper_opts.split_on_word,
+        "When --max-len>0, split segments on word boundaries instead of mid-token");
+    // Decoder fallback thresholds.
+    cmd->add_option("--temperature-inc", p.whisper_opts.temperature_inc,
+        "Temperature increment for the fallback ladder (NaN = whisper default; "
+        "--no-fallback still wins and forces it negative)");
+    cmd->add_option("--entropy-thold", p.whisper_opts.entropy_thold,
+        "Entropy threshold for decoder-fail fallback (compression-ratio analogue)");
+    cmd->add_option("--logprob-thold", p.whisper_opts.logprob_thold,
+        "Average log-probability threshold for decoder-fail fallback");
+    cmd->add_option("--no-speech-thold", p.whisper_opts.no_speech_thold,
+        "Probability threshold above which a segment is treated as no-speech");
+    // Audio context / diarization / suppression.
+    cmd->add_option("--audio-ctx", p.whisper_opts.audio_ctx,
+        "Override the audio context size (0 = model default; halve for tiny.en perf)");
+    cmd->add_flag("--tinydiarize", p.whisper_opts.tinydiarize,
+        "Enable tinydiarize speaker-turn detection (requires a tdrz-trained model)");
+    cmd->add_option("--suppress-regex", p.whisper_opts.suppress_regex,
+        "Regex applied to token strings to suppress matching tokens");
+    cmd->add_flag("--suppress-nst", p.whisper_opts.suppress_nst,
+        "Suppress non-speech tokens during decoding");
+    // Context-params (applied at whisper_init_from_file_with_params).
+    cmd->add_flag("--flash-attn", p.whisper_opts.flash_attn,
+        "Enable flash-attention in the whisper context (perf, GPU builds)");
+    cmd->add_flag("--no-gpu", p.whisper_opts.no_gpu,
+        "Force CPU-only inference (whisper defaults to GPU when built with one)");
+    cmd->add_option("--device", p.whisper_opts.gpu_device,
+        "CUDA device index (whisper_context_params.gpu_device); ignored under --no-gpu");
+    cmd->add_option("--processors", p.whisper_opts.processors,
+        "Split decode across N processors via whisper_full_parallel (1 = serial; "
+        ">1 may degrade accuracy near chunk boundaries)");
     p.whisper_cmd = cmd;
 }
 #endif
@@ -3038,6 +3103,10 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--t5xxl", p.sd_opts.t5xxl, "T5-XXL text encoder");
     cmd->add_option("--llm", p.sd_opts.llm,
                     "LLM text encoder (e.g. Qwen3 for Z-Image)");
+    cmd->add_option("--high-noise-diffusion-model", p.sd_opts.high_noise_diffusion_model,
+                    "Optional second diffusion model for two-stage 'high noise' workflows. "
+                    "The full --high-noise-* sampler family is video-only (sd vid_gen) and "
+                    "is intentionally not exposed here; chimera-sd is img_gen-only.");
     cmd->add_option("--control-net", p.sd_opts.control_net,
                     "ControlNet model file (pair with --control-image)");
     cmd->add_option("--type", p.sd_opts.wtype,
@@ -3096,6 +3165,18 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Relative paths are joined against --lora-model-dir when set.");
     cmd->add_option("--lora-model-dir", p.sd_opts.lora_model_dir,
         "Base directory used to resolve relative --lora paths");
+    // Skip-layer guidance (SLG). All four flags are required together to
+    // have effect; --skip-layers alone enables SLG with the upstream
+    // default scale/start/end. Empty --skip-layers disables SLG.
+    cmd->add_option("--skip-layers", p.sd_opts.skip_layers,
+        "Comma-separated list of layer indices for skip-layer guidance (e.g. '7,8,9'). "
+        "Empty disables SLG regardless of the other --skip-layer-* flags.");
+    cmd->add_option("--slg-scale", p.sd_opts.slg_scale,
+        "Skip-layer guidance scale (leave unset for upstream default)");
+    cmd->add_option("--skip-layer-start", p.sd_opts.skip_layer_start,
+        "Fractional step (0..1) at which to start applying SLG");
+    cmd->add_option("--skip-layer-end", p.sd_opts.skip_layer_end,
+        "Fractional step (0..1) at which to stop applying SLG");
     p.sd_cmd = cmd;
 }
 #endif

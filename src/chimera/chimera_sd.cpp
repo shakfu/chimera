@@ -126,6 +126,7 @@ SdContextPtr load_model(const LoadParams & params) {
     };
     ctx_params.model_path            = cstr(params.model);
     ctx_params.diffusion_model_path  = cstr(params.diffusion_model);
+    ctx_params.high_noise_diffusion_model_path = cstr(params.high_noise_diffusion_model);
     ctx_params.vae_path              = cstr(params.vae);
     ctx_params.clip_l_path           = cstr(params.clip_l);
     ctx_params.clip_g_path           = cstr(params.clip_g);
@@ -324,6 +325,18 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
         gp.control_strength = req.control_strength;
     }
 
+    if (!req.skip_layers.empty()) {
+        // sd_slg_params_t.layers borrows the int* buffer from the
+        // request for the duration of generate_image; the request
+        // outlives this call so this is safe.
+        gp.sample_params.guidance.slg.layers      =
+            const_cast<int *>(req.skip_layers.data());
+        gp.sample_params.guidance.slg.layer_count = req.skip_layers.size();
+        if (req.slg_scale         >= 0.0f) gp.sample_params.guidance.slg.scale       = req.slg_scale;
+        if (req.skip_layer_start  >= 0.0f) gp.sample_params.guidance.slg.layer_start = req.skip_layer_start;
+        if (req.skip_layer_end    >= 0.0f) gp.sample_params.guidance.slg.layer_end   = req.skip_layer_end;
+    }
+
     if (req.vae_tiling) {
         gp.vae_tiling_params.enabled = true;
         if (req.vae_tile_size > 0) {
@@ -445,6 +458,7 @@ int command_sd(const SdOptions & opts) {
     lp.clip_g               = opts.clip_g;
     lp.t5xxl                = opts.t5xxl;
     lp.llm                  = opts.llm;
+    lp.high_noise_diffusion_model = opts.high_noise_diffusion_model;
     lp.control_net          = opts.control_net;
     lp.wtype                = opts.wtype;
     lp.vae_decode_only      = !need_encode;
@@ -478,6 +492,33 @@ int command_sd(const SdOptions & opts) {
     req.guidance         = opts.guidance;
     req.flow_shift       = opts.flow_shift;
     req.control_strength = opts.control_strength;
+    // Parse --skip-layers "7,8,9" into the int vector consumed by SLG.
+    // Whitespace around entries is tolerated; non-integer entries fail
+    // with BadInput so a typo doesn't get silently dropped.
+    if (!opts.skip_layers.empty()) {
+        const std::string & s = opts.skip_layers;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t comma = s.find(',', pos);
+            std::string tok = s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            // strip whitespace
+            while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.front()))) tok.erase(tok.begin());
+            while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.back())))  tok.pop_back();
+            if (!tok.empty()) {
+                try {
+                    req.skip_layers.push_back(std::stoi(tok));
+                } catch (const std::exception &) {
+                    fail(ExitCode::BadInput,
+                         "--skip-layers expects a comma-separated list of integers, got: '" + tok + "'");
+                }
+            }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+    }
+    req.slg_scale        = opts.slg_scale;
+    req.skip_layer_start = opts.skip_layer_start;
+    req.skip_layer_end   = opts.skip_layer_end;
     req.vae_tiling             = opts.vae_tiling;
     req.vae_tile_size          = opts.vae_tile_size;
     req.vae_relative_tile_size = opts.vae_relative_tile_size;

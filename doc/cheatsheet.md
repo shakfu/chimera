@@ -165,6 +165,38 @@ chimera whisper -m ggml-base.en.bin -i speech.wav \
     --beam-size 5 --temperature 0 --no-fallback
 chimera whisper -m ggml-base.en.bin -i speech.wav \
     --prompt "JFK inaugural address, 1961."     # vocabulary biasing
+
+# Region of audio (slice the input without re-encoding)
+chimera whisper -m ggml-base.en.bin -i long.wav \
+    --offset 30000 --duration 60000             # 30s..90s
+
+# Segment shaping (pairs naturally with --output-srt / --output-vtt)
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --output-srt --max-len 42 --split-on-word
+
+# Decoder fallback thresholds
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --temperature-inc 0.2 --entropy-thold 2.4 \
+    --logprob-thold -1.0 --no-speech-thold 0.6
+
+# Voice activity detection (requires a VAD model file)
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --vad --vad-model silero-v5.1-small.bin \
+    --vad-threshold 0.5 --vad-min-speech-duration-ms 250
+
+# Token suppression + speaker turns
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --suppress-nst --suppress-regex '\[.*\]'
+chimera whisper -m ggml-tdrz.bin -i meeting.wav --tinydiarize
+
+# Perf / host control
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --flash-attn --device 0                     # GPU build, device 0
+chimera whisper -m ggml-base.en.bin -i speech.wav --no-gpu
+chimera whisper -m ggml-base.en.bin -i speech.wav \
+    --processors 4                              # split decode (may degrade accuracy at chunk seams)
+chimera whisper -m ggml-base.en.bin -i tiny.wav \
+    --audio-ctx 768                             # halve the audio context for tiny.en speedups
 ```
 
 Non-WAV input? Convert first:
