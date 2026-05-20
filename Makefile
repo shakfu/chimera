@@ -1,16 +1,9 @@
-.PHONY: deps build build-with-webui build-cuda build-rocm build-sycl build-vulkan rebuild clean reset test smoke install uninstall release-notes bump-check test-db-migrate test-golden combine test-external-smoke
+.PHONY: deps build build-with-webui build-cuda build-rocm build-sycl \
+	    build-vulkan rebuild clean reset test smoke install uninstall \
+	    release-notes bump-check test-db-migrate test-golden combine \
+	    test-external-smoke
 
-# Python interpreter, picked at make-invocation time by probing the host.
-# Order: `python3` (Linux / macOS / Conda / venv), `python` (Windows
-# python.org default, Microsoft Store Python, some Linux distros), `py -3`
-# (Windows Python Launcher, ships with python.org installers since 3.6).
-# Falls back to a literal `python3` if nothing is found so the failure is
-# obvious. Each candidate is probed by actually running `--version` because
-# Windows ships a Microsoft Store `python3.exe` stub on PATH that exits
-# non-zero with "Python was not found" — `command -v` would happily pick
-# it. Requires a POSIX shell — the project already needs bash for
-# `scripts/test.sh`, and the Windows CI leg uses git-bash, so this is
-# satisfied everywhere we build. Override with `make PYTHON=<cmd>` for
+# Override with `make PYTHON=<cmd>` for
 # unusual environments (e.g. `PYTHON="uv run python"`).
 PYTHON ?= $(shell \
     if python3 --version >/dev/null 2>&1; then echo python3;  \

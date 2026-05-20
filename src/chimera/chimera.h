@@ -269,6 +269,7 @@ struct SdOptions {
     std::string llm_vision;        // LLM-Vision encoder (Qwen-Image vision)
     std::string tensor_type_rules; // per-tensor wtype overrides (sd's --tensor-type-rules)
     std::string photo_maker;       // PhotoMaker model file
+    std::string embd_dir;          // textual-inversion / embeddings directory
     std::string prompt;
     std::string negative_prompt;
     std::string output = "output.png";
@@ -379,6 +380,16 @@ struct SdOptions {
     int         hires_steps                = 0;
     float       hires_denoising_strength   = -1.0f;
     int         hires_upscale_tile_size    = 0;
+
+    // Cache / SCM bundle. Mirrors sd-cli's surface: `--cache-mode` picks
+    // the algorithm; `--cache-option key=value,key=...` overrides
+    // per-mode tunables (see chimera_sd::parse_cache_options for the
+    // accepted keys per mode). `--scm-mask` is a path to a mask file;
+    // `--scm-policy` is "static" or "dynamic" (empty = upstream default).
+    std::string cache_mode;
+    std::string cache_option;
+    std::string scm_mask;
+    std::string scm_policy;
 };
 int command_sd(const SdOptions & opts);
 #endif

@@ -79,8 +79,15 @@ chimera chat -m model.gguf --chat-template-file template.jinja
 chimera chat -m model.gguf --chat-template-kwargs enable_thinking=true
 chimera chat -m model.gguf --no-jinja             # opt out of Jinja renderer
 
-# Reasoning models (DeepSeek-R1 / o1-style)
+# Reasoning models (DeepSeek-R1 / o1-style). --reasoning-budget caps
+# tokens inside the <think>...</think> block; if the cap is hit, the
+# sampler forces the optional message + closing tag so generation ends
+# cleanly. On a non-thinking template, --reasoning-budget warns and
+# is ignored.
 chimera chat -m model.gguf --reasoning deepseek --reasoning-budget 2048
+chimera chat -m model.gguf --reasoning deepseek \
+    --reasoning-budget 1024 \
+    --reasoning-budget-message "Time's up. Final answer:"
 
 # Persistent chats (off by default; data goes to the SQLite DB)
 chimera chat -m model.gguf --persist             # save every turn
@@ -270,12 +277,30 @@ chimera sd -m sd.gguf -p "..." -o out.png --taesd taesd.safetensors
 chimera sd --diffusion-model qwen-image.gguf -p "..." -o out.png \
     --llm-vision qwen_vision.safetensors
 
+# Textual-inversion embeddings (filename stem becomes the prompt token).
+# A directory containing e.g. mychar.safetensors lets you write "mychar" in -p.
+chimera sd -m sd.gguf --embd-dir ./embeddings/ \
+    -p "mychar standing on a mountain" -o out.png
+
 # Hires fix (2-pass: low-res sample then upscale + refine)
 chimera sd -m sd.gguf -p "..." -o out.png \
     --hires --hires-scale 2.0 --hires-denoising-strength 0.5
 chimera sd -m sd.gguf -p "..." -o out.png \
     --hires --hires-upscaler Model --upscale-model real-esrgan.pth \
     --hires-width 1024 --hires-height 1024 --hires-steps 12
+
+# Inference cache (skip recomputing similar blocks across steps).
+# --cache-mode picks the algorithm; --cache-option tunes it.
+chimera sd -m sd.gguf -p "..." -o out.png \
+    --cache-mode easycache --cache-option "threshold=0.1,start=0.2,end=0.9"
+chimera sd --diffusion-model flux1-dev.gguf -p "..." -o out.png \
+    --cache-mode dbcache --cache-option "threshold=0.08,Fn=8,Bn=0,warmup=8"
+chimera sd -m sd.gguf -p "..." -o out.png \
+    --cache-mode spectrum --cache-option "w=0.40,m=3,lam=1.0,warmup=4"
+
+# Sampler-cached-memory (SCM)
+chimera sd --diffusion-model flux1-dev.gguf -p "..." -o out.png \
+    --cache-mode dbcache --scm-mask mask.bin --scm-policy dynamic
 ```
 
 ---

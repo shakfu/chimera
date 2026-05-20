@@ -5,6 +5,7 @@
 // spinner, numbered-output-path helper) stays in the anonymous namespace.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -115,6 +116,131 @@ sd_image_t pixel_image_to_sd(const chimera_sd::PixelImage & p) {
 
 namespace chimera_sd {
 
+// ---- cache / SCM parsing ----------------------------------------------
+//
+// Mirrors sd-cli's two-flag surface (`--cache-mode` + `--cache-option
+// key=value,...`) — same parser, same accepted keys per mode. Kept on
+// the chimera side so command_sd can validate up-front before paying
+// the model-load cost. The result is stored as plain POD on the
+// GenerateRequest; generate() copies fields into sd_cache_params_t.
+void parse_cache_options(const std::string & cache_mode,
+                         const std::string & cache_option,
+                         const std::string & scm_mask,
+                         const std::string & scm_policy,
+                         GenerateRequest *   req) {
+    if (cache_mode.empty() && cache_option.empty() &&
+        scm_mask.empty() && scm_policy.empty()) {
+        return;
+    }
+    // Resolve mode first (kv parser branches on it for the `threshold`
+    // and `warmup` keys).
+    int mode_id = -1;
+    if (!cache_mode.empty()) {
+        if      (cache_mode == "disabled")   mode_id = 0;
+        else if (cache_mode == "easycache")  mode_id = 1;
+        else if (cache_mode == "ucache")     mode_id = 2;
+        else if (cache_mode == "dbcache")    mode_id = 3;
+        else if (cache_mode == "taylorseer") mode_id = 4;
+        else if (cache_mode == "cache-dit")  mode_id = 5;
+        else if (cache_mode == "spectrum")   mode_id = 6;
+        else {
+            fail(ExitCode::BadInput,
+                 "unknown --cache-mode value: " + cache_mode +
+                 " (expected disabled, easycache, ucache, dbcache, "
+                 "taylorseer, cache-dit, or spectrum)");
+        }
+    }
+    req->cache_mode_id = mode_id;
+
+    // Parse "k=v,k=v,..." into the matching field. Branching on
+    // mode_id matches sd-cli (e.g. `threshold` lives on
+    // reuse_threshold for easy/ucache vs residual_diff_threshold for
+    // dbcache/taylorseer/cache-dit; `warmup` lives on
+    // spectrum_warmup_steps vs max_warmup_steps).
+    auto trim = [](std::string & s) {
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))  s.pop_back();
+    };
+    if (!cache_option.empty()) {
+        const std::string & opt = cache_option;
+        size_t pos = 0;
+        while (pos < opt.size()) {
+            size_t comma = opt.find(',', pos);
+            std::string tok = opt.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            trim(tok);
+            if (!tok.empty()) {
+                size_t eq = tok.find('=');
+                if (eq == std::string::npos) {
+                    fail(ExitCode::BadInput,
+                         "--cache-option entry missing '=' separator: '" + tok + "'");
+                }
+                std::string key = tok.substr(0, eq);
+                std::string val = tok.substr(eq + 1);
+                trim(key); trim(val);
+                try {
+                    if (key == "threshold") {
+                        // sd-cli branches on mode here. We match.
+                        if (mode_id == 1 || mode_id == 2) {  // easycache, ucache
+                            req->reuse_threshold = std::stof(val);
+                        } else {
+                            req->residual_diff_threshold = std::stof(val);
+                        }
+                    } else if (key == "start") {
+                        req->start_percent = std::stof(val);
+                    } else if (key == "end") {
+                        req->end_percent = std::stof(val);
+                    } else if (key == "decay") {
+                        req->error_decay_rate = std::stof(val);
+                    } else if (key == "relative") {
+                        req->use_relative_threshold = (std::stof(val) != 0.0f) ? 1 : 0;
+                    } else if (key == "reset") {
+                        req->reset_error_on_compute = (std::stof(val) != 0.0f) ? 1 : 0;
+                    } else if (key == "Fn" || key == "fn") {
+                        req->Fn_compute_blocks = std::stoi(val);
+                    } else if (key == "Bn" || key == "bn") {
+                        req->Bn_compute_blocks = std::stoi(val);
+                    } else if (key == "warmup") {
+                        if (mode_id == 6) {  // spectrum
+                            req->spectrum_warmup_steps = std::stoi(val);
+                        } else {
+                            req->max_warmup_steps = std::stoi(val);
+                        }
+                    } else if (key == "w")      req->spectrum_w             = std::stof(val);
+                    else if (key == "m")        req->spectrum_m             = std::stoi(val);
+                    else if (key == "lam")      req->spectrum_lam           = std::stof(val);
+                    else if (key == "window")   req->spectrum_window_size   = std::stoi(val);
+                    else if (key == "flex")     req->spectrum_flex_window   = std::stof(val);
+                    else if (key == "stop")     req->spectrum_stop_percent  = std::stof(val);
+                    else {
+                        fail(ExitCode::BadInput,
+                             "unknown --cache-option key: '" + key + "' "
+                             "(accepted: threshold/start/end/decay/relative/reset/Fn/Bn/warmup"
+                             "/w/m/lam/window/flex/stop)");
+                    }
+                } catch (const ChimeraError &) {
+                    throw;
+                } catch (const std::exception &) {
+                    fail(ExitCode::BadInput,
+                         "--cache-option: invalid value '" + val + "' for key '" + key + "'");
+                }
+            }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+    }
+
+    req->scm_mask = scm_mask;
+    if (!scm_policy.empty()) {
+        if      (scm_policy == "static")  req->scm_policy_dynamic = 0;
+        else if (scm_policy == "dynamic") req->scm_policy_dynamic = 1;
+        else {
+            fail(ExitCode::BadInput,
+                 "unknown --scm-policy value: " + scm_policy +
+                 " (expected 'static' or 'dynamic')");
+        }
+    }
+}
+
 SdContextPtr load_model(const LoadParams & params) {
     sd_set_log_callback(sd_log_callback, nullptr);
 
@@ -195,6 +321,50 @@ SdContextPtr load_model(const LoadParams & params) {
                  " (expected auto, immediately, or at_runtime)");
         }
         ctx_params.lora_apply_mode = lm;
+    }
+
+    // Textual-inversion embedding directory. Scan non-recursively for
+    // .gguf / .safetensors / .pt files, deriving each token name from
+    // the filename stem (same convention as sd-cli). The pair vector
+    // owns the backing strings; the sd_embedding_t vector borrows
+    // pointers from it. Both live for the rest of this function — sd's
+    // new_sd_ctx (called below) copies the strings into its own
+    // std::map before returning, so stack lifetime is sufficient.
+    std::vector<std::pair<std::string, std::string>> embd_kv;
+    std::vector<sd_embedding_t>                      embd_vec;
+    if (!params.embd_dir.empty()) {
+        namespace fs = std::filesystem;
+        const fs::path dir = params.embd_dir;
+        std::error_code ec;
+        if (!fs::is_directory(dir, ec)) {
+            fail(ExitCode::BadInput,
+                 "--embd-dir is not a directory: " + params.embd_dir);
+        }
+        std::vector<fs::path> files;
+        for (const auto & ent : fs::directory_iterator(dir, ec)) {
+            if (!ent.is_regular_file()) continue;
+            const std::string ext = ent.path().extension().string();
+            if (ext == ".gguf" || ext == ".safetensors" || ext == ".pt") {
+                files.push_back(ent.path());
+            }
+        }
+        std::sort(files.begin(), files.end());
+        embd_kv.reserve(files.size());
+        embd_vec.reserve(files.size());
+        for (const auto & p : files) {
+            embd_kv.emplace_back(p.stem().string(), p.string());
+        }
+        // Build the sd_embedding_t vector AFTER embd_kv is fully sized
+        // — emplace_back can reallocate and invalidate pointers if we
+        // built both vectors in lockstep.
+        for (const auto & kv : embd_kv) {
+            sd_embedding_t e{};
+            e.name = kv.first.c_str();
+            e.path = kv.second.c_str();
+            embd_vec.push_back(e);
+        }
+        ctx_params.embeddings      = embd_vec.data();
+        ctx_params.embedding_count = static_cast<uint32_t>(embd_vec.size());
     }
 
     SdContextPtr ctx(new_sd_ctx(&ctx_params));
@@ -413,6 +583,34 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
         if (req.skip_layer_end    >= 0.0f) gp.sample_params.guidance.slg.layer_end   = req.skip_layer_end;
     }
 
+    // Cache / SCM. sd_img_gen_params_init has already populated
+    // gp.cache via sd_cache_params_init; we override only the fields
+    // the caller explicitly set. cache_mode_id < 0 means "leave the
+    // default", which is SD_CACHE_DISABLED.
+    if (req.cache_mode_id >= 0) {
+        gp.cache.mode = static_cast<sd_cache_mode_t>(req.cache_mode_id);
+    }
+    if (!std::isnan(req.reuse_threshold))         gp.cache.reuse_threshold         = req.reuse_threshold;
+    if (!std::isnan(req.residual_diff_threshold)) gp.cache.residual_diff_threshold = req.residual_diff_threshold;
+    if (!std::isnan(req.start_percent))           gp.cache.start_percent           = req.start_percent;
+    if (!std::isnan(req.end_percent))             gp.cache.end_percent             = req.end_percent;
+    if (!std::isnan(req.error_decay_rate))        gp.cache.error_decay_rate        = req.error_decay_rate;
+    if (req.use_relative_threshold >= 0)          gp.cache.use_relative_threshold  = (req.use_relative_threshold != 0);
+    if (req.reset_error_on_compute >= 0)          gp.cache.reset_error_on_compute  = (req.reset_error_on_compute != 0);
+    if (req.Fn_compute_blocks      >= 0)          gp.cache.Fn_compute_blocks       = req.Fn_compute_blocks;
+    if (req.Bn_compute_blocks      >= 0)          gp.cache.Bn_compute_blocks       = req.Bn_compute_blocks;
+    if (req.max_warmup_steps       >= 0)          gp.cache.max_warmup_steps        = req.max_warmup_steps;
+    if (req.spectrum_warmup_steps  >= 0)          gp.cache.spectrum_warmup_steps   = req.spectrum_warmup_steps;
+    if (!std::isnan(req.spectrum_w))              gp.cache.spectrum_w              = req.spectrum_w;
+    if (req.spectrum_m             >= 0)          gp.cache.spectrum_m              = req.spectrum_m;
+    if (!std::isnan(req.spectrum_lam))            gp.cache.spectrum_lam            = req.spectrum_lam;
+    if (req.spectrum_window_size   >= 0)          gp.cache.spectrum_window_size    = req.spectrum_window_size;
+    if (!std::isnan(req.spectrum_flex_window))    gp.cache.spectrum_flex_window    = req.spectrum_flex_window;
+    if (!std::isnan(req.spectrum_stop_percent))   gp.cache.spectrum_stop_percent   = req.spectrum_stop_percent;
+    // scm_mask is borrowed for the duration of generate_image.
+    if (!req.scm_mask.empty()) gp.cache.scm_mask = req.scm_mask.c_str();
+    if (req.scm_policy_dynamic >= 0) gp.cache.scm_policy_dynamic = (req.scm_policy_dynamic != 0);
+
     if (req.hires_enabled) {
         gp.hires.enabled = true;
         if (!req.hires_upscaler.empty()) {
@@ -550,6 +748,16 @@ int command_sd(const SdOptions & opts) {
              "--control-image requires --control-net (the conditioning model)");
     }
 
+    // Validate the cache/SCM bundle up-front so a typo doesn't waste a
+    // model load. The temp request is discarded; the real one below
+    // re-parses (same input, known-good).
+    {
+        chimera_sd::GenerateRequest validate_only;
+        chimera_sd::parse_cache_options(opts.cache_mode, opts.cache_option,
+                                        opts.scm_mask,   opts.scm_policy,
+                                        &validate_only);
+    }
+
     // VAE encode path is only needed for img2img / inpaint.
     const bool need_encode = !opts.init_image.empty();
     chimera_sd::LoadParams lp;
@@ -568,6 +776,7 @@ int command_sd(const SdOptions & opts) {
     lp.llm_vision           = opts.llm_vision;
     lp.tensor_type_rules    = opts.tensor_type_rules;
     lp.photo_maker          = opts.photo_maker;
+    lp.embd_dir             = opts.embd_dir;
     lp.vae_decode_only      = !need_encode;
     lp.offload_to_cpu        = opts.offload_to_cpu;
     lp.diffusion_flash_attn  = opts.diffusion_fa;
@@ -764,6 +973,12 @@ int command_sd(const SdOptions & opts) {
     }
     req.increase_ref_index            = opts.increase_ref_index;
     req.disable_auto_resize_ref_image = opts.no_auto_resize_ref_image;
+
+    // Cache / SCM validation up-front (before load_model) so a typo
+    // doesn't waste a model load. Populates req's parsed-cache fields.
+    chimera_sd::parse_cache_options(opts.cache_mode, opts.cache_option,
+                                    opts.scm_mask,   opts.scm_policy,
+                                    &req);
 
     req.hires_enabled            = opts.hires_fix;
     req.hires_upscaler           = opts.hires_upscaler;

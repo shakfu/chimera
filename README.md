@@ -341,7 +341,7 @@ The whisper/sd silencers cannot live in `chimera.cpp` because their headers woul
 
 ## Origin
 
-chimera was originally developed inside the [cyllama](https://github.com/shakfu/cyllama) Python project, sharing its `scripts/manage.py` and `thirdparty/` build infrastructure. It was extracted into this repository so that it could be developed independently with its own release cadence.
+chimera was originally developed inside the [cyllama](https://github.com/shakfu/cyllama) project, sharing its `scripts/manage.py` and `thirdparty/` build infrastructure. It was extracted into this repository so that it could be developed independently with its own release cadence.
 
 ## License
 

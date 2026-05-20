@@ -18,7 +18,7 @@ Status legend: ✅ exposed · 🔀 renamed · 🟡 partial · ❌ missing · �
 >
 > **sd partial:** skip-layer guidance + the `--high-noise-diffusion-model` model-loading slot landed; the rest of the `--high-noise-*` family stays out of scope (video-only).
 >
-> **sd coverage closer 2026-05-20 (Rounds 1–6):** 33 additional flags landed — perf/offload (`--fa`, `--no-mmap`, `--max-vram`, per-component CPU offload, SDXL VAE fix), sampler/generation (`--img-cfg-scale`, `--eta`, `--timestep-shift`, `--sigmas`, `--prediction`, `--lora-apply-mode`), model-loading (`--taesd`, `--clip-vision`, `--llm-vision`, `--tensor-type-rules`, `--photo-maker`), PhotoMaker bundle (`--pm-id-images-dir`/`--pm-id-embed-path`/`--pm-style-strength`), reference images (`--ref-image` + supporting flags), and the full hires-fix bundle. Tables below are flipped to ✅ in-place. Cache/SCM, `--embd-dir`, and `--disable-image-metadata` are the documented residual gaps; everything else is out-of-scope (video, standalone modes, shell features, chroma/qwen tuning).
+> **sd coverage closer 2026-05-20 (Rounds 1–8):** 38 additional flags landed — perf/offload (`--fa`, `--no-mmap`, `--max-vram`, per-component CPU offload, SDXL VAE fix), sampler/generation (`--img-cfg-scale`, `--eta`, `--timestep-shift`, `--sigmas`, `--prediction`, `--lora-apply-mode`), model-loading (`--taesd`, `--clip-vision`, `--llm-vision`, `--tensor-type-rules`, `--photo-maker`, `--embd-dir`), PhotoMaker bundle (`--pm-id-images-dir`/`--pm-id-embed-path`/`--pm-style-strength`), reference images (`--ref-image` + supporting flags), the full hires-fix bundle, and the cache/SCM bundle (`--cache-mode`, `--cache-option`, `--scm-mask`, `--scm-policy`). Tables below are flipped to ✅ in-place. **All sd ❌ rows are now resolved**: `--disable-image-metadata` is reclassified 🚫 (moot — chimera's stock `stb_image_write` writes no text chunks, so there's nothing to disable; the inverse "embed metadata" feature is a separate item not yet on the roadmap).
 
 ---
 
@@ -30,11 +30,11 @@ Status legend: ✅ exposed · 🔀 renamed · 🟡 partial · ❌ missing · �
 | `chat` (llama-cli, interactive) | ~85 | 37 | 0 | ~2 | ~55 |
 | `embed` (llama-embedding) | ~14 | 12 | 1 | 1 | 1 |
 | `whisper` (whisper-cli) | 58 | 41 | 1 | ~3 | ~13 |
-| `sd` (sd cli) | 107 | 55 | 6 | ~5 | ~50 |
+| `sd` (sd cli) | 107 | 60 | 6 | 0 | ~51 |
 
 "Real gaps" are flags whose absence we'd consider filing an issue for. "Deliberately out of scope" covers things like llama-cli's REPL plumbing (chimera replaces it with `chat`), perplexity/imatrix/training knobs, anything tied solely to llama-server, and obscure research/debug flags. The next two columns of the per-subcommand tables make each call individually.
 
-The headline finding from the original audit — "**the sd surface is by far the largest source of meaningful gaps**" — no longer applies. After the 2026-05-20 sd closer (Rounds 1–6, 33 additional flags on top of the earlier Tier 1–2 work), the residual sd gaps are: the cache/SCM family (~20 sub-knobs in `sd_cache_params_t`, needs a CLI-shape design choice), `--embd-dir` (textual-inversion directory build), and `--disable-image-metadata` (chimera's PNG writer side). Everything else is documented out-of-scope (video, standalone modes, shell features). The llama coverage is intentionally minimal — chimera leans on its own DSL (`chat` REPL, `serve` HTTP) and the wrapped subcommands are deliberately thin. The whisper surface, previously the most "leaky" relative to size, is now ~73% covered after the 2026-05-20 closer (Batches 1–3 + VAD + offset/duration); residual gaps are constrained-decoding (`--grammar` family) and wrapper-logic features (`--detect-language` exit-after-detect, stereo `--diarize`).
+The headline finding from the original audit — "**the sd surface is by far the largest source of meaningful gaps**" — no longer applies. After the 2026-05-20 sd closer (Rounds 1–8, 38 additional flags on top of the earlier Tier 1–2 work), **the sd surface has zero unresolved ❌ rows**. The lone remaining item, `--disable-image-metadata`, is reclassified 🚫 because chimera's stock `stb_image_write` writes no text chunks, so there is no metadata to disable; embedding generation params (the reverse direction, for parity with sd-cli's default behaviour) is a separate feature not yet on the roadmap. Everything else is documented out-of-scope (video, standalone modes, shell features, chroma/qwen tuning). The llama coverage is intentionally minimal — chimera leans on its own DSL (`chat` REPL, `serve` HTTP) and the wrapped subcommands are deliberately thin. The whisper surface, previously the most "leaky" relative to size, is now ~73% covered after the 2026-05-20 closer (Batches 1–3 + VAD + offset/duration); residual gaps are constrained-decoding (`--grammar` family) and wrapper-logic features (`--detect-language` exit-after-detect, stereo `--diarize`).
 
 ---
 
@@ -93,7 +93,7 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 | `--chat-template` | `--chat-template` (chat) | ✅ | |
 | `--chat-template-file` / `--chat-template-kwargs` | same | ✅ | Landed 2026-05-20 (`chat` only). `--chat-template-file` is mutually exclusive with `--chat-template`. `--chat-template-kwargs` is repeatable. |
 | `--jinja` | `--no-jinja` | ✅ | Landed 2026-05-20 (`chat` only). Jinja defaults ON; `--no-jinja` opts out. |
-| `--reasoning` / `--reasoning-budget` / `--reasoning-format` / `--reasoning-budget-message` | same | 🟡 | Landed 2026-05-20 (`chat` only). `--reasoning-budget` is parsed but not yet enforced at sampler level — upstream requires explicit tokenization of reasoning start/end tags (cf. `common_reasoning_budget_init`). Follow-up. |
+| `--reasoning` / `--reasoning-budget` / `--reasoning-format` / `--reasoning-budget-message` | same | ✅ | Landed 2026-05-20 (`chat` only). `--reasoning-budget` enforcement landed in a follow-up the same day — `command_chat` probes the template via a dummy `common_chat_templates_apply` to read `thinking_{start,end}_tag`, tokenizes via `common_tokenize(parse_special=true)`, populates `sampling.reasoning_budget_{tokens,start,end,forced}`, and `common_sampler_init` chains the budget sampler into the chain. `--reasoning-budget-message` is tokenized into the forced-termination sequence as `<message> + <end_tag>` (mirrors `llama-cli`). When the active template has no thinking tags, a warning fires and the budget is silently ignored. |
 | `--keep` | — | ❌ | Token retention across context overflow. |
 | `--color` | `--color` (chat) | ✅ | `gen` is non-interactive so this is fine. |
 | `--verbose-prompt` / `--special` / `--escape` / `--no-context-shift` | — | 🚫 | Debug/edge; out-of-scope. |
@@ -126,7 +126,7 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 
 All five priorities from the original audit landed on 2026-05-20 (`--flash-attn`, grammar/json-schema, DRY + repeat-last-n, `--lora` in gen/chat, reasoning family). Residual items:
 
-1. **`--reasoning-budget` enforcement** — flag is parsed and now emits a `warning: parsed but not yet enforced` to stderr when set. Proper integration requires chaining `common_reasoning_budget_init` (returns a `llama_sampler *`) into the sample loop via `llama_sampler_apply` on a token-data array, which means restructuring `chat_sample_loop` to bypass the opaque `common_sampler_sample` call. Tags can be sourced from `common_chat_params.thinking_start_tag` / `thinking_end_tag` (populated by `common_chat_templates_apply`). Tracked.
+1. ~~**`--reasoning-budget` enforcement**.~~ ✅ Landed 2026-05-20. The earlier "needs `chat_sample_loop` restructure" comment turned out to be wrong on closer reading: `common_sampler_init` itself chains `common_reasoning_budget_init` into the sampler whenever the `sampling.reasoning_budget_{tokens,start,end,forced}` fields are populated, so the integration is entirely upstream of `common_sampler_init` — no sample-loop changes needed. Implementation: `command_chat` probes the active chat template once at startup via a dummy `common_chat_templates_apply`, reads `thinking_{start,end}_tag`, tokenizes with `parse_special=true`, and stuffs the result into the sampling params before `make_sampler`. Forced-termination sequence = `--reasoning-budget-message + thinking_end_tag`. Templates without thinking tags warn and ignore the budget.
 2. ~~**`--list-devices`**~~ ✅ Landed 2026-05-20 as `chimera info --list-devices`.
 3. **`--mmproj-auto`** — not modeled by `mtmd_context_params` at llama.cpp `b9119`. Revisit on next pin bump.
 
@@ -273,7 +273,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--llm` | `--llm` | ✅ | Z-Image text encoder. |
 | `--llm_vision` / `--qwen2vl` / `--qwen2vl_vision` | `--llm-vision` (others 🚫) | 🟡 | `--llm-vision` landed 2026-05-20 (kebab). `--qwen2vl` is a deprecated alias of `--llm`; safe to skip. `--qwen2vl_vision` not modeled here. |
 | `--control-net` | `--control-net` | ✅ | Landed 2026-05-20. Wired into `sd_ctx_params_t.control_net_path`. `--control-image` requires this. |
-| `--embd-dir` | — | ❌ | Textual-inversion / embedding directory. Deferred — needs the `sd_embedding_t[]` build path. |
+| `--embd-dir` | `--embd-dir` | ✅ | Landed 2026-05-20. Non-recursive scan for `.gguf`/`.safetensors`/`.pt`; filename stem becomes the prompt token. Validated before `new_sd_ctx` (non-directory exits with `BadInput`). Pointer-lifetime detail: the kv vector owns the strings, the `sd_embedding_t` vector borrows from it and is built only after the kv vector is fully sized to avoid realloc-induced pointer dangle. |
 | `--lora-model-dir` | `--lora-model-dir` | ✅ | Landed 2026-05-20. Base directory used to resolve relative `--lora` paths (chimera-side; sd.cpp's C API takes resolved paths in `sd_lora_t`). |
 | `--photo-maker` | `--photo-maker` | ✅ | Landed 2026-05-20. Model path only; paired with the PhotoMaker generation bundle below. |
 | `--upscale-model` / `--hires-upscalers-dir` | `--upscale-model` (hires-upscalers-dir 🚫) | 🟡 | `--upscale-model` landed 2026-05-20 (sd_hires_params_t.model_path, used with `--hires-upscaler Model`). `--hires-upscalers-dir` is sd-cli-shell-only directory scan — out of scope. |
@@ -351,12 +351,12 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 |---|---|---|---|
 | `--video-frames` / `--fps` | — | 🚫 | Video mode out of scope for chimera-sd today (sd-cli has `vid_gen` mode). |
 | `--vace-strength` / `--increase-ref-index` / `--disable-auto-resize-ref-image` | — | 🚫 | Video / VACE. |
-| `--cache-mode` / `--cache-option` | — | ❌ | Intermediate-tensor cache (perf). |
-| `--scm-mask` / `--scm-policy` | — | ❌ | Sampler-cached-memory. Deferred — bundled with the cache_params surface. |
+| `--cache-mode` / `--cache-option` | same | ✅ | Landed 2026-05-20. Mirrors sd-cli's exact surface — `--cache-mode` picks the algorithm (disabled/easycache/ucache/dbcache/taylorseer/cache-dit/spectrum), `--cache-option` overrides per-mode tunables via `key=value,...` (15 keys with per-mode branching: threshold/start/end/decay/relative/reset/Fn/Bn/warmup/w/m/lam/window/flex/stop). Validated in `command_sd` before `load_model` via the chimera-side `parse_cache_options()` helper so typos exit fast. |
+| `--scm-mask` / `--scm-policy` | same | ✅ | Landed 2026-05-20. `--scm-mask` borrows into `sd_cache_params_t.scm_mask` for the duration of generate; `--scm-policy` is `static` or `dynamic` (empty = sd's default dynamic). |
 | `--lora-apply-mode` | `--lora-apply-mode` | ✅ | Landed 2026-05-20. Enum string via `str_to_lora_apply_mode`: `auto`/`immediately`/`at_runtime`. CLI11-validated. |
 | `--circular` / `--circularx` / `--circulary` | — | 🚫 | Seamless-tile output; niche. |
 | `--chroma-t5-mask-pad` / `--chroma-disable-dit-mask` / `--chroma-enable-t5-mask` / `--qwen-image-zero-cond-t` | — | 🚫 | Model-specific tuning; advanced. |
-| `--disable-image-metadata` | — | ❌ | Strip metadata from PNG; reasonable to add. |
+| `--disable-image-metadata` | — | 🚫 | Moot in chimera. sd-cli's flag disables a Civitai/A1111-style `parameters` tEXt chunk written by a **patched** `stbi_write_png` overload in sd's vendored fork of `stb_image_write.h`. Chimera uses stock `stb_image_write`, which writes no text chunks at all — so chimera's PNGs are already metadata-free and there is nothing to "disable". The reverse direction (embedding generation params for parity with sd-cli's default) is a separate feature, not yet on the roadmap. |
 | `-o,--output` | `-o,--output` | ✅ | |
 | `--mode -M {img_gen,vid_gen,upscale,convert,metadata}` | implicit | 🚫 | Chimera's `sd` subcommand is img_gen-only by design; other modes are out of scope today. |
 | `--preview*` / `--metadata-*` | — | 🚫 | CLI-only sd-shell features; not portable into chimera. |
@@ -377,12 +377,10 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 12. ~~**PhotoMaker bundle** (`--pm-id-images-dir`, `--pm-id-embed-path`, `--pm-style-strength`).~~ ✅ Landed 2026-05-20 (Round 4).
 13. ~~**Reference images** (`--ref-image`, `--increase-ref-index`, `--no-auto-resize-ref-image`).~~ ✅ Landed 2026-05-20 (Round 5).
 14. ~~**Hires-fix bundle** (`--hires`, `--hires-upscaler`, `--upscale-model`, `--hires-width/height/scale/steps/denoising-strength/upscale-tile-size`).~~ ✅ Landed 2026-05-20 (Round 6).
+15. ~~**Cache / SCM bundle** (`--cache-mode`, `--cache-option`, `--scm-mask`, `--scm-policy`).~~ ✅ Landed 2026-05-20 (Round 7). Mirrors sd-cli's 4-flag surface; the 15-key `--cache-option` kv-parser branches on the active mode just like sd-cli does.
+16. ~~**`--embd-dir`** (textual-inversion directory).~~ ✅ Landed 2026-05-20 (Round 8). Non-recursive scan for `.gguf`/`.safetensors`/`.pt`; filename stem becomes the prompt token; validated before `new_sd_ctx`.
 
-Remaining open (lower priority, deferred from this closer):
-
-- **Cache/SCM family** (`--cache-mode`, `--cache-option`, `--scm-mask`, `--scm-policy` plus ~20 sub-knobs in `sd_cache_params_t`) — needs a CLI-shape design choice rather than a mechanical port; few users have asked.
-- **`--embd-dir`** (textual-inversion directory) — needs the `sd_embedding_t[]` build path.
-- **`--disable-image-metadata`** — chimera's PNG writer side, not an `sd_*` param.
+All sd items in this list are now resolved. `--disable-image-metadata` (the prior residual) was reclassified 🚫 in the table above — chimera's stock `stb_image_write` doesn't embed any metadata to begin with, so the flag has nothing to disable. A future "embed metadata" feature would be net-new functionality, not a port.
 
 ### Deliberately omitted
 
@@ -434,7 +432,7 @@ In priority order (highest user impact first). Items struck through landed on 20
 8. ~~**whisper: `--prompt` + decoding-strategy basics** (`--beam-size`, `--best-of`, `--temperature`, `--no-fallback`).~~ ✅ Landed 2026-05-20.
 9. ~~**sd: `--lora`, `--lora-model-dir`, `--clip_g`, `--type`**~~ ✅ Landed 2026-05-20.
 10. ~~**embed: `--embd-output-format` + `--embd-separator` + `--attention`**~~ ✅ Landed 2026-05-20 (also `--pooling rank`).
-11. ~~**sd coverage closer — Rounds 1–6 (33 flags).**~~ ✅ Landed 2026-05-20. Perf/offload (Round 1), sampler/generation (Round 2), model-loading completers (Round 3), PhotoMaker bundle (Round 4), reference images (Round 5), hires-fix bundle (Round 6). See the per-section tables above and the CHANGELOG entry for the full enumeration.
+11. ~~**sd coverage closer — Rounds 1–8 (38 flags).**~~ ✅ Landed 2026-05-20. Perf/offload (Round 1), sampler/generation (Round 2), model-loading completers (Round 3), PhotoMaker bundle (Round 4), reference images (Round 5), hires-fix bundle (Round 6), cache/SCM bundle (Round 7), `--embd-dir` (Round 8). See the per-section tables above and the CHANGELOG entry for the full enumeration.
 12. ~~**whisper coverage closer — Batches 1–3 + VAD + offset/duration (22 flags).**~~ ✅ Landed 2026-05-20.
 
-Residual open items at the close of this audit cycle: sd cache/SCM family, sd `--embd-dir`, sd `--disable-image-metadata`, whisper `--grammar` family, whisper `--detect-language` + stereo `--diarize` (both wrapper logic), `chat --reasoning-budget` enforcement. None are high-impact; all are documented in their per-section tables with a sentence explaining why they were deferred or are out of scope.
+Residual open items at the close of this audit cycle: whisper `--grammar` family, whisper `--detect-language` + stereo `--diarize` (both wrapper logic). The prior `chat --reasoning-budget` enforcement gap was closed the same day — the integration turned out to be entirely upstream of `common_sampler_init`, not inside the sample loop. The prior sd `--disable-image-metadata` residual was reclassified 🚫 — chimera's stock `stb_image_write` doesn't embed any text chunks, so there is nothing to disable; a future "embed metadata" feature for parity with sd-cli's default is tracked as net-new functionality, not a port. None of the remaining open items are high-impact; all are documented in their per-section tables with a sentence explaining why they were deferred or are out of scope.

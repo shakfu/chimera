@@ -703,7 +703,21 @@ std::string sample_loop(
     return text;
 }
 
-common_sampler_ptr make_sampler(const llama_model * model, const LlamaCommonOptions & opts) {
+// Inputs needed by `common_sampler_init` to install the reasoning-budget
+// sampler in the chain. Empty thinking_end_tag (or budget < 0) disables
+// it — the chat callers populate these only when the active chat
+// template advertises thinking tags and the user passed --reasoning-budget.
+struct ReasoningBudgetParams {
+    const llama_vocab * vocab = nullptr;
+    std::string thinking_start_tag;
+    std::string thinking_end_tag;
+    int         budget         = -1;   // -1 = disabled
+    std::string budget_message;        // injected before the end tag when budget expires
+};
+
+common_sampler_ptr make_sampler(const llama_model *           model,
+                                const LlamaCommonOptions &    opts,
+                                const ReasoningBudgetParams & rbp = {}) {
     common_params_sampling sampling;
     sampling.seed = opts.seed;
     sampling.top_k = opts.top_k;
@@ -742,6 +756,30 @@ common_sampler_ptr make_sampler(const llama_model * model, const LlamaCommonOpti
             from_schema ? COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT
                         : COMMON_GRAMMAR_TYPE_USER,
             grammar_str);
+    }
+
+    // Reasoning-budget enforcement. common_sampler_init wires the budget
+    // sampler into the chain automatically when all four conditions hold:
+    // budget >= 0, reasoning_budget_start non-empty, reasoning_budget_end
+    // non-empty, and a vocab is reachable (vocab is consulted internally
+    // for UTF-8 boundary detection). We tokenize the chat-template's
+    // thinking tags here so the same loop handles activation, counting,
+    // and forced-termination — no chat_sample_loop restructure required.
+    if (rbp.budget >= 0 && rbp.vocab != nullptr && !rbp.thinking_end_tag.empty()) {
+        sampling.reasoning_budget_tokens = rbp.budget;
+        if (!rbp.thinking_start_tag.empty()) {
+            sampling.reasoning_budget_start =
+                common_tokenize(rbp.vocab, rbp.thinking_start_tag, /*add_special=*/false, /*parse_special=*/true);
+        }
+        sampling.reasoning_budget_end =
+            common_tokenize(rbp.vocab, rbp.thinking_end_tag, false, true);
+        // Forced sequence = optional budget-exhausted message + end tag.
+        // Mirrors llama-cli's tools/cli/cli.cpp construction so the
+        // generated stream ends cleanly inside the reasoning block.
+        sampling.reasoning_budget_forced =
+            common_tokenize(rbp.vocab,
+                            rbp.budget_message + rbp.thinking_end_tag,
+                            false, true);
     }
 
     common_sampler * sampler = common_sampler_init(model, sampling);
@@ -1175,19 +1213,6 @@ int command_chat(const LlamaCommonOptions & opts,
                  const ChatPersistence & persist_cfg = {}) {
     const bool color_on = apply_color_mode(color_mode);
 
-    // Honest no-op warning: --reasoning-budget is parsed into opts but
-    // requires chaining `common_reasoning_budget_init` into the sampler
-    // path, which means restructuring chat_sample_loop to apply samplers
-    // directly to the token-data array rather than via the opaque
-    // common_sampler_sample call. That rework is out of scope for now —
-    // flag a warning so the user isn't silently misled when they set it.
-    if (opts.reasoning_budget >= 0) {
-        std::cerr << "chimera: warning: --reasoning-budget is parsed but "
-                     "not yet enforced at the sampler level; the model "
-                     "will continue to think freely. See "
-                     "doc/dev/cli-api-coverage.md for status.\n";
-    }
-
     Spinner spinner;
     spinner.start("loading model...");
     auto model = load_llama_model(opts);
@@ -1223,7 +1248,39 @@ int command_chat(const LlamaCommonOptions & opts,
 
     auto ctx     = new_llama_context(model.get(), opts, /*min_prompt_tokens=*/0);
     auto loras   = load_loras(model.get(), ctx.get(), opts.lora_adapters);
-    auto sampler = make_sampler(model.get(), opts);
+
+    // Resolve the active chat template's thinking tags once, up-front,
+    // so we can install the reasoning-budget sampler inside the
+    // long-lived `sampler` below. The tags are template-fixed (not
+    // message-dependent) — common_chat_templates_apply populates
+    // chat_params.thinking_{start,end}_tag from the format, so a
+    // dummy single-user-message apply is sufficient to read them out.
+    // If the template doesn't advertise thinking tags (most non-
+    // reasoning models), the tags come back empty and make_sampler
+    // skips the budget wiring — matching the "no budget" path.
+    ReasoningBudgetParams rbp;
+    if (opts.reasoning_budget >= 0) {
+        common_chat_templates_inputs tpl_probe;
+        common_chat_msg probe_msg;
+        probe_msg.role    = "user";
+        probe_msg.content = "probe";
+        tpl_probe.messages.push_back(probe_msg);
+        tpl_probe.add_generation_prompt = true;
+        tpl_probe.use_jinja             = opts.use_jinja;
+        common_chat_params probe = common_chat_templates_apply(templates.get(), tpl_probe);
+        rbp.vocab              = vocab;
+        rbp.thinking_start_tag = probe.thinking_start_tag;
+        rbp.thinking_end_tag   = probe.thinking_end_tag;
+        rbp.budget             = opts.reasoning_budget;
+        rbp.budget_message     = opts.reasoning_budget_message;
+        if (probe.thinking_end_tag.empty()) {
+            std::cerr << "chimera: warning: --reasoning-budget set but the "
+                         "active chat template advertises no thinking tags; "
+                         "budget will be ignored (the budget sampler activates "
+                         "on the template-provided start tag).\n";
+        }
+    }
+    auto sampler = make_sampler(model.get(), opts, rbp);
     llama_memory_t mem = llama_get_memory(ctx.get());
 
     struct Media {
@@ -3219,6 +3276,10 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Per-tensor wtype override rules (sd.cpp's --tensor-type-rules syntax)");
     cmd->add_option("--photo-maker", p.sd_opts.photo_maker,
         "PhotoMaker model file (pair with --pm-id-images-dir at generate time)");
+    cmd->add_option("--embd-dir", p.sd_opts.embd_dir,
+        "Directory of textual-inversion embeddings to register at context init. "
+        "Non-recursive; only .gguf/.safetensors/.pt files are accepted; "
+        "the filename stem becomes the prompt token.");
     // Round 4 PhotoMaker generation bundle.
     cmd->add_option("--pm-id-images-dir", p.sd_opts.pm_id_images_dir,
         "Directory of reference identity images for PhotoMaker (non-recursive, alphabetical order). "
@@ -3258,6 +3319,22 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Denoising strength for the hires pass in [0,1]; -1 leaves sd's default (0.7)");
     cmd->add_option("--hires-upscale-tile-size", p.sd_opts.hires_upscale_tile_size,
         "Tile size used when running the upscaler (0 leaves sd's default of 128)");
+    // Cache / SCM bundle (sd_cache_params_t).
+    cmd->add_option("--cache-mode", p.sd_opts.cache_mode,
+        "Inference cache algorithm: disabled | easycache | ucache | dbcache | "
+        "taylorseer | cache-dit | spectrum (empty = sd's default disabled)")
+        ->check(CLI::IsMember({"disabled","easycache","ucache","dbcache","taylorseer","cache-dit","spectrum"}));
+    cmd->add_option("--cache-option", p.sd_opts.cache_option,
+        "Comma-separated 'key=value' overrides for the active --cache-mode. Keys: "
+        "threshold/start/end/decay/relative/reset (easycache/ucache), "
+        "threshold/Fn/Bn/warmup (dbcache/taylorseer/cache-dit), "
+        "w/m/lam/window/flex/warmup/stop (spectrum). Unknown keys / non-numeric "
+        "values exit with BadInput before model load.");
+    cmd->add_option("--scm-mask", p.sd_opts.scm_mask,
+        "Path to a sampler-cached-memory mask file (borrowed by sd_cache_params_t.scm_mask)");
+    cmd->add_option("--scm-policy", p.sd_opts.scm_policy,
+        "SCM policy: 'static' or 'dynamic' (empty = sd's default 'dynamic')")
+        ->check(CLI::IsMember({"static","dynamic"}));
     p.sd_cmd = cmd;
 }
 #endif

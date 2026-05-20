@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -123,7 +124,45 @@ struct GenerateRequest {
     int         hires_steps                = 0;
     float       hires_denoising_strength   = -1.0f;
     int         hires_upscale_tile_size    = 0;
+
+    // Parsed cache/SCM params. cache_mode_id mirrors sd_cache_mode_t as
+    // an int (-1 = "leave default", 0 = SD_CACHE_DISABLED, 1..6 =
+    // EASYCACHE/UCACHE/DBCACHE/TAYLORSEER/CACHE_DIT/SPECTRUM). NaN /
+    // -1 sentinels on the numeric fields mean "leave whichever value
+    // sd_cache_params_init wrote". scm_mask is borrowed by generate()
+    // into sd_cache_params_t.scm_mask for the duration of the call.
+    int   cache_mode_id          = -1;
+    float reuse_threshold        = std::numeric_limits<float>::quiet_NaN();
+    float residual_diff_threshold = std::numeric_limits<float>::quiet_NaN();
+    float start_percent          = std::numeric_limits<float>::quiet_NaN();
+    float end_percent            = std::numeric_limits<float>::quiet_NaN();
+    float error_decay_rate       = std::numeric_limits<float>::quiet_NaN();
+    int   use_relative_threshold = -1;  // -1 unset; 0 false; 1 true
+    int   reset_error_on_compute = -1;
+    int   Fn_compute_blocks      = -1;
+    int   Bn_compute_blocks      = -1;
+    int   max_warmup_steps       = -1;
+    int   spectrum_warmup_steps  = -1;
+    float spectrum_w             = std::numeric_limits<float>::quiet_NaN();
+    int   spectrum_m             = -1;
+    float spectrum_lam           = std::numeric_limits<float>::quiet_NaN();
+    int   spectrum_window_size   = -1;
+    float spectrum_flex_window   = std::numeric_limits<float>::quiet_NaN();
+    float spectrum_stop_percent  = std::numeric_limits<float>::quiet_NaN();
+    std::string scm_mask;
+    int   scm_policy_dynamic     = -1;  // -1 unset; 0 static; 1 dynamic
 };
+
+// Validate and parse the cache surface up-front so command_sd can fail
+// fast (before model load). Maps cache_mode string to a sd_cache_mode_t
+// id and parses cache_option's "key=value,..." string into the numeric
+// fields of GenerateRequest. Throws ChimeraError(BadInput) on any
+// invalid token. Empty strings are no-ops.
+void parse_cache_options(const std::string & cache_mode,
+                         const std::string & cache_option,
+                         const std::string & scm_mask,
+                         const std::string & scm_policy,
+                         GenerateRequest *   req);
 
 // ---- model lifecycle ---------------------------------------------------
 
@@ -149,6 +188,11 @@ struct LoadParams {
     std::string llm_vision;        // LLM-Vision encoder
     std::string tensor_type_rules; // per-tensor wtype override rules
     std::string photo_maker;       // PhotoMaker model
+    // Textual-inversion / embedding directory. load_model scans it
+    // non-recursively for .gguf / .safetensors / .pt files and registers
+    // each as a sd_embedding_t { name=stem, path=full } before calling
+    // new_sd_ctx. The names become the tokens addressable from prompts.
+    std::string embd_dir;
     bool        vae_decode_only       = true;
     bool        offload_to_cpu        = false;
     bool        diffusion_flash_attn  = false;
