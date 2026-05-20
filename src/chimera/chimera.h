@@ -263,6 +263,12 @@ struct SdOptions {
     std::string high_noise_diffusion_model; // optional second diffusion model for two-stage pairs
     std::string control_net;      // ControlNet model file
     std::string wtype;            // weights type override (f16, q8_0, ...)
+    // Round 3 model-loading completers. All optional; empty = unused.
+    std::string taesd;             // tiny-autoencoder (fast preview decode)
+    std::string clip_vision;       // CLIP-Vision encoder
+    std::string llm_vision;        // LLM-Vision encoder (Qwen-Image vision)
+    std::string tensor_type_rules; // per-tensor wtype overrides (sd's --tensor-type-rules)
+    std::string photo_maker;       // PhotoMaker model file
     std::string prompt;
     std::string negative_prompt;
     std::string output = "output.png";
@@ -314,6 +320,65 @@ struct SdOptions {
     int   vae_tile_size          = -1;    // absolute tile size (px); applied to both x and y
     float vae_relative_tile_size = -1.0f; // tile size as a fraction of the canvas; applied to both axes
     float vae_tile_overlap       = -1.0f; // fraction overlap between tiles
+
+    // Round 1 perf / offload knobs. All map 1:1 to sd_ctx_params_t fields
+    // with the same name (modulo flash_attn -> sd_ctx_params_t.flash_attn,
+    // distinct from the existing diffusion_fa -> diffusion_flash_attn).
+    // `flash_attn_global` is the generic global FA (sd_cli's `--fa`),
+    // separate from `diffusion_fa` which only flips the diffusion path.
+    // `max_vram` <= 0 leaves the upstream default in place.
+    bool  flash_attn_global         = false;
+    bool  no_mmap                   = false; // chimera defaults mmap ON (upstream is off); --no-mmap flips it
+    float max_vram                  = 0.0f;
+    bool  keep_clip_on_cpu          = false;
+    bool  keep_vae_on_cpu           = false;
+    bool  keep_control_net_on_cpu   = false;
+    bool  force_sdxl_vae_conv_scale = false;
+
+    // Round 2 sampler / generation core. Floats use < 0 sentinel
+    // because upstream defaults are INFINITY (img_cfg, eta) and the
+    // legitimate ranges are >= 0. shifted_timestep=0 already means
+    // "no shift" upstream so 0 doubles as the sentinel. `sigmas`
+    // is a comma-separated float list; empty = no custom schedule.
+    // `prediction` / `lora_apply_mode` are enum strings resolved
+    // via sd's str_to_* helpers; empty leaves the upstream default.
+    float       img_cfg_scale     = -1.0f;
+    float       eta               = -1.0f;
+    int         shifted_timestep  = 0;
+    std::string sigmas;
+    std::string prediction;
+    std::string lora_apply_mode;
+
+    // Round 4 PhotoMaker bundle. Paired with the --photo-maker model
+    // path above. pm_id_images_dir is scanned non-recursively for PNG /
+    // JPG / etc. (anything stb_image accepts); decoding order is
+    // alphabetical for determinism. pm_style_strength < 0 leaves the
+    // upstream default.
+    std::string pm_id_images_dir;
+    std::string pm_id_embed_path;
+    float       pm_style_strength = -1.0f;
+
+    // Round 5 reference images (repeatable; repeat the flag once per
+    // file). `--no-auto-resize-ref-image` flips sd's default of
+    // auto-resize ON to OFF.
+    std::vector<std::string> ref_images;
+    bool                     increase_ref_index           = false;
+    bool                     no_auto_resize_ref_image     = false;
+
+    // Round 6 hires-fix bundle. `--hires` is the toggle; everything
+    // else has a sentinel that leaves the upstream default in place
+    // (sd_hires_params_init: upscaler=Latent, scale=2.0, target_w/h=0,
+    // steps=0, denoising=0.7, tile=128). `hires_upscale_model` maps
+    // to sd_hires_params_t.model_path (paired with --hires-upscaler Model).
+    bool        hires_fix                  = false;
+    std::string hires_upscaler;            // see sd's hires_upscaler_to_str (e.g. "Latent", "Lanczos", "Model")
+    std::string hires_upscale_model;       // model file path for upscaler=Model
+    int         hires_width                = 0;
+    int         hires_height               = 0;
+    float       hires_scale                = -1.0f;
+    int         hires_steps                = 0;
+    float       hires_denoising_strength   = -1.0f;
+    int         hires_upscale_tile_size    = 0;
 };
 int command_sd(const SdOptions & opts);
 #endif

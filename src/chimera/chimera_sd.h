@@ -52,6 +52,13 @@ struct GenerateRequest {
     float strength    = 0.75f;  // only used when init is set (img2img)
     float guidance    = -1.0f;  // distilled guidance (Flux/SD3); -1 = upstream default
     float flow_shift  = -1.0f;  // Flux/SD3 timestep shift;       -1 = upstream default
+    float img_cfg_scale    = -1.0f; // sd_guidance_params_t.img_cfg; -1 = leave INFINITY (sd falls back to txt_cfg)
+    float eta              = -1.0f; // sd_sample_params_t.eta;       -1 = leave INFINITY
+    int   shifted_timestep = 0;     // sd_sample_params_t.shifted_timestep; 0 = no shift (upstream default)
+    // Optional custom sigma schedule. Borrowed by generate() into
+    // sd_sample_params_t.custom_sigmas for the duration of the call,
+    // so it must outlive the request. Empty = no custom schedule.
+    std::vector<float> custom_sigmas;
     std::string sample_method;  // empty -> SD default
     std::string scheduler;      // empty -> SD default
 
@@ -87,6 +94,35 @@ struct GenerateRequest {
     // Optional LoRA adapters applied during generation. Each entry's path
     // must already be resolved to a file the sd context can open.
     std::vector<LoraEntry> loras;
+
+    // Round 4 PhotoMaker. `pm_id_images` is borrowed (as sd_image_t) into
+    // sd_pm_params_t.id_images for the duration of the call, so the
+    // request must outlive generate(). Empty disables PM regardless of
+    // the other knobs. `pm_style_strength` < 0 leaves the upstream default.
+    std::vector<PixelImage> pm_id_images;
+    std::string             pm_id_embed_path;
+    float                   pm_style_strength = -1.0f;
+
+    // Round 5 reference images (style/identity conditioning). Same
+    // lifetime contract as the PM bundle above.
+    std::vector<PixelImage> ref_images;
+    bool                    increase_ref_index           = false;
+    bool                    disable_auto_resize_ref_image = false;
+
+    // Round 6 hires-fix. Disabled by default; the scalar sentinels
+    // (0 / -1) leave sd_hires_params_init's defaults in place.
+    // `hires_upscaler` is empty (= default Latent) unless the user
+    // picks a sd_hires_upscaler_t name (resolved by str_to_sd_hires_upscaler).
+    // `hires_upscale_model` is the file path used when upscaler=Model.
+    bool        hires_enabled              = false;
+    std::string hires_upscaler;
+    std::string hires_upscale_model;
+    int         hires_target_width         = 0;
+    int         hires_target_height        = 0;
+    float       hires_scale                = -1.0f;
+    int         hires_steps                = 0;
+    float       hires_denoising_strength   = -1.0f;
+    int         hires_upscale_tile_size    = 0;
 };
 
 // ---- model lifecycle ---------------------------------------------------
@@ -108,6 +144,11 @@ struct LoadParams {
     std::string high_noise_diffusion_model; // optional second diffusion model for two-stage pairs
     std::string control_net;      // ControlNet model file
     std::string wtype;            // weights type override (empty = upstream default)
+    std::string taesd;             // tiny-autoencoder
+    std::string clip_vision;       // CLIP-Vision encoder
+    std::string llm_vision;        // LLM-Vision encoder
+    std::string tensor_type_rules; // per-tensor wtype override rules
+    std::string photo_maker;       // PhotoMaker model
     bool        vae_decode_only       = true;
     bool        offload_to_cpu        = false;
     bool        diffusion_flash_attn  = false;
@@ -116,6 +157,24 @@ struct LoadParams {
     std::string rng_type;          // empty = upstream default; otherwise via str_to_rng_type
     std::string sampler_rng_type;  // empty = upstream default
     int         threads              = -1;
+
+    // Generic perf / offload (Round 1). flash_attn is the global FA
+    // toggle (sd_ctx_params_t.flash_attn); diffusion_flash_attn above
+    // only flips the diffusion path. enable_mmap defaults off upstream.
+    // max_vram <= 0 leaves the upstream default in place.
+    bool  flash_attn                = false;
+    bool  enable_mmap               = true;  // chimera default; CLI's --no-mmap maps to false
+    float max_vram                  = 0.0f;
+    bool  keep_clip_on_cpu          = false;
+    bool  keep_vae_on_cpu           = false;
+    bool  keep_control_net_on_cpu   = false;
+    bool  force_sdxl_vae_conv_scale = false;
+
+    // Enum-string knobs resolved via sd.cpp's str_to_* helpers. Empty
+    // leaves the upstream default in place; unknown values exit with
+    // BadInput from load_model.
+    std::string prediction;       // eps | v | edm_v | flow | flux_flow | flux2_flow
+    std::string lora_apply_mode;  // auto | immediately | at_runtime
 };
 
 // Loads a stable-diffusion model from a LoadParams. Returns an empty

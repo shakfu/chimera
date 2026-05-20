@@ -240,6 +240,42 @@ chimera sd -p "..." -o out.png \
     --diffusion-model flux1-dev.gguf --vae ae.safetensors \
     --t5xxl t5xxl_fp16.safetensors --clip-l clip_l.safetensors \
     --guidance 3.5 --flow-shift 1.15
+
+# Perf / VRAM control
+chimera sd -m sd.gguf -p "..." -o out.png \
+    --fa --max-vram 6.0                       # global flash-attn, soft 6 GiB cap
+chimera sd -m sd.gguf -p "..." -o out.png \
+    --clip-on-cpu --vae-on-cpu                # surgical per-component CPU offload
+chimera sd -m sd.gguf -p "..." -o out.png --no-mmap
+
+# Sampler / generation knobs
+chimera sd -m sd.gguf -p "..." -o out.png \
+    --eta 0.0 --timestep-shift 0 \
+    --img-cfg-scale 5.0                       # separate img-cond CFG (Flux/SD3)
+chimera sd -m sd.gguf -p "..." -o out.png \
+    --sigmas "14.6,10.0,5.0,1.0"              # custom sigma schedule
+chimera sd --diffusion-model flux1-dev.gguf -p "..." -o out.png \
+    --prediction flux_flow --lora-apply-mode at_runtime
+
+# Reference / PhotoMaker
+chimera sd -m sd.gguf -p "person on a beach" -o out.png \
+    --ref-image style1.png --ref-image style2.png \
+    --increase-ref-index
+chimera sd --diffusion-model flux1-dev.gguf -p "the same person, painting" -o out.png \
+    --photo-maker pm.safetensors \
+    --pm-id-images-dir ./id_images/ --pm-style-strength 0.7
+
+# TAESD fast-preview, alternate text/vision encoders
+chimera sd -m sd.gguf -p "..." -o out.png --taesd taesd.safetensors
+chimera sd --diffusion-model qwen-image.gguf -p "..." -o out.png \
+    --llm-vision qwen_vision.safetensors
+
+# Hires fix (2-pass: low-res sample then upscale + refine)
+chimera sd -m sd.gguf -p "..." -o out.png \
+    --hires --hires-scale 2.0 --hires-denoising-strength 0.5
+chimera sd -m sd.gguf -p "..." -o out.png \
+    --hires --hires-upscaler Model --upscale-model real-esrgan.pth \
+    --hires-width 1024 --hires-height 1024 --hires-steps 12
 ```
 
 ---

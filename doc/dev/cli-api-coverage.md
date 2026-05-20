@@ -17,6 +17,8 @@ Status legend: ✅ exposed · 🔀 renamed · 🟡 partial · ❌ missing · �
 > **Whisper coverage closer 2026-05-20:** the remaining whisper gaps flagged below — VAD bundle, offset/duration, segment shaping, decoder-fail thresholds, audio-ctx, tinydiarize, token suppression, context-params (`--flash-attn` / `--no-gpu` / `--device`), and `--processors` — all landed on `whisper`. The whisper table rows are flipped to ✅ in-place; the "Notable gaps worth filing" list is now empty save for the documented out-of-scope items.
 >
 > **sd partial:** skip-layer guidance + the `--high-noise-diffusion-model` model-loading slot landed; the rest of the `--high-noise-*` family stays out of scope (video-only).
+>
+> **sd coverage closer 2026-05-20 (Rounds 1–6):** 33 additional flags landed — perf/offload (`--fa`, `--no-mmap`, `--max-vram`, per-component CPU offload, SDXL VAE fix), sampler/generation (`--img-cfg-scale`, `--eta`, `--timestep-shift`, `--sigmas`, `--prediction`, `--lora-apply-mode`), model-loading (`--taesd`, `--clip-vision`, `--llm-vision`, `--tensor-type-rules`, `--photo-maker`), PhotoMaker bundle (`--pm-id-images-dir`/`--pm-id-embed-path`/`--pm-style-strength`), reference images (`--ref-image` + supporting flags), and the full hires-fix bundle. Tables below are flipped to ✅ in-place. Cache/SCM, `--embd-dir`, and `--disable-image-metadata` are the documented residual gaps; everything else is out-of-scope (video, standalone modes, shell features, chroma/qwen tuning).
 
 ---
 
@@ -28,11 +30,11 @@ Status legend: ✅ exposed · 🔀 renamed · 🟡 partial · ❌ missing · �
 | `chat` (llama-cli, interactive) | ~85 | 37 | 0 | ~2 | ~55 |
 | `embed` (llama-embedding) | ~14 | 12 | 1 | 1 | 1 |
 | `whisper` (whisper-cli) | 58 | 41 | 1 | ~3 | ~13 |
-| `sd` (sd cli) | 107 | 22 | 6 | ~30 | ~50 |
+| `sd` (sd cli) | 107 | 55 | 6 | ~5 | ~50 |
 
 "Real gaps" are flags whose absence we'd consider filing an issue for. "Deliberately out of scope" covers things like llama-cli's REPL plumbing (chimera replaces it with `chat`), perplexity/imatrix/training knobs, anything tied solely to llama-server, and obscure research/debug flags. The next two columns of the per-subcommand tables make each call individually.
 
-The headline finding is that **the sd surface is still by far the largest source of meaningful gaps** — even after landing the model-loading family, SLG, and `--high-noise-diffusion-model`, ~25 generation-side flags (img-CFG, sigmas, eta, hires-fix, PhotoMaker, full high-noise sampler family, CPU-offload selectivity, etc.) remain unexposed. The llama coverage is intentionally minimal — chimera leans on its own DSL (`chat` REPL, `serve` HTTP) and the wrapped subcommands are deliberately thin. The whisper surface, previously the most "leaky" relative to size, is now ~73% covered after the 2026-05-20 closer (Batches 1–3 + VAD + offset/duration); residual gaps are constrained-decoding (`--grammar` family) and wrapper-logic features (`--detect-language` exit-after-detect, stereo `--diarize`).
+The headline finding from the original audit — "**the sd surface is by far the largest source of meaningful gaps**" — no longer applies. After the 2026-05-20 sd closer (Rounds 1–6, 33 additional flags on top of the earlier Tier 1–2 work), the residual sd gaps are: the cache/SCM family (~20 sub-knobs in `sd_cache_params_t`, needs a CLI-shape design choice), `--embd-dir` (textual-inversion directory build), and `--disable-image-metadata` (chimera's PNG writer side). Everything else is documented out-of-scope (video, standalone modes, shell features). The llama coverage is intentionally minimal — chimera leans on its own DSL (`chat` REPL, `serve` HTTP) and the wrapped subcommands are deliberately thin. The whisper surface, previously the most "leaky" relative to size, is now ~73% covered after the 2026-05-20 closer (Batches 1–3 + VAD + offset/duration); residual gaps are constrained-decoding (`--grammar` family) and wrapper-logic features (`--detect-language` exit-after-detect, stereo `--diarize`).
 
 ---
 
@@ -263,19 +265,19 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--diffusion-model` | `--diffusion-model` | ✅ | Landed in the audit that prompted this report. |
 | `--high-noise-diffusion-model` | `--high-noise-diffusion-model` | ✅ | Landed 2026-05-20. Model-loading slot only; the full `--high-noise-*` sampler family is video-only and stays out of scope (chimera-sd is img_gen-only). |
 | `--vae` | `--vae` | ✅ | |
-| `--taesd` / `--tae` | — | ❌ | Tiny-AutoEncoder fast decode. **Worth filing**, low cost. |
+| `--taesd` / `--tae` | `--taesd` | ✅ | Landed 2026-05-20. TAESD fast preview decode. Single `--taesd` (no `--tae` alias). |
 | `--clip_l` | `--clip-l` | 🔀 | **Naming drift.** Upstream uses underscore; chimera uses kebab. Stay with kebab in chimera (project convention) but document. |
 | `--clip_g` | `--clip-g` | 🔀 | Landed 2026-05-20. Naming drift (kebab vs underscore) tracked above. |
-| `--clip_vision` | — | ❌ | |
+| `--clip_vision` | `--clip-vision` | 🔀 | Landed 2026-05-20. Kebab-cased per chimera convention. |
 | `--t5xxl` | `--t5xxl` | ✅ | |
 | `--llm` | `--llm` | ✅ | Z-Image text encoder. |
-| `--llm_vision` / `--qwen2vl` / `--qwen2vl_vision` | — | ❌/🚫 | `--qwen2vl` is a deprecated alias of `--llm`; safe to skip. `--llm_vision` may matter for vision-conditioning Qwen-Image. |
+| `--llm_vision` / `--qwen2vl` / `--qwen2vl_vision` | `--llm-vision` (others 🚫) | 🟡 | `--llm-vision` landed 2026-05-20 (kebab). `--qwen2vl` is a deprecated alias of `--llm`; safe to skip. `--qwen2vl_vision` not modeled here. |
 | `--control-net` | `--control-net` | ✅ | Landed 2026-05-20. Wired into `sd_ctx_params_t.control_net_path`. `--control-image` requires this. |
-| `--embd-dir` | — | ❌ | Textual-inversion / embedding directory. |
+| `--embd-dir` | — | ❌ | Textual-inversion / embedding directory. Deferred — needs the `sd_embedding_t[]` build path. |
 | `--lora-model-dir` | `--lora-model-dir` | ✅ | Landed 2026-05-20. Base directory used to resolve relative `--lora` paths (chimera-side; sd.cpp's C API takes resolved paths in `sd_lora_t`). |
-| `--photo-maker` | — | ❌ | PhotoMaker checkpoint. |
-| `--upscale-model` / `--hires-upscalers-dir` | — | ❌ | Upscaler integration. |
-| `--tensor-type-rules` | — | ❌ | |
+| `--photo-maker` | `--photo-maker` | ✅ | Landed 2026-05-20. Model path only; paired with the PhotoMaker generation bundle below. |
+| `--upscale-model` / `--hires-upscalers-dir` | `--upscale-model` (hires-upscalers-dir 🚫) | 🟡 | `--upscale-model` landed 2026-05-20 (sd_hires_params_t.model_path, used with `--hires-upscaler Model`). `--hires-upscalers-dir` is sd-cli-shell-only directory scan — out of scope. |
+| `--tensor-type-rules` | `--tensor-type-rules` | ✅ | Landed 2026-05-20. Per-tensor wtype override. |
 | `--type` | `--type` | ✅ | Landed 2026-05-20. Maps to `sd_ctx_params_t.wtype` via `str_to_sd_type`; unknown values exit with `BadInput`. |
 
 ### Coverage table — perf / offload
@@ -284,13 +286,13 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 |---|---|---|---|
 | `--threads` | `-t,--threads` | ✅ | |
 | `--offload-to-cpu` | `--offload-to-cpu` | ✅ | Landed in audit. |
-| `--max-vram` | — | ❌ | VRAM cap. |
-| `--mmap` | — | ❌ | |
-| `--fa` | — | ❌ | Global flash-attn (not just diffusion). |
+| `--max-vram` | `--max-vram` | ✅ | Landed 2026-05-20. Soft VRAM cap in GiB; `0` leaves the upstream default. |
+| `--mmap` | `--no-mmap` | 🔀 | Landed 2026-05-20 with inverted polarity. Chimera defaults `enable_mmap=true` (sd's upstream default is off), so `--no-mmap` is the opt-out — mirrors the llama-side flag. |
+| `--fa` | `--fa` | ✅ | Landed 2026-05-20. Global flash-attn (sd_ctx_params_t.flash_attn); distinct from `--diffusion-fa` which only flips the diffusion path. |
 | `--diffusion-fa` | `--diffusion-fa` | ✅ | Landed in audit. |
 | `--diffusion-conv-direct` / `--vae-conv-direct` | same | ✅ | Landed 2026-05-20. Map directly to `sd_ctx_params_t.{diffusion,vae}_conv_direct`. |
-| `--clip-on-cpu` / `--vae-on-cpu` / `--control-net-cpu` | — | ❌ | Selective CPU offload (more surgical than `--offload-to-cpu`). |
-| `--force-sdxl-vae-conv-scale` | — | ❌ | SDXL-VAE numerics fix. |
+| `--clip-on-cpu` / `--vae-on-cpu` / `--control-net-cpu` | same | ✅ | Landed 2026-05-20. Per-component CPU offload — more surgical than `--offload-to-cpu`. |
+| `--force-sdxl-vae-conv-scale` | `--force-sdxl-vae-conv-scale` | ✅ | Landed 2026-05-20. SDXL VAE conv-scale numerics fix. |
 
 ### Coverage table — sampler / scheduler / generation core
 
@@ -304,17 +306,17 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--batch-count` | `-b,--batch-count` | ✅ | |
 | `--seed` | `--seed` | ✅ | |
 | `--cfg-scale` | `--cfg-scale` | ✅ | |
-| `--img-cfg-scale` | — | ❌ | Separate img-cond CFG (Flux). |
+| `--img-cfg-scale` | `--img-cfg-scale` | ✅ | Landed 2026-05-20. Sentinel `-1` leaves the upstream INFINITY default so sd falls back to `--cfg-scale`. |
 | `--guidance` | `--guidance` | ✅ | Landed 2026-05-20. Maps to `sd_sample_params_t.guidance.distilled_guidance`; `-1` sentinel leaves upstream default. |
 | `--clip-skip` | `--clip-skip` | ✅ | |
 | `--sampling-method` | `--sample-method` | 🔀 | Naming drift (`sampling` vs `sample`). Document. |
 | `--scheduler` | `--scheduler` | ✅ | |
-| `--sigmas` | — | ❌ | Custom sigma schedule. |
+| `--sigmas` | `--sigmas` | ✅ | Landed 2026-05-20. Comma-separated float list (e.g. `"14.6,10.0,5.0,1.0"`); non-float entries exit with `BadInput`; the parsed `std::vector<float>` is borrowed into `sd_sample_params_t.custom_sigmas` for the duration of `generate_image`. |
 | `--rng` / `--sampler-rng` | same | ✅ | Landed 2026-05-20. Resolved via `str_to_rng_type`; `--sampler-rng cpu` matches ComfyUI seeds. |
-| `--prediction` | — | ❌ | epsilon / v-prediction override. |
-| `--eta` | — | ❌ | DDIM-style stochasticity. |
+| `--prediction` | `--prediction` | ✅ | Landed 2026-05-20. Enum string resolved via `str_to_prediction`: `eps`/`v`/`edm_v`/`flow`/`flux_flow`/`flux2_flow`. CLI11-validated. |
+| `--eta` | `--eta` | ✅ | Landed 2026-05-20. DDIM-style stochasticity in `[0,1]`; sentinel `-1` leaves the upstream INFINITY default. |
 | `--flow-shift` | `--flow-shift` | ✅ | Landed 2026-05-20. Maps to `sd_sample_params_t.flow_shift`. |
-| `--timestep-shift` | — | ❌ | |
+| `--timestep-shift` | `--timestep-shift` | ✅ | Landed 2026-05-20. Maps to `sd_sample_params_t.shifted_timestep`; `0` = no shift (upstream default). |
 | `--moe-boundary` | — | ❌ | High-noise/low-noise MoE boundary. |
 | `--slg-scale` / `--skip-layer-start` / `--skip-layer-end` / `--skip-layers` | same | ✅ | Landed 2026-05-20. `--skip-layers` parses a comma-separated int list into `sd_slg_params_t.layers`; empty disables SLG regardless of the other knobs; non-integer tokens fail with `BadInput`. Scalars use `-1.0f` sentinels. |
 | `--high-noise-*` (cfg-scale, img-cfg-scale, guidance, slg-scale, skip-layer-start/end, eta, sampling-method, skip-layers, steps) | — | ❌ | Entire high-noise group missing (pairs with `--high-noise-diffusion-model`). |
@@ -330,15 +332,15 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--control-strength` | `--control-strength` | ✅ | Landed 2026-05-20. Default 0.9; only used with `--control-image`. |
 | `--control-video` | — | 🚫 | Video-only; chimera-sd is image-only today. |
 | `--strength` | `--strength` | ✅ | |
-| `--ref-image` | — | ❌ | Reference image (style/identity). |
-| `--pm-id-images-dir` / `--pm-id-embed-path` / `--pm-style-strength` | — | ❌ | PhotoMaker — bundle with `--photo-maker`. |
+| `--ref-image` | `--ref-image` | ✅ | Landed 2026-05-20. Repeatable; each entry is decoded to RGB and borrowed into `sd_img_gen_params_t.ref_images`. Companion flags `--increase-ref-index` and `--no-auto-resize-ref-image` also landed (chimera inverts sd's auto-resize default-on into an opt-out). |
+| `--pm-id-images-dir` / `--pm-id-embed-path` / `--pm-style-strength` | same | ✅ | Landed 2026-05-20. `--pm-id-images-dir` scans the directory non-recursively in alphabetical order; non-image entries are skipped, an empty result is `BadInput`. Decoded images are borrowed into `sd_pm_params_t.id_images`. |
 
 ### Coverage table — hires fix / VAE tiling
 
 | Upstream flag | Chimera | Status | Notes |
 |---|---|---|---|
-| `--hires` | — | ❌ | Hires-fix toggle. **Worth filing** — popular feature. |
-| `--hires-upscaler` / `--hires-width` / `--hires-height` / `--hires-steps` / `--hires-scale` / `--hires-denoising-strength` / `--hires-upscale-tile-size` | — | ❌ | Whole hires-fix family. Bundle with `--hires`. |
+| `--hires` | `--hires` | ✅ | Landed 2026-05-20. Toggles `sd_hires_params_t.enabled`. |
+| `--hires-upscaler` / `--hires-width` / `--hires-height` / `--hires-steps` / `--hires-scale` / `--hires-denoising-strength` / `--hires-upscale-tile-size` | same | ✅ | Landed 2026-05-20. `--hires-upscaler` is the enum-string match against `hires_upscaler_to_str` (`None`/`Latent`/`Latent (nearest)`/`Latent (nearest-exact)`/`Latent (antialiased)`/`Latent (bicubic)`/`Latent (bicubic antialiased)`/`Lanczos`/`Nearest`/`Model`); values with spaces must be quoted at the shell. Scalar sentinels (`0` for ints, `-1` for floats) leave `sd_hires_params_init`'s defaults (scale=2.0, denoising=0.7, tile=128) untouched. `--upscale-model` (table above) provides the file path for `--hires-upscaler Model`. |
 | `--vae-tiling` | `--vae-tiling` | ✅ | Landed 2026-05-20. Enables `sd_img_gen_params_t.vae_tiling_params.enabled`. |
 | `--vae-tile-size` / `--vae-relative-tile-size` / `--vae-tile-overlap` | same | ✅ | Landed 2026-05-20. Sentinels (`-1`) leave the upstream default; otherwise applied symmetrically to both axes. |
 | `--upscale-repeats` / `--upscale-tile-size` | — | ❌ | Standalone upscale mode. |
@@ -350,8 +352,8 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--video-frames` / `--fps` | — | 🚫 | Video mode out of scope for chimera-sd today (sd-cli has `vid_gen` mode). |
 | `--vace-strength` / `--increase-ref-index` / `--disable-auto-resize-ref-image` | — | 🚫 | Video / VACE. |
 | `--cache-mode` / `--cache-option` | — | ❌ | Intermediate-tensor cache (perf). |
-| `--scm-mask` / `--scm-policy` | — | ❌ | Sampler-cached-memory. |
-| `--lora-apply-mode` | — | ❌ | |
+| `--scm-mask` / `--scm-policy` | — | ❌ | Sampler-cached-memory. Deferred — bundled with the cache_params surface. |
+| `--lora-apply-mode` | `--lora-apply-mode` | ✅ | Landed 2026-05-20. Enum string via `str_to_lora_apply_mode`: `auto`/`immediately`/`at_runtime`. CLI11-validated. |
 | `--circular` / `--circularx` / `--circulary` | — | 🚫 | Seamless-tile output; niche. |
 | `--chroma-t5-mask-pad` / `--chroma-disable-dit-mask` / `--chroma-enable-t5-mask` / `--qwen-image-zero-cond-t` | — | 🚫 | Model-specific tuning; advanced. |
 | `--disable-image-metadata` | — | ❌ | Strip metadata from PNG; reasonable to add. |
@@ -369,6 +371,18 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 6. ~~**Sampler-RNG / `--rng`**~~ ✅ Landed 2026-05-20.
 7. ~~**`--lora-model-dir`**~~ ✅ Landed 2026-05-20 alongside `--lora <path[:scale]>` (repeatable). Note: prompt-side `<lora:foo:0.8>` extraction is **not** wired yet — `--lora` takes explicit paths. Follow-up.
 8. ~~**`--type`**~~ ✅ Landed 2026-05-20.
+9. ~~**Perf/offload bundle** (`--fa`, `--no-mmap`, `--max-vram`, `--clip-on-cpu`, `--vae-on-cpu`, `--control-net-cpu`, `--force-sdxl-vae-conv-scale`).~~ ✅ Landed 2026-05-20 (Round 1 of the closer).
+10. ~~**Sampler/generation core** (`--img-cfg-scale`, `--eta`, `--timestep-shift`, `--sigmas`, `--prediction`, `--lora-apply-mode`).~~ ✅ Landed 2026-05-20 (Round 2).
+11. ~~**Model-loading completers** (`--taesd`, `--clip-vision`, `--llm-vision`, `--tensor-type-rules`, `--photo-maker`).~~ ✅ Landed 2026-05-20 (Round 3).
+12. ~~**PhotoMaker bundle** (`--pm-id-images-dir`, `--pm-id-embed-path`, `--pm-style-strength`).~~ ✅ Landed 2026-05-20 (Round 4).
+13. ~~**Reference images** (`--ref-image`, `--increase-ref-index`, `--no-auto-resize-ref-image`).~~ ✅ Landed 2026-05-20 (Round 5).
+14. ~~**Hires-fix bundle** (`--hires`, `--hires-upscaler`, `--upscale-model`, `--hires-width/height/scale/steps/denoising-strength/upscale-tile-size`).~~ ✅ Landed 2026-05-20 (Round 6).
+
+Remaining open (lower priority, deferred from this closer):
+
+- **Cache/SCM family** (`--cache-mode`, `--cache-option`, `--scm-mask`, `--scm-policy` plus ~20 sub-knobs in `sd_cache_params_t`) — needs a CLI-shape design choice rather than a mechanical port; few users have asked.
+- **`--embd-dir`** (textual-inversion directory) — needs the `sd_embedding_t[]` build path.
+- **`--disable-image-metadata`** — chimera's PNG writer side, not an `sd_*` param.
 
 ### Deliberately omitted
 
@@ -390,7 +404,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 
 ### 2. Flags chimera handles inconsistently across the three subcommands
 
-- ~~**`--flash-attn`** — exists in upstream llama-cli, whisper-cli, *and* sd-cpp; not exposed in any of chimera's subcommands.~~ ✅ Landed on `gen`/`chat`/`embed` and `whisper` (2026-05-20). On `sd`, `--diffusion-fa` exists (sd-internal); the generic global `--fa` is still ❌.
+- ~~**`--flash-attn`** — exists in upstream llama-cli, whisper-cli, *and* sd-cpp; not exposed in any of chimera's subcommands.~~ ✅ Landed everywhere (2026-05-20): `--flash-attn` on `gen`/`chat`/`embed` and `whisper`; on `sd`, both `--diffusion-fa` (sd-internal) and the generic global `--fa` are now exposed.
 - **`--lora`** — exposed in `serve` but not in `gen`/`chat`/`embed`/`sd`. The asymmetry is a footgun.
 - **Output formatting** — `embed` lacks `--embd-output-format`, `whisper` lacks `-oj/-osrt/-ovtt`. Both subcommands' output stories are unevenly developed compared to upstream.
 
@@ -420,3 +434,7 @@ In priority order (highest user impact first). Items struck through landed on 20
 8. ~~**whisper: `--prompt` + decoding-strategy basics** (`--beam-size`, `--best-of`, `--temperature`, `--no-fallback`).~~ ✅ Landed 2026-05-20.
 9. ~~**sd: `--lora`, `--lora-model-dir`, `--clip_g`, `--type`**~~ ✅ Landed 2026-05-20.
 10. ~~**embed: `--embd-output-format` + `--embd-separator` + `--attention`**~~ ✅ Landed 2026-05-20 (also `--pooling rank`).
+11. ~~**sd coverage closer — Rounds 1–6 (33 flags).**~~ ✅ Landed 2026-05-20. Perf/offload (Round 1), sampler/generation (Round 2), model-loading completers (Round 3), PhotoMaker bundle (Round 4), reference images (Round 5), hires-fix bundle (Round 6). See the per-section tables above and the CHANGELOG entry for the full enumeration.
+12. ~~**whisper coverage closer — Batches 1–3 + VAD + offset/duration (22 flags).**~~ ✅ Landed 2026-05-20.
+
+Residual open items at the close of this audit cycle: sd cache/SCM family, sd `--embd-dir`, sd `--disable-image-metadata`, whisper `--grammar` family, whisper `--detect-language` + stereo `--diarize` (both wrapper logic), `chat --reasoning-budget` enforcement. None are high-impact; all are documented in their per-section tables with a sentence explaining why they were deferred or are out of scope.

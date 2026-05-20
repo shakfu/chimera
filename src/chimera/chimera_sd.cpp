@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -133,13 +134,26 @@ SdContextPtr load_model(const LoadParams & params) {
     ctx_params.t5xxl_path            = cstr(params.t5xxl);
     ctx_params.llm_path              = cstr(params.llm);
     ctx_params.control_net_path      = cstr(params.control_net);
+    ctx_params.taesd_path            = cstr(params.taesd);
+    ctx_params.clip_vision_path      = cstr(params.clip_vision);
+    ctx_params.llm_vision_path       = cstr(params.llm_vision);
+    ctx_params.tensor_type_rules     = cstr(params.tensor_type_rules);
+    ctx_params.photo_maker_path      = cstr(params.photo_maker);
     ctx_params.n_threads             = params.threads;
-    ctx_params.enable_mmap           = true;
+    ctx_params.enable_mmap           = params.enable_mmap;
     ctx_params.vae_decode_only       = params.vae_decode_only;
     ctx_params.offload_params_to_cpu = params.offload_to_cpu;
     ctx_params.diffusion_flash_attn  = params.diffusion_flash_attn;
     ctx_params.diffusion_conv_direct = params.diffusion_conv_direct;
     ctx_params.vae_conv_direct       = params.vae_conv_direct;
+    ctx_params.flash_attn               = params.flash_attn;
+    ctx_params.keep_clip_on_cpu         = params.keep_clip_on_cpu;
+    ctx_params.keep_vae_on_cpu          = params.keep_vae_on_cpu;
+    ctx_params.keep_control_net_on_cpu  = params.keep_control_net_on_cpu;
+    ctx_params.force_sdxl_vae_conv_scale = params.force_sdxl_vae_conv_scale;
+    if (params.max_vram > 0.0f) {
+        ctx_params.max_vram = params.max_vram;
+    }
     auto parse_rng = [](const std::string & name, const char * flag) -> rng_type_t {
         const rng_type_t t = str_to_rng_type(name.c_str());
         if (t == RNG_TYPE_COUNT) {
@@ -163,6 +177,24 @@ SdContextPtr load_model(const LoadParams & params) {
                  " (expected one of f16/f32/bf16/q8_0/q5_1/q5_0/q4_1/q4_0/q4_k/q3_k/q2_k/iq4_nl/...)");
         }
         ctx_params.wtype = wt;
+    }
+    if (!params.prediction.empty()) {
+        const prediction_t pt = str_to_prediction(params.prediction.c_str());
+        if (pt == PREDICTION_COUNT) {
+            fail(ExitCode::BadInput,
+                 "unknown --prediction value: " + params.prediction +
+                 " (expected eps, v, edm_v, flow, flux_flow, or flux2_flow)");
+        }
+        ctx_params.prediction = pt;
+    }
+    if (!params.lora_apply_mode.empty()) {
+        const lora_apply_mode_t lm = str_to_lora_apply_mode(params.lora_apply_mode.c_str());
+        if (lm == LORA_APPLY_MODE_COUNT) {
+            fail(ExitCode::BadInput,
+                 "unknown --lora-apply-mode value: " + params.lora_apply_mode +
+                 " (expected auto, immediately, or at_runtime)");
+        }
+        ctx_params.lora_apply_mode = lm;
     }
 
     SdContextPtr ctx(new_sd_ctx(&ctx_params));
@@ -282,6 +314,16 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
     gp.sample_params.guidance.txt_cfg = req.cfg_scale;
     if (req.guidance   >= 0.0f) gp.sample_params.guidance.distilled_guidance = req.guidance;
     if (req.flow_shift >= 0.0f) gp.sample_params.flow_shift                   = req.flow_shift;
+    if (req.img_cfg_scale >= 0.0f) gp.sample_params.guidance.img_cfg = req.img_cfg_scale;
+    if (req.eta            >= 0.0f) gp.sample_params.eta             = req.eta;
+    if (req.shifted_timestep  > 0)  gp.sample_params.shifted_timestep = req.shifted_timestep;
+    if (!req.custom_sigmas.empty()) {
+        // Borrowed for the duration of generate_image; request outlives this call.
+        gp.sample_params.custom_sigmas       =
+            const_cast<float *>(req.custom_sigmas.data());
+        gp.sample_params.custom_sigmas_count =
+            static_cast<int>(req.custom_sigmas.size());
+    }
     gp.sample_params.sample_method = req.sample_method.empty()
         ? SAMPLE_METHOD_COUNT
         : str_to_sample_method(req.sample_method.c_str());
@@ -325,6 +367,40 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
         gp.control_strength = req.control_strength;
     }
 
+    // PhotoMaker. id_images borrows from req.pm_id_images for the
+    // duration of generate_image; keep the sd_image_t vector on this
+    // stack frame so it outlives the call. Empty pm_id_images disables
+    // PM regardless of id_embed_path / style_strength.
+    std::vector<sd_image_t> pm_id_imgs_sd;
+    if (!req.pm_id_images.empty()) {
+        pm_id_imgs_sd.reserve(req.pm_id_images.size());
+        for (const auto & img : req.pm_id_images) {
+            pm_id_imgs_sd.push_back(pixel_image_to_sd(img));
+        }
+        gp.pm_params.id_images       = pm_id_imgs_sd.data();
+        gp.pm_params.id_images_count = static_cast<int>(pm_id_imgs_sd.size());
+        if (!req.pm_id_embed_path.empty()) {
+            gp.pm_params.id_embed_path = req.pm_id_embed_path.c_str();
+        }
+        if (req.pm_style_strength >= 0.0f) {
+            gp.pm_params.style_strength = req.pm_style_strength;
+        }
+    }
+
+    // Reference images. Same lifetime contract as PM above.
+    std::vector<sd_image_t> ref_imgs_sd;
+    if (!req.ref_images.empty()) {
+        ref_imgs_sd.reserve(req.ref_images.size());
+        for (const auto & img : req.ref_images) {
+            ref_imgs_sd.push_back(pixel_image_to_sd(img));
+        }
+        gp.ref_images       = ref_imgs_sd.data();
+        gp.ref_images_count = static_cast<int>(ref_imgs_sd.size());
+    }
+    gp.increase_ref_index    = req.increase_ref_index;
+    // sd defaults auto_resize_ref_image to true; CLI flag flips it off.
+    gp.auto_resize_ref_image = !req.disable_auto_resize_ref_image;
+
     if (!req.skip_layers.empty()) {
         // sd_slg_params_t.layers borrows the int* buffer from the
         // request for the duration of generate_image; the request
@@ -335,6 +411,32 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
         if (req.slg_scale         >= 0.0f) gp.sample_params.guidance.slg.scale       = req.slg_scale;
         if (req.skip_layer_start  >= 0.0f) gp.sample_params.guidance.slg.layer_start = req.skip_layer_start;
         if (req.skip_layer_end    >= 0.0f) gp.sample_params.guidance.slg.layer_end   = req.skip_layer_end;
+    }
+
+    if (req.hires_enabled) {
+        gp.hires.enabled = true;
+        if (!req.hires_upscaler.empty()) {
+            const sd_hires_upscaler_t u =
+                str_to_sd_hires_upscaler(req.hires_upscaler.c_str());
+            if (u == SD_HIRES_UPSCALER_COUNT) {
+                fail(ExitCode::BadInput,
+                     "unknown --hires-upscaler value: " + req.hires_upscaler +
+                     " (expected one of None / Latent / Latent (nearest|nearest-exact|antialiased|bicubic|"
+                     "bicubic antialiased) / Lanczos / Nearest / Model)");
+            }
+            gp.hires.upscaler = u;
+        }
+        // model_path is borrowed from req; request outlives generate_image.
+        if (!req.hires_upscale_model.empty()) {
+            gp.hires.model_path = req.hires_upscale_model.c_str();
+        }
+        if (req.hires_scale > 0.0f)              gp.hires.scale              = req.hires_scale;
+        if (req.hires_target_width > 0)          gp.hires.target_width       = req.hires_target_width;
+        if (req.hires_target_height > 0)         gp.hires.target_height      = req.hires_target_height;
+        if (req.hires_steps > 0)                 gp.hires.steps              = req.hires_steps;
+        if (req.hires_denoising_strength >= 0.0f)
+            gp.hires.denoising_strength = req.hires_denoising_strength;
+        if (req.hires_upscale_tile_size > 0)     gp.hires.upscale_tile_size  = req.hires_upscale_tile_size;
     }
 
     if (req.vae_tiling) {
@@ -461,6 +563,11 @@ int command_sd(const SdOptions & opts) {
     lp.high_noise_diffusion_model = opts.high_noise_diffusion_model;
     lp.control_net          = opts.control_net;
     lp.wtype                = opts.wtype;
+    lp.taesd                = opts.taesd;
+    lp.clip_vision          = opts.clip_vision;
+    lp.llm_vision           = opts.llm_vision;
+    lp.tensor_type_rules    = opts.tensor_type_rules;
+    lp.photo_maker          = opts.photo_maker;
     lp.vae_decode_only      = !need_encode;
     lp.offload_to_cpu        = opts.offload_to_cpu;
     lp.diffusion_flash_attn  = opts.diffusion_fa;
@@ -469,6 +576,15 @@ int command_sd(const SdOptions & opts) {
     lp.rng_type              = opts.rng;
     lp.sampler_rng_type      = opts.sampler_rng;
     lp.threads               = opts.threads;
+    lp.flash_attn                = opts.flash_attn_global;
+    lp.enable_mmap               = !opts.no_mmap;
+    lp.max_vram                  = opts.max_vram;
+    lp.keep_clip_on_cpu          = opts.keep_clip_on_cpu;
+    lp.keep_vae_on_cpu           = opts.keep_vae_on_cpu;
+    lp.keep_control_net_on_cpu   = opts.keep_control_net_on_cpu;
+    lp.force_sdxl_vae_conv_scale = opts.force_sdxl_vae_conv_scale;
+    lp.prediction                = opts.prediction;
+    lp.lora_apply_mode           = opts.lora_apply_mode;
     auto ctx = chimera_sd::load_model(lp);
     if (!ctx) {
         const std::string & shown = opts.model.empty() ? opts.diffusion_model : opts.model;
@@ -491,6 +607,33 @@ int command_sd(const SdOptions & opts) {
     req.scheduler        = opts.scheduler;
     req.guidance         = opts.guidance;
     req.flow_shift       = opts.flow_shift;
+    req.img_cfg_scale    = opts.img_cfg_scale;
+    req.eta              = opts.eta;
+    req.shifted_timestep = opts.shifted_timestep;
+    // Parse --sigmas "0.1,0.2,..." into the float vector for the custom
+    // schedule. Same lifetime contract as --skip-layers above; non-float
+    // entries fail with BadInput so a typo doesn't silently disable the
+    // override.
+    if (!opts.sigmas.empty()) {
+        const std::string & s = opts.sigmas;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t comma = s.find(',', pos);
+            std::string tok = s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.front()))) tok.erase(tok.begin());
+            while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.back())))  tok.pop_back();
+            if (!tok.empty()) {
+                try {
+                    req.custom_sigmas.push_back(std::stof(tok));
+                } catch (const std::exception &) {
+                    fail(ExitCode::BadInput,
+                         "--sigmas expects a comma-separated list of floats, got: '" + tok + "'");
+                }
+            }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+    }
     req.control_strength = opts.control_strength;
     // Parse --skip-layers "7,8,9" into the int vector consumed by SLG.
     // Whitespace around entries is tolerated; non-integer entries fail
@@ -581,6 +724,56 @@ int command_sd(const SdOptions & opts) {
                  "control image dimensions must match --width / --height");
         }
     }
+
+    // PhotoMaker ID images. Non-recursive scan of the directory in
+    // sorted order (deterministic across filesystems). Anything stb_image
+    // can decode is accepted; non-image entries are skipped. Empty dir
+    // is an error — if the user set the flag, they intend PM to run.
+    if (!opts.pm_id_images_dir.empty()) {
+        namespace fs = std::filesystem;
+        const fs::path dir = opts.pm_id_images_dir;
+        std::error_code ec;
+        if (!fs::is_directory(dir, ec)) {
+            fail(ExitCode::BadInput,
+                 "--pm-id-images-dir is not a directory: " + opts.pm_id_images_dir);
+        }
+        std::vector<fs::path> files;
+        for (const auto & ent : fs::directory_iterator(dir, ec)) {
+            if (ent.is_regular_file()) files.push_back(ent.path());
+        }
+        std::sort(files.begin(), files.end());
+        for (const auto & p : files) {
+            try {
+                req.pm_id_images.push_back(chimera_sd::decode_image_file(p.string(), 3));
+            } catch (const ChimeraError &) {
+                // Skip files stb_image rejects (README.md etc).
+            }
+        }
+        if (req.pm_id_images.empty()) {
+            fail(ExitCode::BadInput,
+                 "--pm-id-images-dir contains no decodable images: " + opts.pm_id_images_dir);
+        }
+    }
+    req.pm_id_embed_path  = opts.pm_id_embed_path;
+    req.pm_style_strength = opts.pm_style_strength;
+
+    // Reference images. Each --ref-image path is decoded to RGB and
+    // borrowed into sd_img_gen_params_t.ref_images.
+    for (const auto & path : opts.ref_images) {
+        req.ref_images.push_back(chimera_sd::decode_image_file(path, 3));
+    }
+    req.increase_ref_index            = opts.increase_ref_index;
+    req.disable_auto_resize_ref_image = opts.no_auto_resize_ref_image;
+
+    req.hires_enabled            = opts.hires_fix;
+    req.hires_upscaler           = opts.hires_upscaler;
+    req.hires_upscale_model      = opts.hires_upscale_model;
+    req.hires_target_width       = opts.hires_width;
+    req.hires_target_height      = opts.hires_height;
+    req.hires_scale              = opts.hires_scale;
+    req.hires_steps              = opts.hires_steps;
+    req.hires_denoising_strength = opts.hires_denoising_strength;
+    req.hires_upscale_tile_size  = opts.hires_upscale_tile_size;
 
     auto images = chimera_sd::generate(ctx.get(), req);
 

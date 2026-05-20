@@ -3177,6 +3177,87 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Fractional step (0..1) at which to start applying SLG");
     cmd->add_option("--skip-layer-end", p.sd_opts.skip_layer_end,
         "Fractional step (0..1) at which to stop applying SLG");
+    // Round 1 perf / offload (sd_ctx_params_t one-liners).
+    cmd->add_flag("--fa", p.sd_opts.flash_attn_global,
+        "Enable global flash-attention across all sd graphs (distinct from --diffusion-fa which only flips the diffusion model)");
+    cmd->add_flag("--no-mmap", p.sd_opts.no_mmap,
+        "Disable mmap for model loading (chimera defaults to mmap=on; this flips it off)");
+    cmd->add_option("--max-vram", p.sd_opts.max_vram,
+        "Soft cap on VRAM use in GiB (0 = leave the upstream default; sd.cpp may swap to CPU above the cap)");
+    cmd->add_flag("--clip-on-cpu", p.sd_opts.keep_clip_on_cpu,
+        "Keep the CLIP / text-encoder pass on CPU even when a GPU backend is available");
+    cmd->add_flag("--vae-on-cpu", p.sd_opts.keep_vae_on_cpu,
+        "Keep the VAE encode/decode on CPU (more surgical than --offload-to-cpu)");
+    cmd->add_flag("--control-net-cpu", p.sd_opts.keep_control_net_on_cpu,
+        "Keep the ControlNet on CPU even when a GPU backend is available");
+    cmd->add_flag("--force-sdxl-vae-conv-scale", p.sd_opts.force_sdxl_vae_conv_scale,
+        "Apply the SDXL VAE conv-scale numerics fix (workaround for some SDXL VAE checkpoints)");
+    // Round 2 sampler / generation core.
+    cmd->add_option("--img-cfg-scale", p.sd_opts.img_cfg_scale,
+        "Separate img-cond CFG scale (Flux/SD3); -1 leaves the default INFINITY so sd falls back to --cfg-scale");
+    cmd->add_option("--eta", p.sd_opts.eta,
+        "DDIM/ancestral-style stochasticity in [0,1]; -1 leaves the upstream default");
+    cmd->add_option("--timestep-shift", p.sd_opts.shifted_timestep,
+        "Shift the sampling timestep schedule by N (0 = no shift)");
+    cmd->add_option("--sigmas", p.sd_opts.sigmas,
+        "Custom sigma schedule as a comma-separated float list (e.g. '14.6,10.0,5.0,1.0'); "
+        "empty disables the override. Non-float entries exit with BadInput.");
+    cmd->add_option("--prediction", p.sd_opts.prediction,
+        "Prediction-type override: eps | v | edm_v | flow | flux_flow | flux2_flow (empty = model default)")
+        ->check(CLI::IsMember({"eps","v","edm_v","flow","flux_flow","flux2_flow"}));
+    cmd->add_option("--lora-apply-mode", p.sd_opts.lora_apply_mode,
+        "LoRA application mode: auto | immediately | at_runtime (empty = upstream default)")
+        ->check(CLI::IsMember({"auto","immediately","at_runtime"}));
+    // Round 3 model-loading completers.
+    cmd->add_option("--taesd", p.sd_opts.taesd,
+        "Tiny AutoEncoder (TAESD) model for fast preview decode");
+    cmd->add_option("--clip-vision", p.sd_opts.clip_vision,
+        "CLIP-Vision encoder (image-conditioning models)");
+    cmd->add_option("--llm-vision", p.sd_opts.llm_vision,
+        "LLM-Vision encoder (e.g. Qwen-Image vision-conditioning)");
+    cmd->add_option("--tensor-type-rules", p.sd_opts.tensor_type_rules,
+        "Per-tensor wtype override rules (sd.cpp's --tensor-type-rules syntax)");
+    cmd->add_option("--photo-maker", p.sd_opts.photo_maker,
+        "PhotoMaker model file (pair with --pm-id-images-dir at generate time)");
+    // Round 4 PhotoMaker generation bundle.
+    cmd->add_option("--pm-id-images-dir", p.sd_opts.pm_id_images_dir,
+        "Directory of reference identity images for PhotoMaker (non-recursive, alphabetical order). "
+        "Empty entries / unreadable files are skipped; an empty result is an error.");
+    cmd->add_option("--pm-id-embed-path", p.sd_opts.pm_id_embed_path,
+        "Path to a precomputed PhotoMaker ID embedding (.bin)");
+    cmd->add_option("--pm-style-strength", p.sd_opts.pm_style_strength,
+        "PhotoMaker style strength (-1 = upstream default)");
+    // Round 5 reference images.
+    cmd->add_option("--ref-image", p.sd_opts.ref_images,
+        "Reference image for style/identity conditioning (repeatable; each becomes one entry "
+        "in sd_img_gen_params_t.ref_images)");
+    cmd->add_flag("--increase-ref-index", p.sd_opts.increase_ref_index,
+        "Increment the ref-image index across batch positions");
+    cmd->add_flag("--no-auto-resize-ref-image", p.sd_opts.no_auto_resize_ref_image,
+        "Disable sd's automatic resize of --ref-image inputs to match --width/--height");
+    // Round 6 hires-fix.
+    cmd->add_flag("--hires", p.sd_opts.hires_fix,
+        "Enable the hires-fix second-pass upscale (sd_hires_params_t.enabled)");
+    cmd->add_option("--hires-upscaler", p.sd_opts.hires_upscaler,
+        "Hires upscaler name (sd's enum). Values: None, Latent, "
+        "'Latent (nearest)', 'Latent (nearest-exact)', 'Latent (antialiased)', "
+        "'Latent (bicubic)', 'Latent (bicubic antialiased)', Lanczos, Nearest, Model. "
+        "Empty leaves sd's default (Latent).");
+    cmd->add_option("--upscale-model", p.sd_opts.hires_upscale_model,
+        "Upscaler model file (pair with --hires-upscaler Model)");
+    cmd->add_option("--hires-width", p.sd_opts.hires_width,
+        "Target width for the hires pass (0 = derive from --hires-scale)");
+    cmd->add_option("--hires-height", p.sd_opts.hires_height,
+        "Target height for the hires pass (0 = derive from --hires-scale)");
+    cmd->add_option("--hires-scale", p.sd_opts.hires_scale,
+        "Scale factor for the hires pass; -1 leaves sd's default (2.0). "
+        "Ignored when --hires-width / --hires-height are set.");
+    cmd->add_option("--hires-steps", p.sd_opts.hires_steps,
+        "Sample steps for the hires pass (0 = use the main --steps)");
+    cmd->add_option("--hires-denoising-strength", p.sd_opts.hires_denoising_strength,
+        "Denoising strength for the hires pass in [0,1]; -1 leaves sd's default (0.7)");
+    cmd->add_option("--hires-upscale-tile-size", p.sd_opts.hires_upscale_tile_size,
+        "Tile size used when running the upscaler (0 leaves sd's default of 128)");
     p.sd_cmd = cmd;
 }
 #endif
