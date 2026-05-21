@@ -1,7 +1,7 @@
 .PHONY: deps build build-with-webui build-cuda build-rocm build-sycl \
 	    build-vulkan rebuild clean reset test smoke install uninstall \
 	    release-notes bump-check test-db-migrate test-golden combine \
-	    test-external-smoke
+	    test-external-smoke test-external-oop
 
 # Override with `make PYTHON=<cmd>` for
 # unusual environments (e.g. `PYTHON="uv run python"`).
@@ -152,8 +152,14 @@ $(BUILD_DIR)/libchimera.a:
 # tokenize + llama_decode inference probe. See
 # doc/dev/combine_archives.md section 7 for what this validates.
 test-external-smoke: tests/external/build/chimera_smoke tests/external/build/chimera_hpp_smoke
-	@tests/external/build/chimera_smoke
-	@tests/external/build/chimera_hpp_smoke
+	@ctest --test-dir tests/external/build --output-on-failure
+
+# Convenience: run only the OOP-layer lane (chimera_hpp_smoke). Same
+# env-var inputs as the full target -- CHIMERA_SMOKE_MODEL gates the
+# inference probe; CHIMERA_SMOKE_WHISPER_MODEL + CHIMERA_SMOKE_WHISPER_INPUT
+# gate the Whisper persistence probe.
+test-external-oop: tests/external/build/chimera_smoke tests/external/build/chimera_hpp_smoke
+	@ctest --test-dir tests/external/build -L OOP --output-on-failure
 
 tests/external/build/chimera_smoke tests/external/build/chimera_hpp_smoke: tests/external/smoke.cpp tests/external/hpp_smoke.cpp tests/external/CMakeLists.txt $(BUILD_DIR)/libchimera.a $(BUILD_DIR)/libchimera_thirdparty.a $(BUILD_DIR)/libchimera_ggml.a
 	@cmake -S tests/external -B tests/external/build

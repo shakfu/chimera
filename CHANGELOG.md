@@ -4,7 +4,11 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.0]
+
 ### Added
+
+- **CTest registration for external smoke tests.** `tests/external/CMakeLists.txt` now calls `enable_testing()` and registers `chimera_smoke` + `chimera_hpp_smoke` via `add_test(...)` with labels `EXTERNAL` / `PROCEDURAL` / `OOP` / `MODEL_GATED`. `make test-external-smoke` runs both via `ctest --output-on-failure`; new `make test-external-oop` filters to the OOP lane via `-L OOP`. The binaries' "inference probe: SKIP" line is mapped to ctest's `Skipped` outcome via `SKIP_REGULAR_EXPRESSION` so CI dashboards can distinguish "passed with fixture" from "ran without fixture available". Working directory set to the repo root so env-var-supplied paths (`CHIMERA_SMOKE_MODEL`, `CHIMERA_SMOKE_WHISPER_*`) are repo-relative and match the shell invocations users copy from `docs/dev/combine_archives.md`.
 
 - **`src/chimera/chimera_llama.{h,cpp}`** — moves the llama.cpp glue (model + context loaders, generation, sampler, LoRA, decode helpers) plus the `command_prompt` / `command_embed` / `command_tokenize` entrypoints out of `src/chimera_cli/chimera.cpp` and into the library. Before this, `libchimera.a` had no direct llama.cpp text-generation entrypoint — only `command_serve` and the lower-level `Embedder`. CLI shell drops ~1000 lines and `#include`s the new header. `command_chat` deliberately stays in `chimera_cli/` because it owns terminal I/O, signal handling, linenoise, and color streaming.
 - **`src/chimera/chimera.hpp`** — optional header-only OOP layer over the procedural surface. Persistent-handle classes (`chimera::Llama`, `Embedder`, `Tokenizer`) load the model once in the ctor and reuse it across calls; options-in-ctor wrappers (`Whisper`, `SD`, `Server`) mirror the CLI subcommand lifecycle. Header is not compiled into the archive; consumers `#include` it at their call site. See [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md).

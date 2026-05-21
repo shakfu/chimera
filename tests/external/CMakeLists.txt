@@ -147,3 +147,60 @@ foreach(_t chimera_smoke chimera_hpp_smoke)
         target_link_options(${_t} PRIVATE "/WHOLEARCHIVE:${_ggml_name}")
     endif()
 endforeach()
+
+# -----------------------------------------------------------------------------
+# CTest registration.
+#
+# Two test entries -- one per smoke binary. Labels let `ctest -L OOP` or
+# `ctest -L PROCEDURAL` pick a single lane; `ctest -L MODEL_GATED` selects
+# only the entries whose inference probes need a model file.
+#
+# Skip semantics:
+#   The binaries print "SKIP (set CHIMERA_SMOKE_..." when their env-var
+#   gated inference probes are disabled. SKIP_REGULAR_EXPRESSION maps that
+#   pattern to ctest's "Skipped" outcome instead of "Passed" so a CI
+#   dashboard can distinguish "ran the probe and it passed" from "the
+#   probe was unavailable because no fixture model was set".
+#
+# Env-var inputs (optional, both binaries respect them):
+#   CHIMERA_SMOKE_MODEL           - llama-side GGUF used by both binaries
+#                                   to exercise inference paths.
+#   CHIMERA_SMOKE_WHISPER_MODEL   - whisper GGML; chimera_hpp_smoke only.
+#   CHIMERA_SMOKE_WHISPER_INPUT   - WAV file; chimera_hpp_smoke only.
+# -----------------------------------------------------------------------------
+enable_testing()
+
+# Run tests from the repo root so the CHIMERA_SMOKE_MODEL /
+# CHIMERA_SMOKE_WHISPER_* env vars can use repo-relative paths that
+# match the shell invocations users will copy/paste from the docs.
+set(_chimera_test_wd "${CMAKE_CURRENT_LIST_DIR}/../..")
+
+add_test(
+    NAME chimera_smoke
+    COMMAND chimera_smoke
+    WORKING_DIRECTORY "${_chimera_test_wd}"
+)
+set_tests_properties(chimera_smoke PROPERTIES
+    LABELS "EXTERNAL;PROCEDURAL;MODEL_GATED"
+    # Map the binary's "SKIP (set CHIMERA_SMOKE_MODEL ...)" line to
+    # ctest's Skipped outcome so a CI dashboard can distinguish "ran
+    # the probe and it passed" from "the probe was unavailable
+    # because no fixture model was set". The link-contract probe
+    # (ggml backend registration, llama symbol resolution) always
+    # runs regardless of env vars.
+    SKIP_REGULAR_EXPRESSION "inference probe: SKIP \\(set CHIMERA_SMOKE_MODEL"
+    PASS_REGULAR_EXPRESSION "(^|\n)PASS"
+    TIMEOUT 120
+)
+
+add_test(
+    NAME chimera_hpp_smoke
+    COMMAND chimera_hpp_smoke
+    WORKING_DIRECTORY "${_chimera_test_wd}"
+)
+set_tests_properties(chimera_hpp_smoke PROPERTIES
+    LABELS "EXTERNAL;OOP;MODEL_GATED"
+    SKIP_REGULAR_EXPRESSION "inference probe: SKIP \\(set CHIMERA_SMOKE_MODEL"
+    PASS_REGULAR_EXPRESSION "(^|\n)PASS"
+    TIMEOUT 180
+)
