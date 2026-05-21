@@ -201,9 +201,23 @@ class Recorder:
 _verbose = False  # toggled by main()
 
 
+# Sentinel returncode for "subprocess hit the timeout." Picked far outside
+# any plausible real exit code (Unix exit-codes are 0–255 unsigned, signals
+# fall in -1..-64 when reported by subprocess). Distinguishing this from
+# "process actually exited -1" matters because the latter is a real
+# program signal (SIGHUP) and the former is "we gave up waiting" — which
+# usually means the timeout was too tight, not that the binary misbehaved.
+TIMED_OUT = -1000
+
+
 def run_silent(cmd: list, *, timeout: float = 600, stdin: Optional[bytes] = None,
                env: Optional[dict] = None) -> int:
     """Run `cmd`, suppress output (unless --verbose), return exit code.
+
+    Returns TIMED_OUT (a sentinel int that no real process produces) when
+    the timeout fires, so callers can surface a clearer failure message
+    than the previous "got -1" — that diagnostic conflated timeouts with
+    SIGHUP-killed processes.
 
     Used for the simple "exit-code-only" tests like `chimera --version` and
     `chimera gen ...`. If `--verbose` was passed we mirror stdout/stderr to
@@ -218,7 +232,18 @@ def run_silent(cmd: list, *, timeout: float = 600, stdin: Optional[bytes] = None
         )
         return proc.returncode
     except subprocess.TimeoutExpired:
-        return -1
+        return TIMED_OUT
+
+
+def _check_rc(t: "TimedTest", rc: int, want: int, timeout: float) -> None:
+    """Compare a returncode against the expected value, surfacing the
+    timeout-vs-mismatch distinction in the failure message. Used by the
+    smoke tests where conflating "took too long" with "wrong exit code"
+    sends maintainers down the wrong diagnostic path."""
+    if rc == TIMED_OUT:
+        t.fail(f"timed out after {timeout:g}s (expected exit code {want})")
+    elif rc != want:
+        t.fail(f"want {want}, got {rc}")
 
 
 def run_capture(cmd: list, *, timeout: float = 600, stdin: Optional[bytes] = None,
@@ -587,27 +612,35 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
     # `gen` without -m must fail at CLI parse. The bash version asserted
     # "non-zero exit" without pinning the exact code; the same loose check
     # here protects against the CLI11 wiring silently accepting the call.
+    # CLI11 short-circuits before backend init, so 15s is plenty.
     with maybe(rec, "gen without -m exits non-zero") as t:
-        rc = run_silent([str(chimera), "gen", "-p", "hi"], timeout=10)
-        if rc == 0:
+        rc = run_silent([str(chimera), "gen", "-p", "hi"], timeout=15)
+        if rc == TIMED_OUT:
+            t.fail("timed out after 15s (expected non-zero exit)")
+        elif rc == 0:
             t.fail("expected non-zero exit, got 0")
 
     # Structured exit codes: 2 = BadInput. Only runs when the gen model is
     # actually present — without -m the call would fail earlier (above).
+    # 60s timeout: this path runs backend init before the no-prompt check
+    # fires, and CI runners without real GPU access can take several
+    # seconds to time out the Metal/CUDA probe before falling back to CPU.
     if GEN_MODEL.is_file():
         with maybe(rec, "gen without prompt exits 2 (BadInput)") as t:
-            rc = run_silent([str(chimera), "gen", "-m", str(GEN_MODEL)], timeout=15)
-            if rc != 2:
-                t.fail(f"want 2, got {rc}")
+            rc = run_silent([str(chimera), "gen", "-m", str(GEN_MODEL)], timeout=60)
+            _check_rc(t, rc, want=2, timeout=60)
 
-    # Structured exit codes: 3 = Load (model file not found).
+    # Structured exit codes: 3 = Load (model file not found). The binary
+    # initializes the backend BEFORE attempting to open the model, so on
+    # CI macos-metal runners (no real GPU; Metal probes time out
+    # ~5-10s before CPU fallback) this needs more than the CLI-parse
+    # budget. 60s is comfortably above the observed worst case.
     with maybe(rec, "gen with missing model exits 3 (Load)") as t:
         rc = run_silent(
             [str(chimera), "gen", "-m", "/no/such/model.gguf", "-p", "hi"],
-            timeout=10,
+            timeout=60,
         )
-        if rc != 3:
-            t.fail(f"want 3, got {rc}")
+        _check_rc(t, rc, want=3, timeout=60)
 
 
 # ============================================================================
