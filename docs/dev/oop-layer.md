@@ -18,17 +18,138 @@ the source of truth; the wrappers are inline glue.
 
 | Class | Style | Wraps | Persistent? |
 |-------|-------|-------|-------------|
-| `chimera::Llama` | persistent-handle | `load_llama_model` + `run_generation` / `run_generation_mtmd` | yes - model loaded once in ctor, reused per `generate()` |
+| `chimera::Llama` | persistent-handle | `load_llama_model` + `new_llama_context` + `sample_loop` (text path); `run_generation_mtmd` (vision path) | yes - model AND context loaded once, ctx reused per `generate()` (text path only) |
 | `chimera::Embedder` | persistent-handle | `chimera_embed::Embedder` (+ optional `chimera_embed_cache::Cache`) | yes |
 | `chimera::Tokenizer` | persistent-handle | `load_llama_model` + `tokenize` / `token_to_piece` | yes |
-| `chimera::Whisper` | options-in-ctor | `command_whisper` | no - full load/run/unload per `run()` |
-| `chimera::SD` | options-in-ctor | `command_sd` | no - same |
+| `chimera::Whisper` | persistent-handle | `chimera_whisper::load_model` + `chimera_whisper::transcribe` (structured-API) or `run_whisper` (CLI-shaped) | yes - whisper_context loaded once, reused across `transcribe()` / `run()` |
+| `chimera::SD` | persistent-handle | `chimera_sd::load_model` + `chimera_sd::generate` (structured-API) or `run_sd` (CLI-shaped) | yes - sd_ctx_t loaded once, reused across `generate()` / `run()` |
 | `chimera::Server` | options-in-ctor | `command_serve` | n/a - server owns its own lifecycle internally |
 
-Whisper / SD / Server use options-in-ctor because their underlying
-`command_*` functions own the full load-run-unload lifecycle today.
-Persistent-handle for those would require library-side refactors that
-are out of scope for the first cut.
+`chimera::Server` uses options-in-ctor because the server owns its own
+lifecycle internally; `run()` blocks until the server shuts down and
+there's no per-call work to amortize a persistent handle against.
+
+`chimera::Whisper` and `chimera::SD` are persistent-handle: the ctor
+calls the lower-level `chimera_whisper::load_model` /
+`chimera_sd::load_model` and caches the handle. Both expose two run
+flavors: a structured-API path (`transcribe()` / `generate()`) that
+returns the raw `TranscribeResult` / `vector<PixelImage>` for library
+consumers, and a CLI-shaped `run()` that calls into the post-load
+pipeline helpers `run_whisper(ctx, opts)` / `run_sd(ctx, opts)` -
+the same helpers `command_whisper` / `command_sd` use after loading,
+so the OOP and CLI paths share one body.
+
+### `chimera::Whisper` / `chimera::SD` persistence model
+
+The library-side refactor that made this possible:
+`command_whisper` and `command_sd` were split into a load shim that
+builds the context and a post-load helper (`run_whisper` / `run_sd`)
+that owns everything after that - WAV loading, resampling, diarize,
+grammar, format-file writes for whisper; cache validation, prompt
+parsing, control-net wiring, PNG writes for SD. Both CLI driver and
+OOP wrapper invoke the same post-load helper, so behavior is
+identical between `chimera whisper -m foo.bin -i x.wav` and
+`chimera::Whisper(opts).run()`.
+
+**Dirty-options policy.** Load-time fields silently no-op after the
+ctor runs:
+
+- `Whisper`: `model`, `no_gpu`, `flash_attn`, `gpu_device`.
+- `SD`: `model`, `diffusion_model`, all the split-checkpoint paths
+  (`vae`, `clip_l/g`, `t5xxl`, `llm`, `taesd`, `clip_vision`,
+  `llm_vision`, `tensor_type_rules`, `photo_maker`, `embd_dir`,
+  `high_noise_diffusion_model`, `control_net`), the `wtype` /
+  `prediction` / `lora_apply_mode` enums, all the `*_on_cpu` /
+  `*_conv_direct` / `*_flash_attn` / `*_mmap` / `max_vram` /
+  `force_sdxl_vae_conv_scale` / `rng` / `sampler_rng` /
+  `offload_to_cpu` knobs, and crucially `init_image` (which decides
+  whether vae_decode_only is set at load time -- an instance built
+  with `init_image` empty cannot do img2img later even if the field
+  is set afterwards; reconstruct or call `reset(/*reload=*/true)`).
+
+Call `reset(/*reload=*/true)` to drop the cached ctx and have the
+next call honor mutated load-time fields. `reset()` without `reload`
+is a no-op for whisper / SD since neither has a per-call cache
+analogous to llama's KV.
+
+Per-call fields (everything else in `WhisperOptions` / `SdOptions`)
+take effect immediately -- they're consumed by `run_whisper` /
+`run_sd` on every call, not at load time.
+
+### `chimera::Llama` persistence model
+
+The model loads in the constructor. The `llama_context` is **lazy** -
+the first `generate()` call calls `new_llama_context` and caches the
+handle. Subsequent `generate()` calls reuse it, saving the per-call
+allocation cost (context, backend buffers, KV-cache buffers).
+
+**Semantics are still single-shot**: the KV cache is cleared at the
+start of each `generate()` via `llama_memory_clear`. So the persistent
+ctx is an *internal optimization*, not a behavior change - you don't
+have to think about prompt accumulation. (Conversation-style
+append-mode is what `command_chat` does in the CLI; an analogous
+`LlamaChat` carve-out from the REPL is a plausible future addition.)
+
+LoRA adapters and the sampler are rebuilt on every `generate()` call.
+This is cheap and means mutations to `options().lora_adapters` and to
+sampler knobs (temp, top_k, seed, n_predict, samplers chain, logit
+bias, grammar, ...) take effect immediately.
+
+**Dirty-options policy.** Mutating *context-creation* fields after the
+first `generate()` silently no-ops because the ctx is cached. Those
+fields are: `n_ctx`, `n_batch`, `n_ubatch`, `cache_type_k/v`,
+`flash_attn`, `rope_*`, `yarn_*`, `swa_full`, `control_vector*`. Call
+`reset(/*rebuild=*/true)` to drop the cached ctx; the next
+`generate()` will honor the new values. `reset()` without `rebuild`
+just clears the KV (cheap; useful if you want to release memory used
+by cached compute without paying re-allocation cost on the next call).
+
+The vision path (`options().images` non-empty) bypasses the persistent
+ctx entirely and falls back to `run_generation_mtmd`, which builds a
+fresh ctx and `mtmd_context` per call. The dominant cost there is the
+model load (already amortized), so the per-call ctx churn is not worth
+the complexity of caching the vision-encoder bundle.
+
+`chimera::Llama::ctx()` exposes the cached handle for callers who want
+to drop down to the C API. Returns `nullptr` until the first
+`generate()` (or after `reset(/*rebuild=*/true)`).
+
+### Streaming
+
+`Llama::generate` has two overloads:
+
+```cpp
+std::string generate(const std::string & prompt, bool stream = false);
+std::string generate(const std::string & prompt, const chimera::TokenCallback & on_token);
+```
+
+The `bool` overload is the CLI-shaped convenience: `stream=false`
+collects the full generated text and returns it; `stream=true` writes
+each token to `std::cout` as it's sampled and prints a trailing newline
+when the generation completes. It exists so toy programs and ports of
+the CLI's gen subcommand have a one-line call site.
+
+The callback overload is the library-friendly form. `TokenCallback` is
+`std::function<void(std::string_view)>`; it's invoked once per sampled
+token with the detokenized UTF-8 piece. The full text is still
+returned. The caller owns where the bytes go - a Slack bot writes to
+its WebSocket, a notebook binding appends to a cell buffer, a logger
+writes to a file - and the caller owns trailing-newline / buffering /
+flushing policy. Passing an empty `TokenCallback{}` disables streaming
+without changing the return value.
+
+Library-side, the procedural `sample_loop` / `run_generation` /
+`run_generation_mtmd` all take a `const TokenCallback &` now (replaced
+what used to be a `bool stream_output`). The CLI's `command_prompt`
+passes a stdout-writing lambda and prints its own trailing newline.
+
+### Vision streaming
+
+The mtmd path (vision prompts) supports streaming via the same
+callback because `run_generation_mtmd` accepts a `TokenCallback`.
+This is independent of the persistent-ctx limitation - even though
+the vision path builds a fresh ctx per call, the per-token streaming
+hook works the same way.
 
 `command_chat` (the interactive REPL) is **not** wrapped. It still lives
 in `src/chimera_cli/` because it owns terminal I/O, signal handling,

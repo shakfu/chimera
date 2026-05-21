@@ -316,7 +316,13 @@ struct WhisperOptions {
     // configured output sink and skips all format-file emission.
     bool detect_language = false;
 };
+struct whisper_context;
 int command_whisper(const WhisperOptions & opts);
+// Post-load body of command_whisper: takes a pre-loaded whisper_context
+// and runs the WAV-load -> resample -> transcribe -> diarize -> format-file
+// pipeline against it. Shared by command_whisper (loads then calls this)
+// and chimera::Whisper::run() (uses its persistent ctx then calls this).
+int run_whisper(whisper_context * ctx, const WhisperOptions & opts);
 #endif
 
 #ifdef CHIMERA_HAS_SD
@@ -459,7 +465,13 @@ struct SdOptions {
     std::string scm_mask;
     std::string scm_policy;
 };
+struct sd_ctx_t;
 int command_sd(const SdOptions & opts);
+// Post-load body of command_sd: takes a pre-loaded sd_ctx_t and runs the
+// prompt/img2img/inpaint generation + PNG-write pipeline. Shared by
+// command_sd (loads then calls this) and chimera::SD::run() (uses its
+// persistent ctx then calls this).
+int run_sd(sd_ctx_t * ctx, const SdOptions & opts);
 #endif
 
 // OpenAI-compatible HTTP server backed by llama.cpp's server-context engine.

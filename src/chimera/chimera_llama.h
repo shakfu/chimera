@@ -16,8 +16,10 @@
 #include "mtmd.h"
 #include "sampling.h"
 
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // --- smart-pointer wrappers --------------------------------------------------
@@ -105,13 +107,35 @@ common_chat_msg make_chat_msg(const std::string & role, const std::string & cont
 
 // --- generation -------------------------------------------------------------
 
+// Streaming hook for the generation loop. Invoked once per sampled token
+// with the detokenized piece (UTF-8). An empty / default-constructed
+// callback means "no streaming" - the loop still runs and the full
+// generated text is returned, but no per-token side effect fires.
+// Callers that want stdout streaming pass a lambda that writes to cout;
+// callers that want to feed a UI / pipe / logger pass their own sink.
+// Trailing newlines / flushing / buffering are the caller's choice.
+using TokenCallback = std::function<void(std::string_view)>;
+
+// Sample up to n_predict tokens from a context that already has the prompt
+// decoded into its KV cache. Invokes `on_token` per sampled token when set.
+// Optional out_tokens receives the generated token ids in order. Exposed
+// so the OOP layer's persistent-context generate() can drive its own
+// prompt-decode + sample cycle without calling run_generation (which
+// builds and destroys a fresh ctx every call).
+std::string sample_loop(llama_context *            ctx,
+                        common_sampler *           sampler,
+                        const llama_vocab *        vocab,
+                        int                        n_predict,
+                        const TokenCallback &      on_token = {},
+                        std::vector<llama_token> * out_tokens = nullptr);
+
 std::string run_generation(llama_model *              model,
                            const LlamaCommonOptions & opts,
                            const std::string &        prompt,
                            bool                       add_special,
-                           bool                       stream_output);
+                           const TokenCallback &      on_token = {});
 
 std::string run_generation_mtmd(llama_model *              model,
                                 const LlamaCommonOptions & opts,
                                 const std::string &        user_prompt,
-                                bool                       stream_output);
+                                const TokenCallback &      on_token = {});

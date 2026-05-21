@@ -394,15 +394,19 @@ std::string resolve_grammar(const LlamaCommonOptions & opts) {
     return {};
 }
 
+} // anonymous namespace
+
 // Sample up to n_predict tokens from a pre-filled context. Returns the
 // generated text and (out) the generated token sequence (caller-owned).
+// Public because chimera::Llama's persistent-context generate() drives
+// its own prompt-decode + sample cycle and needs this helper.
 std::string sample_loop(
     llama_context * ctx,
     common_sampler * sampler,
     const llama_vocab * vocab,
     int n_predict,
-    bool stream_output,
-    std::vector<llama_token> * out_tokens = nullptr) {
+    const TokenCallback & on_token,
+    std::vector<llama_token> * out_tokens) {
 
     std::string text;
     for (int i = 0; i < n_predict; ++i) {
@@ -417,8 +421,8 @@ std::string sample_loop(
 
         const std::string piece = token_to_piece(vocab, token);
         text += piece;
-        if (stream_output) {
-            std::cout << piece << std::flush;
+        if (on_token) {
+            on_token(std::string_view(piece));
         }
 
         llama_token token_copy = token;
@@ -426,13 +430,11 @@ std::string sample_loop(
             fail(ExitCode::Generate, "failed to decode generated token");
         }
     }
-    if (stream_output) {
-        std::cout << '\n';
-    }
+    // Trailing newline / flush is the caller's responsibility now -- a
+    // library consumer driving a UI or pipe shouldn't have stdout state
+    // changed under them.
     return text;
 }
-
-} // anonymous namespace
 
 // ---- public model + context loaders ---------------------------------------
 
@@ -711,7 +713,7 @@ std::string run_generation_mtmd(
     llama_model * model,
     const LlamaCommonOptions & opts,
     const std::string & user_prompt,
-    bool stream_output) {
+    const TokenCallback & on_token) {
 
     if (opts.mmproj.empty() || opts.images.empty()) {
         fail(ExitCode::Runtime, "run_generation_mtmd called without mmproj/images");
@@ -810,7 +812,7 @@ std::string run_generation_mtmd(
 
     return sample_loop(ctx.get(), sampler.get(),
                        llama_model_get_vocab(model),
-                       opts.n_predict, stream_output);
+                       opts.n_predict, on_token);
 }
 
 std::string run_generation(
@@ -818,7 +820,7 @@ std::string run_generation(
     const LlamaCommonOptions & opts,
     const std::string & prompt,
     bool add_special,
-    bool stream_output) {
+    const TokenCallback & on_token) {
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const auto prompt_tokens = tokenize(vocab, prompt, add_special, true);
@@ -830,7 +832,7 @@ std::string run_generation(
     for (llama_token token : prompt_tokens) {
         common_sampler_accept(sampler.get(), token, false);
     }
-    return sample_loop(ctx.get(), sampler.get(), vocab, opts.n_predict, stream_output);
+    return sample_loop(ctx.get(), sampler.get(), vocab, opts.n_predict, on_token);
 }
 
 // ---- command entrypoints --------------------------------------------------
@@ -839,13 +841,21 @@ int command_prompt(const LlamaCommonOptions & opts, const std::string & prompt) 
     if (!opts.images.empty() && opts.mmproj.empty()) {
         fail(ExitCode::BadInput, "--image requires --mmproj");
     }
+    // The CLI's gen subcommand streams tokens to stdout. sample_loop no
+    // longer manages the trailing newline (it stopped writing to cout
+    // entirely when the bool stream flag became a callback); command_prompt
+    // takes that responsibility instead so the prompt line ends cleanly.
+    const TokenCallback stream_to_cout = [](std::string_view piece) {
+        std::cout << piece << std::flush;
+    };
     auto model = load_llama_model(opts);
     std::string text;
     if (!opts.images.empty()) {
-        text = run_generation_mtmd(model.get(), opts, prompt, /*stream=*/true);
+        text = run_generation_mtmd(model.get(), opts, prompt, stream_to_cout);
     } else {
-        text = run_generation(model.get(), opts, prompt, /*add_special=*/true, /*stream=*/true);
+        text = run_generation(model.get(), opts, prompt, /*add_special=*/true, stream_to_cout);
     }
+    std::cout << '\n';
     return text.empty() ? static_cast<int>(ExitCode::Generate) : 0;
 }
 
