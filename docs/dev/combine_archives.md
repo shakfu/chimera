@@ -145,7 +145,9 @@ top of `src/chimera/CMakeLists.txt`. It was a vestige from sharing
 the slice with cyllama and never fired in chimera's tree.
 
 **Verified:** `make build` produces both artifacts (4.2 MB
-`libchimera.a`, 34 MB `chimera`); `make test` passes 44/44.
+`libchimera.a`, 34 MB `chimera`); `make test` passes (test count has
+grown since this section was written — see CHANGELOG / `make test`
+output for the current figure).
 
 ---
 
@@ -308,7 +310,8 @@ Step 1 (done):
 
 - `make build` produces a working `chimera` binary (same CLI, same
   routes). [PASSING]
-- `make test` passes 44/44. [PASSING]
+- `make test` passes (test count has grown since this milestone —
+  see CHANGELOG / `make test` output). [PASSING]
 - A trivial external CMake project can `find_library(chimera)`,
   link it, and call one public function (e.g. open a chat store,
   run one embed). [NOT YET EXERCISED]

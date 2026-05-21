@@ -105,6 +105,29 @@ chimera serve -m models/Llama-3.2-1B-Instruct-Q8_0.gguf \
               --enable-image models/sd_xl_turbo_1.0.q8_0.gguf
 ```
 
+This loads a stable-diffusion.cpp model alongside the LLM and binds
+`POST /v1/images/{generations,edits,variations}`. Generated images come
+back as base64-encoded PNGs in OpenAI's standard envelope:
+
+```
+curl -s http://127.0.0.1:8080/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "a watercolor of a sleeping cat",
+       "n": 1,
+       "size": "512x512"}'
+```
+
+For `/v1/images/edits` and `/v1/images/variations`, send the source
+image as multipart form data:
+
+```
+curl -s http://127.0.0.1:8080/v1/images/edits \
+  -F image=@input.png \
+  -F prompt="now make it sunset" \
+  -F size=512x512 \
+  -F strength=0.6
+```
+
 ### Persistent chats
 
 ```
@@ -197,29 +220,6 @@ curl -s -X POST http://127.0.0.1:8080/v1/vector_stores/notes/delete
 Note the **POST :name/delete** path. server-http only exposes GET/POST,
 so OpenAI SDK clients that send `DELETE /v1/vector_stores/{id}` will
 need to be reconfigured. One embedding model per server in this cut.
-
-This loads a stable-diffusion.cpp model alongside the LLM and binds
-`POST /v1/images/{generations,edits,variations}`. Generated images come
-back as base64-encoded PNGs in OpenAI's standard envelope:
-
-```
-curl -s http://127.0.0.1:8080/v1/images/generations \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt": "a watercolor of a sleeping cat",
-       "n": 1,
-       "size": "512x512"}'
-```
-
-For `/v1/images/edits` and `/v1/images/variations`, send the source
-image as multipart form data:
-
-```
-curl -s http://127.0.0.1:8080/v1/images/edits \
-  -F image=@input.png \
-  -F prompt="now make it sunset" \
-  -F size=512x512 \
-  -F strength=0.6
-```
 
 ### ControlNet (per-request conditioning image)
 
@@ -354,6 +354,12 @@ Always bound:
 | POST | `/slots/:id_slot` | JSON | `?action=save` / `?action=restore` / `?action=erase` for KV-cache snapshots. Save/restore require `--slot-save-path`; erase works without it. |
 | GET  | `/lora-adapters` | — | List LoRAs loaded via `--lora` and their current scales. |
 | POST | `/lora-adapters` | JSON array | Hot-swap which adapters are active. Body: `[{"id": 0, "scale": 0.8}, ...]` — ids index into the `--lora` list. |
+
+Bound when `--reranking <model>` is set:
+
+| Method | Path | Body | Notes |
+|--------|------|------|-------|
+| POST | `/v1/rerank` | JSON | Cross-encoder reranking. Body: `{"query": "...", "documents": [...], "top_n": N}`. |
 
 Bound when `--enable-audio` is set:
 

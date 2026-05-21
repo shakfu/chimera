@@ -24,11 +24,6 @@ Longer-term:
 
 ## RAG / SQLite
 
-Medium-term:
-
-- [ ] `chimera db backup` / `chimera db vacuum` subcommands. Backup
-      must include the WAL + SHM siblings or use `VACUUM INTO`.
-
 Longer-term:
 
 - [ ] Auto-reattach media on `chimera chat --resume`. Today

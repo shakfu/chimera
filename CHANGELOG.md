@@ -4,6 +4,19 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Changed
+
+- Sweep through the documentation set addressing a comprehensive audit. 11 doc files touched, +185/-152 lines net. No code changed; `make smoke` still 11/11 PASS. Specific fixes:
+  - **Staleness.** `README.md:94` `scripts/test.sh` → `scripts/test.py`; `docs/dev/maintenance.md:37` test count `55 e2e cases` → `62 tests (56 PASS + 6 SKIP)`; `docs/dev/combine_archives.md` two `44/44` → "test count has grown" (with pointer to CHANGELOG); README.md + cheatsheet `db` row stopped advertising backup/vacuum as future since they shipped in 0.1.5; `TODO.md` lost the same shipped item.
+  - **Path label sweep.** `doc/` → `docs/` in README.md (source-layout block), docs/dev/{webui,server-router-mode,server,maintenance}.md (~12 occurrences). The label text was previously lying — the relative links happened to resolve because the path *suffixes* were correct.
+  - **`docs/serve.md` image-generation orphan.** The `### Image generation` heading at L101 was followed by a config command and then jumped straight to `### Persistent chats`; the actual prose ("This loads a stable-diffusion.cpp model alongside the LLM…") was stranded ~100 lines later between the vector-store section and ControlNet with no header. Moved up under its rightful heading.
+  - **`docs/serve.md` endpoint table.** Added the missing `/v1/rerank` row (was documented in the cheatsheet but absent from serve.md's reference table). Now under a new "Bound when `--reranking <model>` is set" mini-section.
+  - **`docs/dev/server.md` § 4.4 reconciliation.** Removed `/slots`, `/lora-adapters` GET+POST, and `/v1/rerank` from the "deliberately NOT bound" list — all three shipped in 0.1.5. § 4.1 "Always exposed" table gained the slots/lora-adapters rows. New § 4.1a documents the `--reranking` opt-in. § 8 list renumbered from 1→9 jump down to 1–5. Item 14 ("reorganize chimera_serve.cpp if it crosses ~1000 LOC") was already shipped in 0.1.5; replaced with a parenthetical noting the split. § 6 subsections tagged `[resolved]` / `[open, upstream]` so the mix of post-mortems and live issues is scannable.
+  - **`docs/dev/sqlite.md` § 7 vs § 9 contradiction.** Routes table claimed `DELETE /v1/vector_stores/{name}` but § 9 Phase 4 (and the actual code) use `POST :name/delete` — server-http exposes only GET/POST. Fixed the table. § 9 Phase 6+ items (embedding cache, smarter chunking, hybrid search, db backup helpers) marked `[shipped]`; only the audit-table item remains genuinely open. Added a top-of-file status banner since the doc began as a planning doc but is now mostly retrospective.
+  - **`docs/dev/server-api-coverage.md` TL;DR.** Was still narrating from the 2026-05-20 vantage point ("After the 2026-05-20 audit cycle…") despite the roadmap closing on 2026-05-21 with step 5e + 6 + detect-language landing. Rewrote as: status (closed) → background → what's left (Tier-2 design-open).
+  - **`README.md` docs table.** Grew from 5 rows to 12 — was missing maintenance.md, webui.md, server-router-mode.md, server-api-coverage.md, cli-api-coverage.md, combine_archives.md, and TODO.md. Added a "New contributor reading order" paragraph pointing at the cheatsheet + serve.md → server.md + maintenance.md path.
+  - **Explicitly left alone:** CHANGELOG history entries for 0.1.5/0.1.6 (the `scripts/test.sh` references inside them are accurate for their time); `docs/dev/webui.md` Variant B post-mortem; `docs/dev/server-router-mode.md` decision record; `TODO.md` "Out of scope (wontfix)" block. These are institutional memory artifacts — pruning them is a regression in discoverability for the next maintainer asking "why did we not do X?"
+
 ## [0.1.7]
 
 ### Changed

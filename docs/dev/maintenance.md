@@ -30,16 +30,16 @@ Five categories, in roughly decreasing order of how much they hurt:
 - **`make bump-check`.** Diffs the vendored
   `server-context.h` / `server-http.h` against a target ref before you
   change the pin; lists added/removed top-level symbols. See
-  `doc/dev/server.md` § 7.
+  `docs/dev/server.md` § 7.
 - **`make test-db-migrate`.** Builds a v1 chimera.db in a tempdir and
   asserts it upgrades to current cleanly with all pre-existing rows
   preserved.
-- **`make test`** — 55 e2e cases hitting every subcommand, plus 6
-  opt-in success-path tests gated on adapter / aux-model env vars
-  (see below).
+- **`make test`** — 62 tests hitting every subcommand: 56 PASS + 6
+  SKIP-when-fixture-missing on a fresh checkout. The 6 SKIPs are opt-in
+  success-path tests gated on adapter / aux-model env vars (see below).
 - **`chimera info`** — single command captures every version + backend
   at runtime; useful for bug reports.
-- **`doc/dev/server.md` § 7** — explicit list of upstream types we
+- **`docs/dev/server.md` § 7** — explicit list of upstream types we
   depend on.
 - **Link surgery contained.** `-Wl,--start-group` on Linux,
   `-Wl,-force_load` on macOS, MSVC `/WHOLEARCHIVE` on Windows — all in
@@ -233,7 +233,7 @@ Useful when triaging "is this our bug or theirs":
 - Build system: `scripts/manage.py`, `CMakeLists.txt` glue, link-order
   surgery, `bump-check`, release workflow.
 - Tests + docs: `scripts/test.py`, `scripts/test_db_migrate.py`,
-  `doc/`, `doc/dev/`.
+  `docs/`, `docs/dev/`.
 
 **Mental shortcut**: if it's about *running a model* (decode, sample,
 embed, transcribe, generate-image) it's upstream. If it's about *what

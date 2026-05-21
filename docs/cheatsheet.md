@@ -17,7 +17,7 @@ chimera <subcommand> [flags]
 | `serve`    | OpenAI-compatible HTTP server. |
 | `index`    | Vector-store collections (create / ingest / list / stats / drop). |
 | `search`   | KNN search over a vector-store collection. |
-| `db`       | Embedded SQLite management (status, future: backup/vacuum). |
+| `db`       | Embedded SQLite management (status, backup, vacuum).        |
 | `info`     | Print versions + ggml backends/devices + CPU features. |
 
 Global: `-v` (verbose backend logs), `-V` (version), `-h` (help).

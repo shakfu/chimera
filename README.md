@@ -37,7 +37,7 @@ chimera is not a GUI application. The optional embedded web UI (`make build-with
 | `serve`    | OpenAI-compatible HTTP server (text + audio + image + RAG)             |
 | `index`    | Vector-store collections (create / ingest / list / stats / drop)       |
 | `search`   | KNN search over a vector-store collection                              |
-| `db`       | Embedded SQLite management (status; future: backup / vacuum)           |
+| `db`       | Embedded SQLite management (status, backup, vacuum)                    |
 | `info`     | Print versions + ggml backends/devices + CPU features (useful for bug reports) |
 
 A top-level `-v,--verbose` flag re-enables native backend logging (silenced by default).
@@ -91,7 +91,7 @@ make smoke    # CLI plumbing only -- no model files needed
 make test     # smoke + end-to-end runs gated on models/ presence
 ```
 
-`scripts/test.sh` skips end-to-end checks when the matching model file is absent (see the script for the lookup paths), so a fresh clone reports SKIP rather than FAIL.
+`scripts/test.py` skips end-to-end checks when the matching model file is absent (see the script for the lookup paths), so a fresh clone reports SKIP rather than FAIL. 62 tests total — typically 56 PASS + 6 SKIP-when-fixture-missing on a fresh checkout.
 
 ### Backends
 
@@ -308,7 +308,7 @@ src/chimera/
   llama_build_info_shim.cpp     stubs the symbols libllama-common.a expects
   stb_impl.cpp                  stb_image_write implementation
   CMakeLists.txt                chimera target (consumes parent-scope vars)
-doc/
+docs/
   serve.md, cheatsheet.md       User-facing prose + one-page reference.
   dev/server.md, dev/sqlite.md, Internal notes: what's bound, schema model,
   dev/maintenance.md,           phased plans, webui experimental wiring,
@@ -339,13 +339,26 @@ The whisper/sd silencers cannot live in `chimera.cpp` because their headers woul
 
 ## Documentation
 
-| File                                         | Audience      | Contents                                                                                  |
-|----------------------------------------------|---------------|-------------------------------------------------------------------------------------------|
-| [`docs/cheatsheet.md`](docs/cheatsheet.md)     | user          | One-page command + curl reference.                                                        |
-| [`docs/serve.md`](docs/serve.md)               | user          | `chimera serve` walkthrough: flags, endpoints, errors, SDK setup.                         |
-| [`docs/dev/server.md`](docs/dev/server.md)     | maintainer    | What's bound on the HTTP surface, what's deliberately not, threading model, gotchas.      |
-| [`docs/dev/sqlite.md`](docs/dev/sqlite.md)     | maintainer    | Schema, migration discipline, phased RAG + chat-persistence plan, open design questions.  |
-| [`CHANGELOG.md`](CHANGELOG.md)               | everyone      | Per-release feature notes.                                                                |
+| File                                                                       | Audience      | Contents                                                                                  |
+|----------------------------------------------------------------------------|---------------|-------------------------------------------------------------------------------------------|
+| [`docs/cheatsheet.md`](docs/cheatsheet.md)                                 | user          | One-page command + curl reference.                                                        |
+| [`docs/serve.md`](docs/serve.md)                                           | user          | `chimera serve` walkthrough: flags, endpoints, errors, SDK setup.                         |
+| [`docs/dev/server.md`](docs/dev/server.md)                                 | maintainer    | What's bound on the HTTP surface, what's deliberately not, threading model, gotchas.      |
+| [`docs/dev/server-api-coverage.md`](docs/dev/server-api-coverage.md)       | maintainer    | CLI vs HTTP parity audit: which subcommand flags are surfaced on the server, what's not.  |
+| [`docs/dev/cli-api-coverage.md`](docs/dev/cli-api-coverage.md)             | maintainer    | Chimera CLI vs upstream (llama/whisper/sd) flag coverage audit.                           |
+| [`docs/dev/server-router-mode.md`](docs/dev/server-router-mode.md)         | maintainer    | Decision record: why chimera serve is single-model (wontfix on router mode).              |
+| [`docs/dev/sqlite.md`](docs/dev/sqlite.md)                                 | maintainer    | Design retrospective on the SQLite + sqlite-vec integration (RAG + chat persistence).     |
+| [`docs/dev/webui.md`](docs/dev/webui.md)                                   | maintainer    | Embedded web UI (Variant A shipped; Variant B post-mortem).                               |
+| [`docs/dev/maintenance.md`](docs/dev/maintenance.md)                       | maintainer    | Bump discipline, test discipline, opt-in fixture tests, what's still weak.                |
+| [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md)             | maintainer    | Three-archive split design (libchimera.a as a reusable artifact).                         |
+| [`CHANGELOG.md`](CHANGELOG.md)                                             | everyone      | Per-release feature notes.                                                                |
+| [`TODO.md`](TODO.md)                                                       | maintainer    | Forward backlog. Out-of-scope items at the bottom prevent re-litigation.                  |
+
+**New contributor reading order.** Start with [`docs/cheatsheet.md`](docs/cheatsheet.md)
+for what chimera does, then [`docs/serve.md`](docs/serve.md) for the HTTP surface.
+Maintainers should read [`docs/dev/server.md`](docs/dev/server.md) (the architecture
+overview) and [`docs/dev/maintenance.md`](docs/dev/maintenance.md) (`make bump-check`,
+test discipline, env-var-gated fixture tests) before their first upstream bump.
 
 ## Origin
 

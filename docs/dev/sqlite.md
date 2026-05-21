@@ -1,8 +1,13 @@
 # Embedding SQLite + sqlite-vec in chimera
 
-This is a planning document, not a built feature. It captures the
-analysis behind the decision, the two driving use cases, and a phased
-plan for landing the work.
+> **Status (2026-05-21):** this began as a planning document. Phases
+> 1–5 have all shipped; most of Phase 6+ has shipped too. Read this as
+> a design retrospective with the original phasing preserved for
+> context. The few items still open are flagged inline (search for
+> "Still open" or unmarked entries in § 9 Phase 6+).
+
+This captures the analysis behind the decision, the two driving use
+cases, and the phased plan that landed the work.
 
 ---
 
@@ -409,7 +414,7 @@ OpenAI-shaped vector store API:
 | `GET`  | `/v1/vector_stores` | List collections. |
 | `POST` | `/v1/vector_stores` | Create a collection. Body: `{"name": "...", "embedding_model": "..."}`. |
 | `GET`  | `/v1/vector_stores/{name}` | Collection details + doc count. |
-| `DELETE` | `/v1/vector_stores/{name}` | Drop. |
+| `POST` | `/v1/vector_stores/{name}/delete` | Drop. POST-not-DELETE because server-http only exposes GET/POST methods — see § 9 Phase 4 for the rationale. |
 | `POST` | `/v1/vector_stores/{name}/files` | Ingest text (multipart upload) or a JSON `{"text": "..."}` body. Chunks + embeds in one request. |
 | `POST` | `/v1/vector_stores/{name}/search` | KNN search. Body: `{"query": "...", "k": 5}`. Returns top-k chunks. |
 
@@ -596,11 +601,19 @@ Each phase is shippable on its own.
 ### Phase 6+ — nice-to-haves
 
 - Embedding cache (`embed(text) -> vector` memoized to a small KV
-  table keyed by `sha256(text) || model_id`).
-- Smarter chunking (sentence-aware, semantic boundaries).
-- Hybrid search (FTS5 + sqlite-vec combined ranking).
-- `chimera serve --enable-rag` audit table for ingest/search calls.
+  table keyed by `sha256(text) || model_id`). **[shipped]** — driven
+  by `--cache-embeddings --cache-db <path>` on the CLI.
+- Smarter chunking (sentence-aware, semantic boundaries). **[shipped]**
+  — chunker honors sentence boundaries and chunk-token / chunk-overlap
+  knobs.
+- Hybrid search (FTS5 + sqlite-vec combined ranking). **[shipped]** —
+  `chimera search --mode hybrid` and the equivalent
+  `POST /v1/vector_stores/:name/search` JSON body, with RRF merge.
 - Backup helpers (`chimera db backup`, `chimera db vacuum`).
+  **[shipped]** — both subcommands present under `chimera db`.
+- `chimera serve --enable-rag` audit table for ingest/search calls.
+  Still open — would record `(timestamp, route, query, k, latency_ms)`
+  for capacity-planning and abuse forensics.
 
 ---
 

@@ -9,47 +9,37 @@ subcommands.
 
 ## TL;DR
 
-After the 2026-05-20 audit cycle, every CLI subcommand (`gen`, `chat`,
-`embed`, `whisper`, `sd`) reached zero unresolved `❌` rows against
-upstream. The HTTP server (`chimera serve --enable-audio …`,
-`--enable-image …`) shares the same engine — both modalities route
-through `chimera_whisper::transcribe()` and `chimera_sd::generate()`
-respectively — but the **JSON request shapes accept only the OpenAI
-subset**. None of the long-tail flags that landed on the CLI
-(`--diarize`, `--vad`, `--grammar`, `--guidance`, `--hires`,
-`--cache-mode`, `--ref-image`, control vectors, etc.) are surfaced
-per-request on the server.
+**Status (2026-05-21): the numbered roadmap is closed.** Every step
+from waves 1–4 (per-request gap, 40 fields) through 5a–5e (server-init
+gap: audio LoadParams + VAD, sd LoadParams + ControlNet,
+split-checkpoint flags, perf/offload long-tail, PhotoMaker) and step 6
+(per-request LoRA via named aliases) has shipped. Plus the
+chimera-specific `POST /v1/audio/detect-language` endpoint resolved one
+of the audio Tier-2 items.
 
-Two parity gaps:
+**Background.** chimera ships one engine; the CLI surfaces it with full
+flag coverage, the HTTP server surfaced only an OpenAI subset. This
+doc tracked closing that gap. Going into the 2026-05-20 audit, every
+CLI subcommand (`gen`, `chat`, `embed`, `whisper`, `sd`) already had
+zero unresolved `❌` rows against upstream; the HTTP side then closed
+its two structural gaps in turn:
 
-1. **Per-request gap.** Many CLI flags that already exist on
-   `TranscribeRequest` / `GenerateRequest` aren't read from the HTTP
-   body. Adding them is purely handler-side — the engine doesn't need to
-   change. **Closed across four waves on 2026-05-20** (audio wave 1: 9
-   fields, audio wave 2: 4 fields, image wave 1: 14 fields, image wave
-   2: 13 fields — total 40 fields). **The per-request gap is now
-   effectively closed.** Every remaining unsurfaced flag is blocked on
-   step 5 (server-init plumbing) because it needs a model loaded at
-   startup or compile-time linkage decisions — VAD needs the VAD model,
-   ControlNet needs the ControlNet model, PhotoMaker needs the PM
-   model, per-request LoRA needs the adapter pool, the `Model` hires
-   upscaler needs an upscale model file, and the per-component CPU
-   offload / mmap / max-vram knobs are all context-init decisions.
-2. **Server-init gap.** The serve path calls the **simple overload** of
-   `chimera_whisper::load_model(path)` and
-   `chimera_sd::load_model(path, vae_decode_only)`. The richer
-   `LoadParams` overloads — which the CLI uses for `--flash-attn`,
-   `--no-mmap`, `--max-vram`, `--photo-maker`, `--control-net`,
-   `--lora`, `--prediction`, `--lora-apply-mode`, `--clip-on-cpu` /
-   `--vae-on-cpu`, `--vad-model`, etc. — are **never invoked from the
-   serve path today**. Closing this requires routing new
-   `--enable-audio-*` / `--enable-image-*` CLI flags through to a
-   `LoadParams` build, which is a one-time refactor that unlocks every
-   server-init feature at once.
+1. **Per-request gap (closed 2026-05-20):** flags that already live on
+   `TranscribeRequest` / `GenerateRequest` but weren't being read from
+   the HTTP body. Pure handler-side work. 40 fields landed across four
+   waves: audio wave 1 (9), audio wave 2 (4), image wave 1 (14), image
+   wave 2 (13).
+2. **Server-init gap (closed 2026-05-21):** the serve path used to
+   call the simple `load_model(path)` overloads, never the richer
+   `LoadParams` ones. Closing this routed new `--audio-*` / `--sd-*`
+   CLI flags through to `LoadParams`, unlocking 30 `--sd-*` flags +
+   the audio VAD model + PhotoMaker. Step 6 added the closed-set LoRA
+   alias surface.
 
-Steps 1 and 2 of the
-[recommended order](#recommended-order) below close ~80% of the
-practical parity gap; both have shipped.
+**What's left:** Tier-2 design-open items only — audio `grammar` /
+`grammar_rule` / `grammar_penalty`, image `ref_image` / IP-adapter
+style conditioning. Neither needs more mechanical wiring; both need
+API-shape decisions.
 
 ---
 

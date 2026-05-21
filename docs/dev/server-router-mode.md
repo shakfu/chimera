@@ -12,7 +12,7 @@ the triggers in [§ 5](#5-when-to-revisit) materializes.
 
 For the related discussion of `POST /models/load` / `POST /models/unload`
 as polite-error stubs (the "make the webui's model panel stop looking
-broken" variant), see the open thread in [`doc/dev/webui.md`](webui.md)
+broken" variant), see the open thread in [`docs/dev/webui.md`](webui.md)
 § 5.5 and § 6 — that's a much smaller piece of work and orthogonal to
 this decision.
 
@@ -67,7 +67,7 @@ directly by the router process.
 | Same question for the **RAG / vector store DB** | rolled into above |
 | Pin-checks for ~6 new handler-field asserts plus the static functions (`is_child_server`, `setup_child_server`, `notify_router_sleeping_state`) | half day |
 | Multi-process orchestration in tests — today's harness spawns one process; router mode needs to spawn parent + ≥2 children, validate proxy round-trips, child crash recovery, LRU eviction | 3–5 days |
-| Doc rewrite — "one process, one model" framing is in `doc/serve.md`, `doc/dev/server.md`, `README.md`, and the `chimera info` output. All become lies under router mode; needs a dedicated router-mode doc | 1–2 days |
+| Doc rewrite — "one process, one model" framing is in `docs/serve.md`, `docs/dev/server.md`, `README.md`, and the `chimera info` output. All become lies under router mode; needs a dedicated router-mode doc | 1–2 days |
 | **Total** | **~2–3 weeks** of focused work |
 
 **Plus a permanent maintenance tax.** Each llama.cpp bump now also has
@@ -194,7 +194,7 @@ and defer.**
 
 For the smaller question — "make the webui's model-picker panel show a
 clean error instead of a 404 against chimera" — see
-[`doc/dev/webui.md`](webui.md) § 5.5. That's option A in the earlier
+[`docs/dev/webui.md`](webui.md) § 5.5. That's option A in the earlier
 discussion: bind `POST /models/load` and `POST /models/unload` to
 chimera-side stubs that return 501 "not supported in single-model
 mode." Total cost ~15 lines. Independent of this decision; can land
@@ -206,10 +206,10 @@ any time the webui ergonomics complaint shows up.
 
 - [`TODO.md`](../../TODO.md) — "Out of scope (wontfix)" section,
   "Multi-tenancy / `is_router_server`" bullet.
-- [`doc/dev/server.md`](server.md) — the broader `chimera serve`
+- [`docs/dev/server.md`](server.md) — the broader `chimera serve`
   developer guide; the "one process, one model" framing throughout is
   the design property this document protects.
-- [`doc/dev/webui.md`](webui.md) § 5.5 — the polite-stub option A for
+- [`docs/dev/webui.md`](webui.md) § 5.5 — the polite-stub option A for
   `/models/{load,unload}`, which is the small piece of this problem
   that *is* worth doing on demand.
 - `build/llama.cpp/tools/server/server-models.{h,cpp}` — the upstream

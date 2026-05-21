@@ -177,6 +177,14 @@ lived in anonymous namespaces inside the `.cpp` files.
 | `POST /tokenize`, `POST /detokenize` | `routes.post_tokenize` + `post_detokenize` | Vocab helpers; useful for clients that don't bundle a tokenizer (e.g. token counting before sending). |
 | `POST /apply-template` | `routes.post_apply_template` | Renders the chat template against a `messages[]` array without generating. Pure debugging value. |
 | `POST /v1/responses` | `routes.post_responses_oai` | OpenAI Responses API. **Stateful within a single chimera serve invocation** — server-context holds the conversation thread state in-process; lost on restart. With `--persist-chats` the underlying chat-completions traffic is still saved to the chats table. |
+| `GET /slots`, `POST /slots/:id_slot` | `routes.get_slots` + `routes.post_slots` | Per-slot status (always works); save/restore/erase actions on POST. Save/restore additionally require `--slot-save-path`; without it the upstream handler returns HTTP 501. |
+| `GET /lora-adapters`, `POST /lora-adapters` | `routes.get_lora_adapters` + `routes.post_lora_adapters` | Lists adapters loaded via `--lora` and lets the client re-weight by index. Empty list when no `--lora` was supplied. |
+
+### 4.1a Opt-in via `--reranking <model>` (shipped)
+
+| Route | Source | Notes |
+|-------|--------|-------|
+| `POST /v1/rerank` | `routes.post_rerank` from a second `server_routes` instance attached to the rerank model | Cross-encoder document reranking. Body: `{"query": "...", "documents": [...], "top_n": N}`. The rerank model loads alongside the main LLM; both stay in process. |
 
 ### 4.2 Opt-in via `--enable-audio` (shipped)
 
@@ -289,18 +297,20 @@ is a scope choice, not a capability gap:
 
 - `POST /completion`, `POST /completions` — legacy (non-/v1) llama.cpp completion shape, *different* from `/v1/completions`. Practically nobody calls it in 2025.
 - `POST /embedding`, `POST /embeddings` — non-/v1 embeddings variants; redundant with `/v1/embeddings`.
-- `POST /rerank`, `POST /v1/rerank` — document reranking via cross-encoder models. Niche; bind on request.
-- `GET /slots`, `POST /slots/:id_slot` — slot save/load (KV cache snapshots). Bind on request.
-- `GET /lora-adapters`, `POST /lora-adapters` — LoRA hot-swap. Bind on request.
 - `POST /props` — mutating server props at runtime conflicts with chimera serve's "CLI is the config" stance. Read (`GET /props`) is bound; write is not.
+
+(`GET /slots` + `POST /slots/:id_slot` for KV-cache snapshots,
+`GET /lora-adapters` + `POST /lora-adapters` for LoRA hot-swap, and
+`POST /v1/rerank` for cross-encoder reranking all shipped — see § 4.1
+"Always exposed" and the `--reranking` flag in `docs/serve.md`.)
 
 Server-mode features not wired up:
 
-- Router / multi-model mode (`is_router_server` branch in `llama-server`'s `server.cpp`). chimera serve loads one LLM.
+- Router / multi-model mode (`is_router_server` branch in `llama-server`'s `server.cpp`). chimera serve loads one LLM. See `docs/dev/server-router-mode.md` for the decision record.
 - Built-in tool plugins (`--server-tools`). EXPERIMENTAL upstream.
 - MCP CORS proxy (`--webui-mcp-proxy`). EXPERIMENTAL upstream.
 - GCP / Vertex AI compat (`ctx_http.register_gcp_compat()`).
-- Embedded Web chat UI. `manage.py` passes `LLAMA_BUILD_WEBUI=OFF` to skip baking the ~11 MB SvelteKit bundle.
+- Embedded Web chat UI (Variant B, chimera-specific). The upstream-style embed (Variant A, `CHIMERA_WEBUI_EMBED=ON`) **did** ship — see § 7 of `docs/dev/webui.md`; the entry here refers only to the abandoned Variant B prototype.
 - Child-server / parent-process sleeping notifications.
 - SSL / TLS direct serving. Run behind a reverse proxy (nginx, caddy) for HTTPS.
 
@@ -343,7 +353,7 @@ multiple times; the cost is GPU memory.
 
 ## 6. Issues caught during implementation
 
-### 6.1 Form fields arrive as JSON strings, not typed numbers
+### 6.1 Form fields arrive as JSON strings, not typed numbers — [resolved]
 
 `server-http.cpp:485` collects multipart form text fields into a JSON
 object where every value is `field.content` — *always a string*. For
@@ -358,7 +368,7 @@ that parses to that type. All numeric reads in the image handlers go
 through these. Worth re-using when adding new routes that may be reached
 by either body type.
 
-### 6.2 Linenoise width math vs. ANSI in the prompt
+### 6.2 Linenoise width math vs. ANSI in the prompt — [resolved]
 
 Embedded SGR escapes inside the prompt string passed to
 `linenoise_read()` confuse `utf8_str_width` and corrupt the cursor on
@@ -371,7 +381,7 @@ This is not a server-mode bug but landed during the same arc of work.
 If the server ever grows an interactive console it inherits the same
 constraint.
 
-### 6.3 `whisper_full_params.detect_language = true` is a different mode
+### 6.3 `whisper_full_params.detect_language = true` is a different mode — [resolved]
 
 It runs language identification and returns *without transcribing*. To
 auto-detect language and transcribe, set `params.language = "auto"`
@@ -381,7 +391,7 @@ tests never caught it; the HTTP handler exercised it by default because
 the OpenAI spec's default is autodetect. Documented and fixed in
 `chimera_whisper::transcribe`.
 
-### 6.4 `cfg_scale=1.0` + `sample_method=euler` crashes the VAE on SDXL-Turbo
+### 6.4 `cfg_scale=1.0` + `sample_method=euler` crashes the VAE on SDXL-Turbo — [open, upstream]
 
 This is a stable-diffusion.cpp issue: certain `(cfg_scale, sample_method)`
 combinations trigger `GGML_ASSERT(buft) failed` inside `VAE::encode`.
@@ -402,7 +412,7 @@ We currently surface this as a generic `image generation failed` HTTP
 For now: document in the changelog, leave the broad error message in
 place.
 
-### 6.5 OpenSSL is a hard new dependency
+### 6.5 OpenSSL is a hard new dependency — [resolved]
 
 cpp-httplib was already a transitive dep, but `LLAMA_OPENSSL=ON` in
 `manage.py` means we now pull in libssl/libcrypto symbols. On macOS that
@@ -417,7 +427,7 @@ If we ever want a no-OpenSSL build, the move is to flip
 `LLAMA_OPENSSL=OFF` in `manage.py` and accept that HTTPS-fetch features
 (LoRA URLs, HF download via `common`) stop working.
 
-### 6.6 Double-init of llama_backend
+### 6.6 Double-init of llama_backend — [resolved]
 
 `command_serve` initially called `llama_backend_init()` itself, but
 `main()` already does. The second call is harmless on most builds but
@@ -484,7 +494,7 @@ delivery paths now ship as opt-in: the bundle can be baked into the
 binary via `-DCHIMERA_WEBUI_EMBED=ON` (upstream's `xxd.cmake`
 machinery; binary size up ~6 MB stripped) or served from any static
 directory at runtime via `--public-path <dir>`. See
-[`doc/dev/webui.md`](webui.md) for the full picture.
+[`docs/dev/webui.md`](webui.md) for the full picture.
 
 **Single SD context per process.** Loading multiple SD models at once
 would multiply VRAM. For now the design is "one image model per
@@ -516,41 +526,44 @@ not revisit without a concrete user request.**
 
 ### Longer-term
 
-9. **Web chat UI.** Either:
-   - Re-enable `LLAMA_BUILD_WEBUI=ON` in `manage.py` and serve the
-     baked-in assets. Binary grows ~11 MB. Simplest.
-   - Ship assets next to the binary and route `GET /` plus
-     `GET /{index.html, bundle.js, bundle.css}` through cpp-httplib's
-     static-file machinery. Smaller binary; install complexity.
+1. **Web chat UI — chimera-specific UX.** The upstream-style embed
+   (Variant A, `CHIMERA_WEBUI_EMBED=ON`) is **shipped** — see § 7 below
+   and `docs/dev/webui.md`. What's still open is Variant B: a
+   chimera-aware UI that exposes the routes upstream's UI doesn't know
+   about (audio, images, vector store, persisted chats). The
+   `--public-path` flag is the entry point; the actual UI is the
+   missing piece.
 
-10. **SSE for image generation progress.** OpenAI's spec doesn't define
-    SSE for `/v1/images/*`; some clients invent extensions. SD reports
-    progress step-by-step via its callback (which we currently route to
-    stderr). Adding an `event: progress` SSE stream alongside the final
-    `data:` payload is technically straightforward — the question is
-    which client convention to follow.
+2. **SSE for image generation progress.** OpenAI's spec doesn't define
+   SSE for `/v1/images/*`; some clients invent extensions. SD reports
+   progress step-by-step via its callback (which we currently route to
+   stderr). Adding an `event: progress` SSE stream alongside the final
+   `data:` payload is technically straightforward — the question is
+   which client convention to follow.
 
-11. **Multi-tenancy.** Multiple LLMs loadable simultaneously, route by
-    request's `model` field. Today we set `model_alias` to the loaded
-    name and ignore `model`. Doing this properly is the
-    `is_router_server` path in upstream's `server.cpp`; effectively a
-    rewrite of `command_serve`.
+3. **Multi-tenancy.** Multiple LLMs loadable simultaneously, route by
+   request's `model` field. Today we set `model_alias` to the loaded
+   name and ignore `model`. Doing this properly is the
+   `is_router_server` path in upstream's `server.cpp`; effectively a
+   rewrite of `command_serve`. See `docs/dev/server-router-mode.md`
+   for the wontfix decision record.
 
-12. **HTTPS direct serving.** `--ssl-cert-file` / `--ssl-key-file`. The
-    machinery is in cpp-httplib; would mean wiring it through
-    `server_http_context::init`. Most deployments will use a reverse
-    proxy instead.
+4. **HTTPS direct serving.** `--ssl-cert-file` / `--ssl-key-file`. The
+   machinery is in cpp-httplib; would mean wiring it through
+   `server_http_context::init`. Most deployments will use a reverse
+   proxy instead.
 
-13. **Authentication beyond `--api-key`.** The current single-key
-    bearer-token check is enough for "behind a VPN"; multi-tenant
-    deployments will want JWT or per-key rate limiting.
+5. **Authentication beyond `--api-key`.** The current single-key
+   bearer-token check is enough for "behind a VPN"; multi-tenant
+   deployments will want JWT or per-key rate limiting.
 
-14. **Reorganize `chimera_serve.cpp`** if it keeps growing. The current
-    ~600 LOC handles five LLM routes + one audio route + three image
-    routes + signal wiring + helpers. Threshold for splitting: when a
-    new modality lands and the file crosses ~1000 LOC, split into
-    `chimera_serve.cpp` (route registration + lifecycle) plus
-    per-modality handler files (`serve_audio.cpp`, `serve_images.cpp`).
+(Item formerly numbered 14 — "reorganize chimera_serve.cpp if it keeps
+growing past ~600 LOC" — shipped in 0.1.5; the file was split from
+2249 LOC into `chimera_serve.cpp` plus five per-modality TUs
+(`chimera_serve_audio.cpp`, `chimera_serve_images.cpp`,
+`chimera_serve_rag.cpp`, `chimera_serve_chat_persist.cpp`,
+`chimera_serve_chats_read.cpp`). The current `chimera_serve.cpp` is
+the route-registration + lifecycle backbone.)
 
 ---
 

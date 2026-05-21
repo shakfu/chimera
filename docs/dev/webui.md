@@ -5,9 +5,9 @@ into itself. This document covers how it is wired up, how to enable it
 locally, and the seams that bit during implementation.
 
 It is the maintainer's view. End-user-facing notes (the `--no-webui`
-flag, what the UI is) live in [`doc/serve.md`](../serve.md). The wider
+flag, what the UI is) live in [`docs/serve.md`](../serve.md). The wider
 `chimera serve` implementation notes are in
-[`doc/dev/server.md`](server.md); this file is the webui-specific
+[`docs/dev/server.md`](server.md); this file is the webui-specific
 addendum.
 
 > **Status — experimental.** Variant A (embedded) is the shipped path
@@ -506,9 +506,9 @@ Until that lands, the manual verification recipe in § 4 is what we have.
   chimera-side CMake mirrors that block.
 - `tools/server/webui/` in the vendored llama.cpp tree — the Svelte
   source the bundles are built from.
-- [`doc/serve.md`](../serve.md) — user-facing notes (the `--no-webui`
+- [`docs/serve.md`](../serve.md) — user-facing notes (the `--no-webui`
   flag and the build-time opt-in mention).
-- [`doc/dev/server.md`](server.md) — the broader `chimera serve`
+- [`docs/dev/server.md`](server.md) — the broader `chimera serve`
   developer guide; § 4 ("Routes") and § 7 ("Things to watch out for")
   pair well with this document.
 - Git history at the commit that removed `webui/` — the only place the
