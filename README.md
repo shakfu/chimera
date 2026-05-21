@@ -4,6 +4,8 @@ A single statically-linked C++ executable that bundles [llama.cpp](https://githu
 
 If you want the same capabilities from Python instead of a native binary, see [**cyllama**](https://github.com/shakfu/cyllama) — chimera's sibling project, which exposes llama.cpp / whisper.cpp / stable-diffusion.cpp as Cython bindings with a high-level Python API.
 
+The same build also produces **`libchimera.a`**, a redistributable static library that hosts the engines and the OpenAI-compatible HTTP server. Other C++ projects can link it directly to embed text generation, embeddings, transcription, image generation, RAG, and the HTTP server inside their own process — without forking chimera or shelling out to the `chimera` binary. See [§ "As a library"](#as-a-library) below and [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) for the embedder-facing surface.
+
 ## Who it's for
 
 chimera targets CLI-first users who run more than one ggml-backed modality (text + audio + image) and want them sharing one process, one ggml backend set, one SQLite database, and one OpenAI-compatible HTTP surface — rather than running, configuring, and gluing together three separate servers. It is most useful when:
@@ -12,6 +14,7 @@ chimera targets CLI-first users who run more than one ggml-backed modality (text
 - You distribute a single static binary across machines and don't want a Python or Node runtime on the target host.
 - You build against multiple ggml backends (CPU, CUDA, ROCm, SYCL, Vulkan, Metal) from the same source tree, and want to verify the linked backend with `chimera info` rather than runtime probing.
 - You're building on top of the HTTP server and need text, audio, image, embeddings, RAG, and chat-history routes in one origin.
+- You're a C++ embedder who wants to drive llama.cpp / whisper.cpp / sd.cpp from your own process without reimplementing the load-and-run scaffolding. Linking `libchimera.a` (and optionally `#include "chimera.hpp"` for the persistent-handle OOP layer) gives you the same model lifecycle, sampler wiring, and HTTP-server code paths the `chimera` binary uses.
 
 chimera is not a GUI application. The optional embedded web UI (`make build-with-webui`) bakes in upstream llama.cpp's chat UI for the `/` endpoint, but there is no model browser, launcher, or settings panel. Users who primarily want point-and-click are better served by Ollama, LM Studio, or Jan.
 
@@ -23,6 +26,7 @@ chimera is not a GUI application. The optional embedded web UI (`make build-with
 - **Upstream-pin discipline.** Vendored llama.cpp / whisper.cpp / sd.cpp versions are pinned in `scripts/manage.py`. `make bump-check` diffs the currently-vendored upstream-server headers against a target llama.cpp version, and `chimera_pin_check.cpp` static-asserts on the struct fields chimera relies on — so a version bump that silently retypes or renames a depended-on field fails at compile time rather than at runtime.
 - **Backend matrix.** CPU, CUDA, ROCm (HIP), SYCL, Vulkan, and Metal are first-class build targets in the Makefile. `chimera info` reports built / loaded / registered backends and enumerated devices.
 - **Flag-coverage audit.** [`docs/dev/cli-api-coverage.md`](docs/dev/cli-api-coverage.md) tracks which upstream flags chimera exposes and which are deliberately skipped, so the gap between chimera's CLI and upstream's is auditable rather than implicit.
+- **Library artifact.** The same build produces `libchimera.a` (chimera's own code), `libchimera_thirdparty.a` (the bundled C++ stack), and `libchimera_ggml.a` (ggml core + per-backend archives, must be whole-archived). An external C++ project can link the three and consume chimera's procedural surface (`command_*`, `load_llama_model`, `make_sampler`, `run_generation`, …) or the optional header-only OOP layer (`#include "chimera.hpp"` — persistent-handle classes for Llama / Embedder / Tokenizer / Whisper / SD / Server). See [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md) for the link contract and [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) for the OOP wrapper.
 
 ## Subcommands
 
@@ -43,6 +47,44 @@ chimera is not a GUI application. The optional embedded web UI (`make build-with
 A top-level `-v,--verbose` flag re-enables native backend logging (silenced by default).
 
 See [`docs/cheatsheet.md`](docs/cheatsheet.md) for a one-page command reference, and [`docs/serve.md`](docs/serve.md) for the HTTP server.
+
+## As a library
+
+`make build` produces both the `chimera` executable and three static archives that an external C++ project can link as a library consumer:
+
+| Archive | Role | Link mode |
+|---|---|---|
+| `build/libchimera.a` | chimera's own code (model lifecycle, sampler, generation, HTTP server, RAG, SQLite glue) | Normal link |
+| `build/libchimera_thirdparty.a` | Bundled C++ stack (llama, mtmd, server-context, cpp-httplib, whisper, sd, vendored libwebp / linenoise) | Normal link |
+| `build/libchimera_ggml.a` | ggml core + per-backend archives | **Whole-archive required** (otherwise GPU backends silently fail to register) |
+
+Two consumption surfaces:
+
+**Procedural** (`chimera/*.h`). Build a `LlamaCommonOptions` / `WhisperOptions` / `SdOptions` / `ServeOptions` and call `command_prompt`, `command_embed`, `command_tokenize`, `command_whisper`, `command_sd`, or `command_serve`. The lower-level helpers (`load_llama_model`, `new_llama_context`, `run_generation`, `make_sampler`, `chimera_whisper::transcribe`, `chimera_sd::generate`, …) are exposed too for callers that want to drive the engines step-by-step.
+
+**OOP** (header-only, `#include "chimera.hpp"`). Persistent-handle classes that load the model in the constructor and reuse it across calls — `chimera::Llama`, `chimera::Embedder`, `chimera::Tokenizer`, `chimera::Whisper`, `chimera::SD`, plus the `chimera::Server` wrapper. Streaming callback (`std::function<void(std::string_view)>`) on `Llama::generate` for library consumers that don't want stdout streaming. Path-only convenience constructors on every wrapper. The header is not compiled into the archives; consumers `#include` it at their call site and pay no overhead if they don't.
+
+Example:
+
+```cpp
+#include "chimera.hpp"
+
+int main() {
+    chimera::Llama llm("Qwen3-1.7B-Q4_0.gguf");
+    llm.options().n_predict = 64;
+    auto reply = llm.generate("What is the capital of France?");
+    // Or stream tokens through a callback:
+    llm.generate("And Spain?", [](std::string_view piece) {
+        std::cout << piece << std::flush;
+    });
+}
+```
+
+`tests/external/` is a standalone CMake project that links the three archives the way a non-CMake consumer would and exercises both surfaces end to end — see it for the exact link recipe (`-Wl,-force_load` on macOS, `--whole-archive` group on Linux, `/WHOLEARCHIVE:` on Windows). Run with `make test-external-smoke` (uses CTest under the hood; `make test-external-oop` filters to the OOP-layer lane).
+
+Reading order for embedders:
+1. [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md) — the three-archive link contract, why whole-archiving ggml is non-optional, validation plan.
+2. [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) — `chimera.hpp` design (persistent-handle semantics, dirty-options policy, streaming hook, upstream-drift guards).
 
 ## Build
 
