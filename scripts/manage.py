@@ -96,7 +96,7 @@ PY_VER_MINOR = sys.version_info.minor
 CHIMERA_VERSION = "0.1.7"
 LLAMACPP_VERSION = "b9264" # was "b9119"
 WHISPERCPP_VERSION = "v1.8.4"
-SDCPP_VERSION = "master-596-90e87bc"
+SDCPP_VERSION = "master-637-ef92a00" # was "master-596-90e87bc"
 # linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
 # commit in CHANGELOG for traceability.
 LINENOISE_VERSION = "master"
