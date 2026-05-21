@@ -16,6 +16,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "chimera.h"
@@ -29,6 +30,97 @@
 extern "C" const char * ggml_version(void);
 #include "stb_image.h"
 #include "stb_image_write.h"
+
+// ---- stable-diffusion.h pin-check ---------------------------------------
+//
+// Compile-time assertions about the upstream surface chimera_sd.cpp
+// depends on. If a stable-diffusion.cpp version bump renames a struct
+// field, changes an enum value chimera reaches by name, or alters a
+// function signature we call, this block fails to compile with the
+// offending line pointing directly at the broken contract — instead of
+// surfacing as a cryptic crash inside generate() or a runtime "unknown
+// sampler" error.
+//
+// SD's headers can't share a TU with llama.cpp (different ggml.h enum
+// definitions collide), which is why these assertions live here in
+// chimera_sd.cpp rather than alongside the llama assertions in
+// chimera_pin_check.cpp. Same idea, different file.
+//
+// Rule of thumb (matching chimera_pin_check.cpp): any time you call an
+// upstream symbol from chimera_sd.cpp, a matching static_assert here is
+// cheap insurance. The file generates no code at runtime; strip(1)
+// discards everything.
+namespace {
+
+// Struct shapes chimera reads or writes by field name. Type drift here
+// would silently change semantics (e.g. an int that became unsigned)
+// or break compilation (a removed field).
+static_assert(std::is_same_v<decltype(sd_image_t::width),   uint32_t>,
+              "sd_image_t::width changed type (pixel_image_to_sd writes this).");
+static_assert(std::is_same_v<decltype(sd_image_t::height),  uint32_t>,
+              "sd_image_t::height changed type.");
+static_assert(std::is_same_v<decltype(sd_image_t::channel), uint32_t>,
+              "sd_image_t::channel changed type.");
+static_assert(std::is_same_v<decltype(sd_image_t::data),    uint8_t *>,
+              "sd_image_t::data is no longer uint8_t* — pixel_image_to_sd "
+              "borrows from PixelImage::pixels by const_cast.");
+static_assert(std::is_same_v<decltype(sd_lora_t::path),       const char *>,
+              "sd_lora_t::path is no longer const char* — generate() borrows "
+              "from req.loras[i].path.c_str() and relies on this.");
+static_assert(std::is_same_v<decltype(sd_lora_t::multiplier), float>,
+              "sd_lora_t::multiplier (a.k.a. scale) changed type.");
+static_assert(std::is_same_v<decltype(sd_lora_t::is_high_noise), bool>,
+              "sd_lora_t::is_high_noise changed type.");
+static_assert(std::is_same_v<decltype(sd_pm_params_t::id_images),      sd_image_t *>,
+              "sd_pm_params_t::id_images is no longer a borrowed sd_image_t array.");
+static_assert(std::is_same_v<decltype(sd_pm_params_t::id_embed_path),  const char *>,
+              "sd_pm_params_t::id_embed_path changed type.");
+static_assert(std::is_same_v<decltype(sd_pm_params_t::style_strength), float>,
+              "sd_pm_params_t::style_strength changed type.");
+static_assert(std::is_same_v<decltype(sd_sample_params_t::sample_steps),     int>,
+              "sd_sample_params_t::sample_steps changed type.");
+static_assert(std::is_same_v<decltype(sd_sample_params_t::flow_shift),       float>,
+              "sd_sample_params_t::flow_shift changed type.");
+static_assert(std::is_same_v<decltype(sd_sample_params_t::eta),              float>,
+              "sd_sample_params_t::eta changed type.");
+static_assert(std::is_same_v<decltype(sd_sample_params_t::shifted_timestep), int>,
+              "sd_sample_params_t::shifted_timestep changed type.");
+
+// Enum values chimera names by string and reaches via str_to_*. A
+// removed enumerator would be a runtime "unknown method" error today;
+// this catches it at compile time. (We only assert the sentinel COUNT
+// values — those rarely change and their existence implies the named
+// enumerators all exist under whatever spelling. Individual enumerator
+// asserts would be too noisy.)
+static_assert(static_cast<int>(SAMPLE_METHOD_COUNT) > 0,
+              "sample_method_t::SAMPLE_METHOD_COUNT missing — str_to_sample_method "
+              "sentinel relies on it.");
+static_assert(static_cast<int>(SCHEDULER_COUNT) > 0,
+              "scheduler_t::SCHEDULER_COUNT missing — str_to_scheduler sentinel "
+              "relies on it.");
+static_assert(static_cast<int>(PREDICTION_COUNT) > 0,
+              "prediction_t::PREDICTION_COUNT missing — str_to_prediction "
+              "sentinel relies on it.");
+
+// Function signatures chimera calls. The (...) cast forces an unused
+// function pointer of the asserted type; if upstream changes any
+// parameter or return type, the cast fails.
+[[maybe_unused]] static constexpr auto _new_sd_ctx_sig =
+    static_cast<sd_ctx_t * (*)(const sd_ctx_params_t *)>(&new_sd_ctx);
+[[maybe_unused]] static constexpr auto _free_sd_ctx_sig =
+    static_cast<void (*)(sd_ctx_t *)>(&free_sd_ctx);
+[[maybe_unused]] static constexpr auto _generate_image_sig =
+    static_cast<sd_image_t * (*)(sd_ctx_t *, const sd_img_gen_params_t *)>(&generate_image);
+[[maybe_unused]] static constexpr auto _sd_ctx_params_init_sig =
+    static_cast<void (*)(sd_ctx_params_t *)>(&sd_ctx_params_init);
+[[maybe_unused]] static constexpr auto _str_to_sample_method_sig =
+    static_cast<enum sample_method_t (*)(const char *)>(&str_to_sample_method);
+[[maybe_unused]] static constexpr auto _str_to_scheduler_sig =
+    static_cast<enum scheduler_t (*)(const char *)>(&str_to_scheduler);
+[[maybe_unused]] static constexpr auto _sd_ctx_supports_image_generation_sig =
+    static_cast<bool (*)(const sd_ctx_t *)>(&sd_ctx_supports_image_generation);
+
+}  // namespace
 
 void SdContextDeleter::operator()(sd_ctx_t * ctx) const {
     if (ctx != nullptr) {

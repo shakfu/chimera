@@ -1663,38 +1663,91 @@ class Application(ShellCmd, metaclass=MetaCommander):
         help=f"llama.cpp ref to compare against (default: {LLAMACPP_VERSION}).",
     )
     @option(
+        "--sd-version",
+        default=SDCPP_VERSION,
+        help=f"stable-diffusion.cpp ref to compare against (default: {SDCPP_VERSION}). "
+        "Accepts either a tag/SHA or the build-string format "
+        "'master-<count>-<sha>'; the trailing SHA is extracted automatically.",
+    )
+    @option("--skip-llama", action="store_true",
+            help="skip llama.cpp comparison (SD only)")
+    @option("--skip-sd",    action="store_true",
+            help="skip stable-diffusion.cpp comparison (llama only)")
+    @option(
         "--show-diff-lines",
         type=int,
         default=120,
         help="cap unified-diff output at this many lines (default: 120)",
     )
     def do_bump_check(self, args: argparse.Namespace) -> None:
-        """compare vendored server-{context,http}.h against an upstream ref"""
+        """compare vendored upstream headers against upstream refs (llama.cpp + SD)"""
         import difflib
         import re
         from urllib.request import Request, urlopen
         from urllib.error import HTTPError, URLError
 
-        ref = args.llama_version
-        # All vendored upstream-internal headers chimera links against
-        # or compiles against. The server-* pair were the only entries
-        # historically; widening to common.h / arg.h / chat.h / mtmd.h /
-        # llama.h surfaces drift in the larger public + common surface
-        # chimera also pokes (common_params fields, llama_tokenize
-        # signature, mtmd helper protos, etc.) without any extra
-        # plumbing — same script, same vendored copies under
-        # thirdparty/llama.cpp/include/, just more files compared.
-        files = [
-            "include/llama.h",
-            "common/common.h",
-            "common/arg.h",
-            "common/chat.h",
-            "tools/mtmd/mtmd.h",
-            "tools/server/server-context.h",
-            "tools/server/server-http.h",
-        ]
-        repo = "ggml-org/llama.cpp"
-        vendored_dir = self.project.cwd / "thirdparty" / "llama.cpp" / "include"
+        # SD versions are pinned as "master-<count>-<sha>" (e.g.
+        # "master-596-90e87bc"). raw.githubusercontent.com doesn't accept
+        # that whole string, only the trailing SHA. Extract it.
+        def normalize_ref(version: str) -> str:
+            m = re.match(r"^master-\d+-([0-9a-f]{7,40})$", version)
+            return m.group(1) if m else version
+
+        # Headers chimera vendors per upstream project. The same script
+        # handles both repos by walking the table below. New entries are
+        # one-line additions; new repos a couple more lines.
+        comparisons: list[dict] = []
+        if not args.skip_llama:
+            comparisons.append({
+                "name":          "llama.cpp",
+                "repo":          "ggml-org/llama.cpp",
+                "ref":           normalize_ref(args.llama_version),
+                "ref_display":   args.llama_version,
+                "vendored_dir":  self.project.cwd / "thirdparty" / "llama.cpp" / "include",
+                # All vendored upstream-internal headers chimera links
+                # against or compiles against. The server-* pair were
+                # the only entries historically; widening to common.h /
+                # arg.h / chat.h / mtmd.h / llama.h surfaces drift in
+                # the larger public + common surface chimera also pokes
+                # (common_params fields, llama_tokenize signature, mtmd
+                # helper protos, etc.) without any extra plumbing.
+                "files":         [
+                    "include/llama.h",
+                    "common/common.h",
+                    "common/arg.h",
+                    "common/chat.h",
+                    "tools/mtmd/mtmd.h",
+                    "tools/server/server-context.h",
+                    "tools/server/server-http.h",
+                ],
+                # Build-system path probes (non-headers chimera depends
+                # on). See the build-system drift discussion at the end
+                # of this function. Only llama.cpp has webui layout
+                # drama today; SD's surface is small enough that the
+                # header-diff covers it.
+                "probes": [
+                    ("tools/server/server-http.cpp", "required", "vendored as src-aux + compiled into chimera"),
+                    ("scripts/xxd.cmake",            "required", "asset xxd helper for CHIMERA_WEBUI_EMBED=ON"),
+                    ("tools/server/public/index.html", "info", "pre-b9200 webui asset (old layout)"),
+                    ("tools/ui/ui.h",                  "info", "post-b9200 ui header (new layout, server-http.cpp #includes this)"),
+                    ("tools/ui/dist/index.html",       "info", "post-b9200 prebuilt webui asset (upstream-built; absent unless `npm run build` was run in tools/ui/)"),
+                ],
+            })
+        if not args.skip_sd:
+            comparisons.append({
+                "name":          "stable-diffusion.cpp",
+                "repo":          "leejet/stable-diffusion.cpp",
+                "ref":           normalize_ref(args.sd_version),
+                "ref_display":   args.sd_version,
+                "vendored_dir":  self.project.cwd / "thirdparty" / "stable-diffusion.cpp" / "include",
+                # SD's main C API header. Upstream puts it under `include/`
+                # (not at the repo root like the llama-server-internal
+                # headers); chimera flattens that on copy, so the vendored
+                # filename is just `stable-diffusion.h` while the upstream
+                # path is `include/stable-diffusion.h`.
+                "files":         ["include/stable-diffusion.h"],
+                "probes":        [],
+            })
 
         # Cheap "interesting symbol" extractor: catches struct/class/enum
         # declarations, handler_t members (the upstream split that broke
@@ -1718,7 +1771,7 @@ class Application(ShellCmd, metaclass=MetaCommander):
                             out.add(name)
             return out
 
-        def fetch_upstream(path: str) -> Optional[str]:
+        def fetch_upstream(repo: str, ref: str, path: str) -> Optional[str]:
             url = f"https://raw.githubusercontent.com/{repo}/{ref}/{path}"
             try:
                 req = Request(url, headers={"User-Agent": "chimera-bump-check"})
@@ -1731,102 +1784,7 @@ class Application(ShellCmd, metaclass=MetaCommander):
                 self.log.error(f"GET {url} -> {e}")
                 return None
 
-        if not vendored_dir.exists():
-            self.log.error(
-                f"No vendored headers found at {vendored_dir}. "
-                f"Run `make build` (or `python scripts/manage.py build --llama-cpp`) first."
-            )
-            sys.exit(2)
-
-        print(f"chimera bump-check: comparing vendored headers against {repo}@{ref}")
-        print()
-
-        total_changes = 0
-        for upstream_path in files:
-            basename = os.path.basename(upstream_path)
-            vendored_path = vendored_dir / basename
-            print(f"=== {basename} ===")
-            if not vendored_path.exists():
-                print(f"  (no vendored copy at {vendored_path}; skipped)\n")
-                continue
-
-            new_text = fetch_upstream(upstream_path)
-            if new_text is None:
-                print("  (failed to fetch upstream copy; skipped)\n")
-                continue
-
-            old_text = vendored_path.read_text(encoding="utf-8")
-            if old_text == new_text:
-                print("  no changes")
-                print()
-                continue
-
-            old_syms = extract_symbols(old_text)
-            new_syms = extract_symbols(new_text)
-            removed = sorted(old_syms - new_syms)
-            added = sorted(new_syms - old_syms)
-            total_changes += 1
-
-            if removed:
-                print(f"  removed symbols ({len(removed)}):")
-                for s in removed:
-                    print(f"    - {s}")
-            if added:
-                print(f"  added symbols ({len(added)}):")
-                for s in added:
-                    print(f"    + {s}")
-            if not removed and not added:
-                print("  symbol set unchanged; signatures or comments differ")
-
-            diff = list(
-                difflib.unified_diff(
-                    old_text.splitlines(keepends=True),
-                    new_text.splitlines(keepends=True),
-                    fromfile=f"vendored/{basename}",
-                    tofile=f"upstream@{ref}/{basename}",
-                    n=2,
-                )
-            )
-            cap = max(0, args.show_diff_lines)
-            print(f"  unified diff ({len(diff)} lines, capped at {cap}):")
-            for line in diff[:cap]:
-                sys.stdout.write("    " + line)
-            if len(diff) > cap:
-                print(f"    ... ({len(diff) - cap} more lines elided)")
-            print()
-
-        # ------------------------------------------------------------------
-        # Build-system drift probe.
-        #
-        # The header diff above catches API drift. But chimera also depends
-        # on the layout of certain *non-header* paths — the staging logic
-        # in `_copy_headers` follows specific directory structure that
-        # upstream can rearrange without touching any header. Two recent
-        # examples:
-        #   - server-http.cpp was already vendored as src-aux (not as a
-        #     library) because upstream never built a libserver-http.a;
-        #     if upstream ever DOES factor it into a lib, the src-aux copy
-        #     becomes a stale duplicate.
-        #   - around b9200, `tools/server/public/` was deleted and the
-        #     webui moved to `tools/ui/` as a Vite project (no prebuilt
-        #     assets in the tree). chimera's `_copy_headers` raised an
-        #     IOError because the old path was hard-coded.
-        #
-        # This probe checks a handful of named paths and reports which
-        # webui layout the target ref uses. Cheap (~5 GETs) and catches
-        # build-system drift before a `make build` fails opaquely.
-        # ------------------------------------------------------------------
-
-        build_system_probes = [
-            # (path, severity, description). severity is "required" or "info".
-            ("tools/server/server-http.cpp", "required", "vendored as src-aux + compiled into chimera"),
-            ("scripts/xxd.cmake",            "required", "asset xxd helper for CHIMERA_WEBUI_EMBED=ON"),
-            ("tools/server/public/index.html", "info", "pre-b9200 webui asset (old layout)"),
-            ("tools/ui/ui.h",                  "info", "post-b9200 ui header (new layout, server-http.cpp #includes this)"),
-            ("tools/ui/dist/index.html",       "info", "post-b9200 prebuilt webui asset (upstream-built; absent unless `npm run build` was run in tools/ui/)"),
-        ]
-
-        def upstream_path_exists(path: str) -> bool:
+        def upstream_path_exists(repo: str, ref: str, path: str) -> bool:
             url = f"https://raw.githubusercontent.com/{repo}/{ref}/{path}"
             try:
                 req = Request(url, method="HEAD",
@@ -1839,58 +1797,155 @@ class Application(ShellCmd, metaclass=MetaCommander):
                 self.log.error(f"HEAD {url} -> {e}")
                 return False
 
-        print("=== build-system drift ===")
-        missing_required: list[str] = []
-        webui_layout: dict[str, bool] = {"old": False, "new_header": False, "new_assets": False}
-        for path, severity, desc in build_system_probes:
-            exists = upstream_path_exists(path)
-            mark = "+" if exists else "-"
-            print(f"  [{mark}] {severity:<8} {path}")
-            print(f"      {desc}")
-            if severity == "required" and not exists:
-                missing_required.append(path)
-            if path == "tools/server/public/index.html":
-                webui_layout["old"] = exists
-            elif path == "tools/ui/ui.h":
-                webui_layout["new_header"] = exists
-            elif path == "tools/ui/dist/index.html":
-                webui_layout["new_assets"] = exists
+        if not comparisons:
+            self.log.error("Both --skip-llama and --skip-sd were set; nothing to do.")
+            sys.exit(2)
 
-        # Decode webui layout into one of the known states so the developer
-        # doesn't have to interpret the raw probe output.
-        print()
-        if webui_layout["old"]:
-            print("  webui layout: PRE-b9200 (prebuilt assets in tools/server/public/)")
-            print("  → CHIMERA_WEBUI_EMBED=ON works as before.")
-        elif webui_layout["new_header"] and webui_layout["new_assets"]:
-            print("  webui layout: POST-b9200 (Vite project in tools/ui/) WITH prebuilt assets in tools/ui/dist/")
-            print("  → CHIMERA_WEBUI_EMBED=ON should work if manage.py probes tools/ui/dist/.")
-        elif webui_layout["new_header"]:
-            print("  webui layout: POST-b9200 (Vite project in tools/ui/) WITHOUT prebuilt assets")
-            print("  → CHIMERA_WEBUI_EMBED=ON is unavailable on this ref unless the operator runs")
-            print("    `npm install && npm run build` inside tools/ui/ before staging.")
-        else:
-            print("  webui layout: NEITHER old nor new — unexpected for ggml-org/llama.cpp.")
-            print("  → CHIMERA_WEBUI_EMBED=ON will not work; investigate upstream layout changes.")
-        print()
+        total_changes = 0  # across all comparisons
+        any_missing_required = False  # build-system-drift error across all
 
-        if missing_required:
-            print(f"BUILD-SYSTEM ERROR: {len(missing_required)} required path(s) missing on {repo}@{ref}:")
-            for p in missing_required:
-                print(f"  - {p}")
-            print("  manage.py will fail when staging this ref. Update _copy_headers before bumping.")
+        for comp in comparisons:
+            print(f"========== {comp['name']} @ {comp['ref_display']} (= {comp['repo']}@{comp['ref']}) ==========")
             print()
+
+            vendored_dir = comp["vendored_dir"]
+            if not vendored_dir.exists():
+                self.log.error(
+                    f"No vendored {comp['name']} headers found at {vendored_dir}. "
+                    f"Run `make build` first."
+                )
+                sys.exit(2)
+
+            comp_changes = 0
+            for upstream_path in comp["files"]:
+                basename = os.path.basename(upstream_path)
+                vendored_path = vendored_dir / basename
+                print(f"=== {basename} ===")
+                if not vendored_path.exists():
+                    print(f"  (no vendored copy at {vendored_path}; skipped)\n")
+                    continue
+
+                new_text = fetch_upstream(comp["repo"], comp["ref"], upstream_path)
+                if new_text is None:
+                    print("  (failed to fetch upstream copy; skipped)\n")
+                    continue
+
+                old_text = vendored_path.read_text(encoding="utf-8")
+                if old_text == new_text:
+                    print("  no changes")
+                    print()
+                    continue
+
+                old_syms = extract_symbols(old_text)
+                new_syms = extract_symbols(new_text)
+                removed = sorted(old_syms - new_syms)
+                added = sorted(new_syms - old_syms)
+                comp_changes += 1
+
+                if removed:
+                    print(f"  removed symbols ({len(removed)}):")
+                    for s in removed:
+                        print(f"    - {s}")
+                if added:
+                    print(f"  added symbols ({len(added)}):")
+                    for s in added:
+                        print(f"    + {s}")
+                if not removed and not added:
+                    print("  symbol set unchanged; signatures or comments differ")
+
+                diff = list(
+                    difflib.unified_diff(
+                        old_text.splitlines(keepends=True),
+                        new_text.splitlines(keepends=True),
+                        fromfile=f"vendored/{basename}",
+                        tofile=f"upstream@{comp['ref']}/{basename}",
+                        n=2,
+                    )
+                )
+                cap = max(0, args.show_diff_lines)
+                print(f"  unified diff ({len(diff)} lines, capped at {cap}):")
+                for line in diff[:cap]:
+                    sys.stdout.write("    " + line)
+                if len(diff) > cap:
+                    print(f"    ... ({len(diff) - cap} more lines elided)")
+                print()
+
+            total_changes += comp_changes
+
+            # --------------------------------------------------------------
+            # Build-system drift probe (per-comparison). The header diff
+            # above catches API drift. But chimera also depends on the
+            # layout of certain *non-header* paths — the staging logic in
+            # `_copy_headers` follows specific directory structure that
+            # upstream can rearrange without touching any header.
+            # Examples that have actually bitten:
+            #   - around b9200, `tools/server/public/` was deleted and the
+            #     webui moved to `tools/ui/` as a Vite project (no prebuilt
+            #     assets in the tree). chimera's `_copy_headers` raised an
+            #     IOError because the old path was hard-coded.
+            #
+            # SD currently has no probes — its surface is small and the
+            # header-diff covers it. Add entries to comp["probes"] above
+            # if that ever changes.
+            # --------------------------------------------------------------
+            if not comp["probes"]:
+                continue
+
+            print(f"=== {comp['name']}: build-system drift ===")
+            webui_layout: dict[str, bool] = {"old": False, "new_header": False, "new_assets": False}
+            comp_missing: list[str] = []
+            for path, severity, desc in comp["probes"]:
+                exists = upstream_path_exists(comp["repo"], comp["ref"], path)
+                mark = "+" if exists else "-"
+                print(f"  [{mark}] {severity:<8} {path}")
+                print(f"      {desc}")
+                if severity == "required" and not exists:
+                    comp_missing.append(path)
+                if path == "tools/server/public/index.html":
+                    webui_layout["old"] = exists
+                elif path == "tools/ui/ui.h":
+                    webui_layout["new_header"] = exists
+                elif path == "tools/ui/dist/index.html":
+                    webui_layout["new_assets"] = exists
+
+            print()
+            if webui_layout["old"]:
+                print("  webui layout: PRE-b9200 (prebuilt assets in tools/server/public/)")
+                print("  → CHIMERA_WEBUI_EMBED=ON works as before.")
+            elif webui_layout["new_header"] and webui_layout["new_assets"]:
+                print("  webui layout: POST-b9200 (Vite project in tools/ui/) WITH prebuilt assets in tools/ui/dist/")
+                print("  → CHIMERA_WEBUI_EMBED=ON should work if manage.py probes tools/ui/dist/.")
+            elif webui_layout["new_header"]:
+                print("  webui layout: POST-b9200 (Vite project in tools/ui/) WITHOUT prebuilt assets")
+                print("  → CHIMERA_WEBUI_EMBED=ON is unavailable on this ref unless the operator runs")
+                print("    `npm install && npm run build` inside tools/ui/ before staging.")
+            else:
+                print(f"  webui layout: NEITHER old nor new — unexpected for {comp['repo']}.")
+                print("  → CHIMERA_WEBUI_EMBED=ON will not work; investigate upstream layout changes.")
+            print()
+
+            if comp_missing:
+                any_missing_required = True
+                print(f"BUILD-SYSTEM ERROR ({comp['name']}): {len(comp_missing)} required path(s) "
+                      f"missing on {comp['repo']}@{comp['ref']}:")
+                for p in comp_missing:
+                    print(f"  - {p}")
+                print("  manage.py will fail when staging this ref. Update _copy_headers before bumping.")
+                print()
+
+        if any_missing_required:
             sys.exit(2)
 
         if total_changes == 0:
-            print("clean: vendored headers match upstream at this ref.")
+            print("clean: vendored headers match upstream at the requested refs.")
             return
         print(
-            f"{total_changes} header(s) changed. Audit:\n"
+            f"{total_changes} header(s) changed across all comparisons. Audit:\n"
             f"  - chimera_serve.cpp bindings (handler_t fields)\n"
+            f"  - chimera_sd.cpp / chimera_pin_check.cpp static_asserts\n"
             f"  - src/chimera/CMakeLists.txt link order / archive groups\n"
             f"  - server-http.cpp source copy under thirdparty/llama.cpp/src-aux/\n"
-            f"Then rerun `python scripts/manage.py build --llama-cpp --llama-version={ref}`."
+            f"Then rerun `make deps` (which forwards --llama-version / --sd-version) to restage."
         )
         sys.exit(2)
 

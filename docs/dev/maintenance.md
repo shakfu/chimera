@@ -125,20 +125,48 @@ generated text), and diffs against checked-in JSON. Pinned to CPU
 
 ### 2. ~~Widen `bump-check`~~ — DONE
 
-`make bump-check` now covers `include/llama.h`, `common/common.h`,
-`common/arg.h`, `common/chat.h`, `tools/mtmd/mtmd.h`, plus the
-original `tools/server/server-{context,http}.h`. whisper.h and
-stable-diffusion.h aren't covered yet (different upstream repos;
-extension is straightforward if a bump bites).
+`make bump-check` now covers two upstream repos in one run:
+
+- **llama.cpp** (default ref `LLAMACPP_VERSION` in `manage.py`):
+  `include/llama.h`, `common/common.h`, `common/arg.h`, `common/chat.h`,
+  `tools/mtmd/mtmd.h`, plus the original
+  `tools/server/server-{context,http}.h`. Plus build-system path
+  probes (vendored sources + both webui layouts) — see § "Build-system
+  drift" below.
+- **stable-diffusion.cpp** (default ref `SDCPP_VERSION`,
+  `master-<count>-<sha>` format auto-extracted): `stable-diffusion.h`.
+
+Override either via `--llama-version` / `--sd-version`. Skip one repo
+with `--skip-llama` or `--skip-sd`. whisper.h isn't covered (whisper
+has been the most stable of the three deps; add a third comparison to
+`bump_check` in `manage.py` if a whisper bump ever bites).
+
+**Build-system drift probe.** After the header diff, the script
+HEAD-probes a handful of named non-header paths (`tools/server/server-http.cpp`,
+`scripts/xxd.cmake`, both webui asset layouts) and reports which
+layout the target ref uses. Catches drift in non-header files that
+header diffs miss — exactly the failure mode that bit the b9119 →
+b9264 bump (the webui asset directory disappeared without any header
+change). A missing required path fails bump-check with a clear
+`BUILD-SYSTEM ERROR` instead of surfacing as an opaque `make build`
+failure later.
 
 ### 3. ~~Compile-time pin assertions~~ — DONE
 
 `src/chimera/chimera_pin_check.cpp` for the llama.cpp surface
-(every `server_routes` handler_t field, `common_params` field types,
-`LLAMA_POOLING_TYPE_*` enum values, key `llama_*` function
-signatures). A matching per-modality block lives in
-`chimera_whisper.cpp` for whisper signatures (ggml.h collisions mean
-whisper / sd can't share a TU with llama).
+(every `server_routes` handler_t field, `common_params` field types
+including `webui`/`ui`, `LLAMA_POOLING_TYPE_*` enum values, key
+`llama_*` function signatures). A matching block in
+`chimera_sd.cpp` asserts the SD surface chimera reads (struct fields:
+`sd_image_t`, `sd_lora_t`, `sd_pm_params_t`, `sd_sample_params_t`;
+sentinel enum values `SAMPLE_METHOD_COUNT` / `SCHEDULER_COUNT` /
+`PREDICTION_COUNT`; function signatures: `new_sd_ctx`, `free_sd_ctx`,
+`generate_image`, `sd_ctx_params_init`, `str_to_sample_method`,
+`str_to_scheduler`, `sd_ctx_supports_image_generation`). ggml.h
+collisions mean whisper / sd can't share a TU with llama, which is why
+the assertions live alongside their call sites rather than in one
+central place. whisper signatures aren't asserted yet (whisper is the
+most stable of the three deps; add a block if it ever bites).
 
 ### 4. Adapter shim between chimera_serve and `server_routes`
 
