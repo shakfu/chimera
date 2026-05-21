@@ -73,10 +73,10 @@ deps:
 	@SD_USE_VENDORED_GGML=0 $(PYTHON) scripts/manage.py build --all --deps-only --sd-shared-ggml
 
 test:
-	@scripts/test.sh
+	@$(PYTHON) scripts/test.py
 
 smoke:
-	@scripts/test.sh --smoke
+	@$(PYTHON) scripts/test.py --smoke
 
 install: $(BUILD_DIR)/chimera
 	@install -d "$(DESTDIR)$(PREFIX)/bin"

@@ -360,6 +360,8 @@ Bound when `--enable-audio` is set:
 | Method | Path | Body | Notes |
 |--------|------|------|-------|
 | POST | `/v1/audio/transcriptions` | multipart | `file` field required. Supports WAV; other formats return 415. |
+| POST | `/v1/audio/translations` | multipart | `file` field required. Translates to English regardless of source language. |
+| POST | `/v1/audio/detect-language` | multipart | `file` field required. Chimera-specific exit-after-detect probe — runs whisper's language-id pass without decoding. Returns `{"language": "<code>", "duration": <seconds>}`. |
 
 Bound when `--enable-image` is set:
 

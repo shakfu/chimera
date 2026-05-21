@@ -452,7 +452,7 @@ Until then: chimera does the server, third-party UIs do the UI.
 Two smaller things, kept around because they apply regardless of UI
 decisions:
 
-1. **Smoke test in `scripts/test.sh` for Variant A.** A conditional
+1. **Smoke test in `scripts/test.py` for Variant A.** A conditional
    block that probes whether the current binary has the embedded
    webui baked in (e.g. `GET /` → 200 + `text/html` vs. 404), and
    asserts the working case when so. No-op when
@@ -483,7 +483,7 @@ decisions:
 ## 8. Testing
 
 There are currently no automated tests for the webui path. The
-`scripts/test.sh` end-to-end suite tests against an `OFF` build (the
+`scripts/test.py` end-to-end suite tests against an `OFF` build (the
 default), so the webui code paths are not exercised by `make test`.
 
 The minimum useful addition would be the conditional smoke test

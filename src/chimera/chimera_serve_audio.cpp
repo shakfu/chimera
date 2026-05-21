@@ -382,4 +382,87 @@ server_http_context::handler_t make_audio_transcribe_handler(
     };
 }
 
+// Build the handler for POST /v1/audio/detect-language. Whisper supports
+// a "detect-only" mode (`whisper_lang_auto_detect_with_state`) that
+// short-circuits before any decode step — useful as a cheap probe when
+// you only need to know what language a clip is in, without committing
+// to a full transcription run.
+//
+// OpenAI's audio surface doesn't define this concept (their endpoints
+// always transcribe), so this is a chimera-specific route. Hosted as
+// its own endpoint rather than a query parameter on /transcriptions
+// because the response shape is different — no `text`, no `segments`,
+// just the language code + audio duration — and conflating the two
+// shapes would force every transcription client to handle a
+// "transcription silently suppressed" case. Separate endpoint, separate
+// contract.
+//
+// Request shape: same multipart `file` field as /v1/audio/transcriptions.
+// Other transcription knobs (response_format, language, prompt, vad,
+// decoder thresholds, ...) are intentionally not honored here — they're
+// irrelevant for detect-only. The single response shape is:
+//   { "language": "<two-letter code>", "duration": <seconds float> }
+//
+// `language` is whisper's top-1 detection (e.g. "en", "fr", "ja"). When
+// detection itself failed for some reason the field is "?". `duration`
+// is the audio length in seconds (post-resample to 16 kHz), provided so
+// callers can use this endpoint as a single round trip for both "what
+// is this?" and "how long is it?".
+server_http_context::handler_t make_audio_detect_language_handler(
+    whisper_context * ctx, std::mutex & ctx_mutex) {
+    return [ctx, &ctx_mutex](const server_http_req & req) -> server_http_res_ptr {
+        auto err_res = [](int code, const std::string & msg) {
+            auto res = std::make_unique<server_http_res>();
+            res->status = code;
+            res->data = json{{ "error", { { "message", msg }, { "code", code }, { "type", "invalid_request_error" } }}}.dump();
+            return res;
+        };
+        auto file_it = req.files.find("file");
+        if (file_it == req.files.end() || file_it->second.data.empty()) {
+            return err_res(400, "missing 'file' field in multipart form");
+        }
+        const auto & upload = file_it->second;
+        chimera_whisper::WavData wav;
+        try {
+            wav = chimera_whisper::load_wav_bytes(upload.data.data(), upload.data.size());
+        } catch (const ChimeraError & e) {
+            return err_res(415,
+                std::string("unsupported audio: ") + e.what() +
+                " (chimera accepts WAV / RIFF only by design; transcode mp3/m4a/webm to WAV with `ffmpeg -i in.<ext> -ar 16000 -ac 1 out.wav` before uploading)");
+        }
+        auto audio = chimera_whisper::resample_linear(
+            wav.samples, wav.sample_rate, /*WHISPER_SAMPLE_RATE=*/16000);
+
+        chimera_whisper::TranscribeRequest treq;
+        treq.audio_16k_mono   = std::move(audio);
+        treq.language         = "auto";
+        treq.detect_language  = true;   // exit after detection; no decode pass
+        treq.emit_timestamps  = false;
+        treq.no_context       = true;
+
+        chimera_whisper::TranscribeResult result;
+        {
+            // Same per-context serialization as transcribe — whisper
+            // mutates internal state on whisper_full / lang-detect.
+            std::lock_guard<std::mutex> lock(ctx_mutex);
+            try {
+                result = chimera_whisper::transcribe(ctx, treq);
+            } catch (const ChimeraError & e) {
+                return err_res(500, std::string("language detection failed: ") + e.what());
+            }
+        }
+
+        const std::string code = result.detected_language.empty()
+            ? std::string("?")
+            : result.detected_language;
+        auto res = std::make_unique<server_http_res>();
+        res->status = 200;
+        res->data = json{
+            { "language", code },
+            { "duration", result.audio_duration_s },
+        }.dump();
+        return res;
+    };
+}
+
 }  // namespace chimera_serve

@@ -948,6 +948,9 @@ int command_serve(const ServeOptions & opts) {
                       ex_wrapper(make_audio_transcribe_handler(
                           whisper_ctx.get(), whisper_mutex, /*translate=*/true,
                           opts.audio_vad_model)));
+        ctx_http.post("/v1/audio/detect-language",
+                      ex_wrapper(make_audio_detect_language_handler(
+                          whisper_ctx.get(), whisper_mutex)));
     }
 #endif
 #ifdef CHIMERA_HAS_SD
@@ -1076,7 +1079,7 @@ int command_serve(const ServeOptions & opts) {
 #endif
               << "  anthropic: /v1/messages  /v1/messages/count_tokens\n";
 #ifdef CHIMERA_HAS_WHISPER
-    if (whisper_ctx) std::cout << "  audio: /v1/audio/transcriptions  /v1/audio/translations\n";
+    if (whisper_ctx) std::cout << "  audio: /v1/audio/transcriptions  /v1/audio/translations  /v1/audio/detect-language\n";
 #endif
 #ifdef CHIMERA_HAS_SD
     if (sd_ctx)      std::cout << "  image: /v1/images/generations  /v1/images/edits  /v1/images/variations  /v1/images/lora-adapters\n";

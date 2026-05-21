@@ -467,6 +467,11 @@ curl -s http://127.0.0.1:8080/v1/audio/transcriptions \
 curl -s http://127.0.0.1:8080/v1/audio/translations \
   -F file=@speech.wav -F response_format=json
 
+# Audio language detection (exit-after-detect probe; chimera-specific)
+# Returns {"language": "<2-letter code>", "duration": <seconds>}
+curl -s http://127.0.0.1:8080/v1/audio/detect-language \
+  -F file=@speech.wav
+
 # Image generation
 curl -s http://127.0.0.1:8080/v1/images/generations \
   -H 'Content-Type: application/json' \

@@ -183,6 +183,8 @@ lived in anonymous namespaces inside the `.cpp` files.
 | Route | Handler | Notes |
 |-------|---------|-------|
 | `POST /v1/audio/transcriptions` | `make_audio_transcribe_handler` | chimera-owned. Routes through `chimera_whisper::transcribe`. |
+| `POST /v1/audio/translations` | `make_audio_transcribe_handler` (same factory, `translate=true`) | Whisper's built-in translate mode — source language → English. |
+| `POST /v1/audio/detect-language` | `make_audio_detect_language_handler` | Chimera-specific exit-after-detect probe. Sets `treq.detect_language=true`; whisper short-circuits before any decode pass. Response shape: `{"language": "<code>", "duration": <seconds>}` — no `text`, no `segments`. Separate endpoint (not a query parameter on `/transcriptions`) so the response contract stays unambiguous. |
 
 Supported `response_format` values: `json` (default → `{"text":"..."}`),
 `text` (raw `text/plain`), `verbose_json` (full structure with

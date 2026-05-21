@@ -475,7 +475,7 @@ Each phase is shippable on its own.
 
 - `chimera index create / ingest / list / stats / drop`
 - `chimera search`
-- `scripts/test.sh` includes a vector-store smoke test that ingests a
+- `scripts/test.py` includes a vector-store smoke test that ingests a
   three-passage corpus and verifies the top-1 hit on a targeted query.
 - New `src/chimera/chimera_embed.{h,cpp}` extracts the embedding loop
   out of `command_embed`. The `Embedder` is reused across all chunks

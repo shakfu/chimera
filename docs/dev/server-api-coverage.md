@@ -134,10 +134,17 @@ All map to existing `TranscribeRequest` fields — engine is unchanged. **Wave 1
 - `processors` — careful. The server already runs handlers on its
   thread pool, so `processors > 1` would multiply thread pressure. If
   exposed, cap server-side.
-- `detect_language` — useful as a probe, but I'd argue it deserves its
-  own endpoint (`POST /v1/audio/detect_language`) rather than a query
-  parameter that silently suppresses transcription. Whisper's
-  OpenAI-shape doesn't have this concept.
+- ~~`detect_language` — useful as a probe, but I'd argue it deserves
+  its own endpoint (`POST /v1/audio/detect_language`) rather than a
+  query parameter that silently suppresses transcription.~~
+  ✅ Landed 2026-05-21 as a chimera-specific route at
+  `POST /v1/audio/detect-language` (kebab-case for symmetry with
+  `/v1/images/lora-adapters`). Same multipart `file` field as
+  `/v1/audio/transcriptions`; response is
+  `{"language": "<code>", "duration": <seconds>}` — no `text`, no
+  `segments`. Separate endpoint, not a query parameter, so the
+  response shape stays unambiguous and transcription clients don't
+  need a "transcription silently suppressed" code path.
 
 ### Tier 3 — server-init only (needs `LoadParams` routing first)
 
@@ -357,7 +364,7 @@ Pareto-shaped roadmap:
    non-string `name`, non-numeric `scale`, and `loras` against a
    server with no aliases registered (with the missing-flag hint).
    Same opt-in shape as 5a (VAD), 5b (ControlNet), and 5e
-   (PhotoMaker). Four new integration tests in `scripts/test.sh`.
+   (PhotoMaker). Four new integration tests in `scripts/test.py`.
 
 **Honest correction from the original roadmap:** `--sd-upscale-model`
 was originally listed in the "unblocking trio" — it isn't actually
@@ -374,13 +381,18 @@ flags + 3 per-request fields). Step 6 closed per-request LoRA via
 named aliases. The numbered roadmap is now complete.
 
 Remaining work — none on the numbered roadmap. Tier-2 design-open
-items remain in the inventory (ref_image / IP-adapter style
-conditioning on the image side; `grammar`/`detect_language` shape
-questions on the audio side); those need API-shape decisions before
-landing, not mechanical wiring.
+items remaining: ref_image / IP-adapter style conditioning on the
+image side, and `grammar`/`grammar_rule`/`grammar_penalty` on the
+audio side. `detect_language` landed 2026-05-21 as
+`POST /v1/audio/detect-language`.
 
-Also worth a follow-up at some point: the image-serve gating tests
-in `scripts/test.sh` exercise 400-class responses but not success
-paths — verifying actual ControlNet / PhotoMaker / LoRA generation
-output would need real adapter/model fixtures that chimera does not
-ship today.
+~~Also worth a follow-up at some point: the image-serve gating tests
+in `scripts/test.py` exercise 400-class responses but not success
+paths.~~ ✅ Resolved 2026-05-21. Six opt-in fixture-driven tests
+added covering both CLI (`chimera sd --lora` / `--control-net` /
+`--photo-maker`) and serve (POST `/v1/images/*` with `loras: [...]`
+/ `control_image` / `pm_id_image_set`). Each gated on an env var
+pointing at a developer-supplied adapter / aux-model file; `SKIP`
+when unset, `FAIL` when set but the path doesn't exist. See "Opt-in
+fixture-driven tests" in `docs/dev/maintenance.md` for the env-var
+list and an example invocation.

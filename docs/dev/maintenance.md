@@ -34,7 +34,9 @@ Five categories, in roughly decreasing order of how much they hurt:
 - **`make test-db-migrate`.** Builds a v1 chimera.db in a tempdir and
   asserts it upgrades to current cleanly with all pre-existing rows
   preserved.
-- **`make test`** — 23 e2e cases hitting every subcommand.
+- **`make test`** — 55 e2e cases hitting every subcommand, plus 6
+  opt-in success-path tests gated on adapter / aux-model env vars
+  (see below).
 - **`chimera info`** — single command captures every version + backend
   at runtime; useful for bug reports.
 - **`doc/dev/server.md` § 7** — explicit list of upstream types we
@@ -42,6 +44,44 @@ Five categories, in roughly decreasing order of how much they hurt:
 - **Link surgery contained.** `-Wl,--start-group` on Linux,
   `-Wl,-force_load` on macOS, MSVC `/WHOLEARCHIVE` on Windows — all in
   `src/chimera/CMakeLists.txt`, not scattered.
+
+### Opt-in fixture-driven tests
+
+`scripts/test.py` ships six success-path tests for the SD adapter /
+aux-model surfaces (LoRA, ControlNet, PhotoMaker) on **both** the CLI
+(`chimera sd`) and the HTTP server (`POST /v1/images/*`). These need
+real model files chimera intentionally doesn't ship — too large and
+shape-specific — so each test is gated on an environment variable
+pointing at a developer-supplied fixture. When the env var is unset
+the test emits `SKIP`; when it's set but the path doesn't exist the
+test emits `FAIL` (partial config is a misuse, not a SKIP).
+
+| Env var | Required by | Purpose |
+|---------|-------------|---------|
+| `CHIMERA_TEST_LORA` | `sd --lora`, serve `loras: [...]` | Path to a `.safetensors` LoRA adapter compatible with the SD model under `models/`. |
+| `CHIMERA_TEST_CONTROLNET` | `sd --control-net`, serve `control_image` | Path to a `.safetensors` ControlNet model. |
+| `CHIMERA_TEST_CONTROL_IMAGE` | `sd --control-net`, serve `control_image` | Path to a PNG/JPG conditioning image. Required together with `CHIMERA_TEST_CONTROLNET`. |
+| `CHIMERA_TEST_PHOTOMAKER` | `sd --photo-maker`, serve `pm_id_image_set` | Path to a `.safetensors` PhotoMaker model. |
+| `CHIMERA_TEST_PM_ID_DIR` | `sd --photo-maker`, serve `pm_id_image_set` | Directory of identity-set subdirectories (each subdir contains reference identity images). Required together with `CHIMERA_TEST_PHOTOMAKER`. The serve-side test picks the first subdirectory alphabetically as the `pm_id_image_set` value. |
+
+The bar for each success-path test is: exit 0 + non-empty output
+(CLI) or HTTP 200 + non-empty `b64_json` image (serve). No
+perceptual diff — the value is catching wiring regressions in the
+engine integration, not validating LoRA/CN/PM math. Step counts are
+minimal (`-s 2`) to keep tests fast; LoRA tensors are applied once at
+the start of generate(), so even 2 steps exercises the load + apply
+path.
+
+Example invocation with all three sets of fixtures:
+
+```sh
+CHIMERA_TEST_LORA=/models/loras/pixelart.safetensors \
+CHIMERA_TEST_CONTROLNET=/models/canny.safetensors \
+CHIMERA_TEST_CONTROL_IMAGE=/tmp/canny-edges.png \
+CHIMERA_TEST_PHOTOMAKER=/models/photomaker-v1.safetensors \
+CHIMERA_TEST_PM_ID_DIR=/data/identities \
+    make test
+```
 
 ## What's still weak, ranked by leverage
 
@@ -166,7 +206,7 @@ Useful when triaging "is this our bug or theirs":
   layer, spinner, tok/sec stats.
 - Build system: `scripts/manage.py`, `CMakeLists.txt` glue, link-order
   surgery, `bump-check`, release workflow.
-- Tests + docs: `scripts/test.sh`, `scripts/test_db_migrate.py`,
+- Tests + docs: `scripts/test.py`, `scripts/test_db_migrate.py`,
   `doc/`, `doc/dev/`.
 
 **Mental shortcut**: if it's about *running a model* (decode, sample,

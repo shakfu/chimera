@@ -87,6 +87,16 @@ server_http_context::handler_t make_audio_transcribe_handler(
     std::mutex       & ctx_mutex,
     bool               translate,
     const std::string & vad_model_path);
+
+// `POST /v1/audio/detect-language` — exit-after-detect probe. Whisper
+// runs `whisper_lang_auto_detect_with_state` and returns before any
+// decode pass; the response is just the top-1 language code + audio
+// duration. Chimera-specific (OpenAI's audio surface has no detect-only
+// concept); separate endpoint from transcriptions so the response
+// shape stays unambiguous.
+server_http_context::handler_t make_audio_detect_language_handler(
+    whisper_context  * ctx,
+    std::mutex       & ctx_mutex);
 #endif
 
 // ----------------------------------------------------------------------------
