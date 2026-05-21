@@ -29,15 +29,14 @@ on:
           - ubuntu-latest
         default: macos-14
       sd_model_url:
-        description: "URL to a base diffusion model .gguf (default is a public SD 1.5 q8_0 mirror)"
+        description: "URL to a base diffusion model .gguf. Required. Operator supplies — chimera intentionally doesn't pick a default because the public-availability of SD checkpoints on HF shifts (SD 1.5 has been variously gated, removed, re-mirrored over its lifetime). Suggested: an SDXL Turbo or Z-Image Turbo GGUF mirror you have a working URL for. If the URL needs HF auth, configure the HF_TOKEN repo secret."
         type: string
-        required: false
-        default: "https://huggingface.co/leejet/stable-diffusion-v1-5-GGUF/resolve/main/v1-5-pruned-emaonly.q8_0.gguf"
+        required: true
       sd_model_filename:
-        description: "Filename to save the SD model as under models/ (must match an entry in test.py's SD_CANDIDATES, default works out-of-the-box)"
+        description: "Filename to save the SD model as under models/. MUST match an entry in test.py's SD_CANDIDATES list (sd_xl_turbo_1.0.q8_0.gguf, v1-5-pruned-emaonly.q8_0.gguf, or z_image_turbo-Q6_K.gguf) — otherwise test.py won't find it."
         type: string
-        required: false
-        default: "v1-5-pruned-emaonly.q8_0.gguf"
+        required: true
+        default: "sd_xl_turbo_1.0.q8_0.gguf"
       lora_url:
         description: "URL to a LoRA .safetensors. Empty = SKIP LoRA tests."
         type: string
@@ -125,14 +124,28 @@ jobs:
         run: python3 scripts/manage.py download --llama
 
       - name: download base SD model
+        env:
+          # Optional repo secret. If set, the curl below sends it as a
+          # bearer token; if not, the conditional below leaves the auth
+          # header off entirely. Non-HF hosts that receive an unexpected
+          # Authorization header just ignore it, so unconditionally
+          # adding the header would also work — but only-when-set keeps
+          # the curl invocation honest about whether auth is in play.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           mkdir -p models
           dst="models/${{ inputs.sd_model_filename }}"
           if [[ -f "$dst" && -s "$dst" ]]; then
             echo "SD model already present at $dst (size $(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst") bytes)"
           else
+            auth=()
+            if [[ -n "${HF_TOKEN:-}" ]]; then
+              auth=(-H "Authorization: Bearer ${HF_TOKEN}")
+              echo "Using HF_TOKEN for download."
+            fi
             echo "Downloading SD model from ${{ inputs.sd_model_url }}"
             curl --fail --location --silent --show-error \
+              "${auth[@]}" \
               -o "$dst" \
               "${{ inputs.sd_model_url }}"
             echo "Downloaded $(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst") bytes to $dst"
@@ -147,9 +160,14 @@ jobs:
 
       - name: fetch LoRA fixture
         if: inputs.lora_url != ''
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          auth=()
+          if [[ -n "${HF_TOKEN:-}" ]]; then auth=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
           mkdir -p fixtures
           curl --fail --location --silent --show-error \
+            "${auth[@]}" \
             -o fixtures/lora.safetensors \
             "${{ inputs.lora_url }}"
           echo "CHIMERA_TEST_LORA=$GITHUB_WORKSPACE/fixtures/lora.safetensors" >> "$GITHUB_ENV"
@@ -157,16 +175,22 @@ jobs:
 
       - name: fetch ControlNet fixture
         if: inputs.controlnet_url != ''
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           if [[ -z "${{ inputs.control_image_url }}" ]]; then
             echo "::error::controlnet_url is set but control_image_url is empty — ControlNet tests need BOTH." >&2
             exit 1
           fi
+          auth=()
+          if [[ -n "${HF_TOKEN:-}" ]]; then auth=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
           mkdir -p fixtures
           curl --fail --location --silent --show-error \
+            "${auth[@]}" \
             -o fixtures/controlnet.safetensors \
             "${{ inputs.controlnet_url }}"
           curl --fail --location --silent --show-error \
+            "${auth[@]}" \
             -o fixtures/control_image.png \
             "${{ inputs.control_image_url }}"
           echo "CHIMERA_TEST_CONTROLNET=$GITHUB_WORKSPACE/fixtures/controlnet.safetensors" >> "$GITHUB_ENV"
@@ -175,16 +199,22 @@ jobs:
 
       - name: fetch PhotoMaker fixture
         if: inputs.photomaker_url != ''
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           if [[ -z "${{ inputs.pm_id_images_archive_url }}" ]]; then
             echo "::error::photomaker_url is set but pm_id_images_archive_url is empty — PhotoMaker tests need BOTH." >&2
             exit 1
           fi
+          auth=()
+          if [[ -n "${HF_TOKEN:-}" ]]; then auth=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
           mkdir -p fixtures fixtures/pm_id_dir
           curl --fail --location --silent --show-error \
+            "${auth[@]}" \
             -o fixtures/photomaker.safetensors \
             "${{ inputs.photomaker_url }}"
           curl --fail --location --silent --show-error \
+            "${auth[@]}" \
             -o fixtures/pm_id_images.tar.gz \
             "${{ inputs.pm_id_images_archive_url }}"
           # --strip-components=0: preserve the top-level subdir names
