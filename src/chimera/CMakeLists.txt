@@ -162,8 +162,14 @@ endif()
 # xxd-encode the four prebuilt assets (index.html, bundle.js, bundle.css,
 # loading.html) into .hpp files under the chimera build dir, add them to
 # the target sources, expose the generated dir on the include path so
-# server-http.cpp can #include them, and flip the LLAMA_BUILD_WEBUI define
-# that gates the upstream route-binding block in server-http.cpp.
+# server-http.cpp can #include them, and flip the macro(s) that gate the
+# upstream route-binding block in server-http.cpp.
+#
+# Upstream renamed `LLAMA_BUILD_WEBUI` → `LLAMA_BUILD_UI` around b9200.
+# Define both so the embed works on any pinned llama.cpp version: the
+# pre-b9200 server-http.cpp checks the old name, the post-b9200 copy
+# checks the new name, and the unused define is a harmless no-op on the
+# other side.
 if(CHIMERA_LINK_WEBUI)
     set(_webui_assets index.html bundle.js bundle.css loading.html)
     set(_webui_src "${LLAMACPP_SRC_AUX}/webui")
@@ -182,7 +188,7 @@ if(CHIMERA_LINK_WEBUI)
         target_sources(chimera_lib PRIVATE "${_out}")
     endforeach()
     target_include_directories(chimera_lib PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-    target_compile_definitions(chimera_lib PRIVATE LLAMA_BUILD_WEBUI)
+    target_compile_definitions(chimera_lib PRIVATE LLAMA_BUILD_WEBUI LLAMA_BUILD_UI)
     unset(_webui_assets)
     unset(_webui_src)
     unset(_webui_xxd)

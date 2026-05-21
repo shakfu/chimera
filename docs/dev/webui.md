@@ -82,11 +82,58 @@ cmake -S . -B build       # or -DCHIMERA_WEBUI_EMBED=OFF
 make rebuild
 ```
 
-`make deps` always stages the assets, regardless of the option — they
-sit at ~7 MB on disk in the dev tree, only inflate the binary when the
-option flips them in. This decouples the staging step from the binary
-flip so toggling on a previously-built tree is a one-line `cmake`
-reconfigure + rebuild, not a full `make deps` cycle.
+`make deps` always stages the assets when they exist in upstream's
+tree — they sit at ~7 MB on disk in the dev tree, only inflate the
+binary when the option flips them in. This decouples the staging step
+from the binary flip so toggling on a previously-built tree is a
+one-line `cmake` reconfigure + rebuild, not a full `make deps` cycle.
+
+### 2.1 Post-b9200 pins: assets are no longer prebuilt upstream
+
+Around llama.cpp b9200, upstream removed the prebuilt assets at
+`tools/server/public/` and replaced them with a Vite project at
+`tools/ui/`. The macro that gates the route-binding block in
+`server-http.cpp` was also renamed (`LLAMA_BUILD_WEBUI` →
+`LLAMA_BUILD_UI`). chimera's CMake now defines **both** macros when
+`CHIMERA_LINK_WEBUI` is on, so the same chimera source works against
+either upstream generation.
+
+What didn't survive the rename: the staged-asset path. Upstream no
+longer ships built `bundle.js` / `bundle.css` / `index.html` in the
+source tree. To embed the UI on a post-b9200 pin you must run the
+Vite build yourself **before** invoking the chimera builder:
+
+```
+make deps        # clone llama.cpp@<pin> first; this also stages headers etc.
+cd build/llama.cpp/tools/ui
+npm install
+npm run build    # writes assets to ../../build/tools/ui/dist/
+cd -
+
+# Re-run manage.py so the staged assets get picked up:
+python3 scripts/manage.py build --llama-cpp
+cmake -S . -B build -DCHIMERA_WEBUI_EMBED=ON
+make rebuild
+```
+
+`scripts/manage.py` probes three candidate directories in order:
+
+1. `tools/server/public/` (pre-b9200 layout) — used as-is.
+2. `build/tools/ui/dist/` (post-b9200, what `npm run build` produces).
+3. `tools/ui/dist/` (post-b9200, in case a future Vite config writes
+   to the source tree instead).
+
+The first directory containing all four expected files wins. If none
+does, `manage.py` logs the absence and `CHIMERA_WEBUI_EMBED=ON` will
+either FATAL_ERROR (explicit ON) or quietly become OFF (AUTO mode) at
+CMake-time.
+
+This is opt-in extra work and deliberately so: requiring Node toolchain
+as a hard chimera dependency would be a regression. If upstream ever
+restores a prebuilt-assets path (e.g. an HF Bucket download — there are
+references to `LLAMA_UI_HF_BUCKET` in their CMake that suggest this is
+intended), chimera can add a fourth candidate dir and the manual
+`npm run build` step becomes unnecessary.
 
 **Measured binary cost** (Apple Silicon, Release build, May 2026):
 
