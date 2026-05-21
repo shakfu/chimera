@@ -83,31 +83,31 @@ CHIMERA_TEST_PM_ID_DIR=/data/identities \
     make test
 ```
 
-These tests also have a CI surface:
-`.github/workflows/fixture-tests.yml` is manual-only (`workflow_dispatch`)
-and takes the fixture URLs as workflow inputs in the Actions UI. It
-downloads the base LLM via `scripts/manage.py download --llama`, fetches
-the operator-supplied SD base model and each supplied fixture with `curl`,
-and runs `scripts/test.py` filtered to exactly the six fixture-driven
-tests. Empty fixture inputs SKIP cleanly (the workflow still passes —
-operator chose to skip); a partial config (e.g. ControlNet model with no
-conditioning image) fails the matching step before the test runs so the
-misuse is obvious. The workflow is intentionally NOT wired to push /
-pull_request because each run takes 10–60 minutes and uses gigabytes of
-bandwidth.
+There's also a convenience wrapper at `scripts/test_fixtures.py` that
+probes the same env vars, validates the paths up-front, and invokes
+`scripts/test.py` with the right filter so only the six fixture-driven
+tests run. It's purely local — no CI surface — because adapter / aux-
+model fixtures are individually licensed and the public-availability of
+mirrors shifts (we tried wiring this up as a GitHub Actions workflow
+once; the SD-1.5 default mirror was gated within weeks, and chasing
+moving HF availability for hosted CI didn't pay off). Run it from a
+checkout that has whichever fixtures you've staged:
 
-The base SD model URL is intentionally a **required** input with no
-default. Public-availability of SD checkpoints on HuggingFace shifts
-over time (SD 1.5 was at one point publicly mirrored at
-`leejet/stable-diffusion-v1-5-GGUF`; that URL now returns 401 because
-the repo was gated). Hardcoding a default would just defer the breakage
-to a CI run nobody is watching. Operator picks the URL each time, or
-saves it via GitHub's "Run workflow" form-state.
+```sh
+CHIMERA_TEST_LORA=/models/loras/pixelart.safetensors \
+    python3 scripts/test_fixtures.py
+```
 
-For gated HuggingFace repos, configure a `HF_TOKEN` **repository secret**
-(Settings → Secrets and variables → Actions). The workflow detects it
-and adds `Authorization: Bearer <token>` to all curl downloads. If the
-secret is unset the auth header is omitted entirely.
+Behavior:
+- All env vars unset → prints a "nothing to do" line and exits 0.
+- A fixture set's env vars are partially set, or point at a missing
+  path → exits 2 with a clear "partial or invalid configuration"
+  error. Same misuse-not-SKIP contract as `scripts/test.py`.
+- At least one set is fully present → forwards to `scripts/test.py
+  --filter '<regex>'` and exits with the test runner's exit code.
+
+Extra `scripts/test.py` flags can be appended after the script's own
+args, e.g. `python3 scripts/test_fixtures.py --no-color --verbose`.
 
 ## What's still weak, ranked by leverage
 

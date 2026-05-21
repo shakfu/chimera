@@ -37,6 +37,38 @@ jobs:
       run:
         shell: bash
     steps:
+      # Fail fast (and loudly) when the tag we're asked to release doesn't
+      # exist on origin. Without this, the next step is actions/checkout,
+      # which retries three times and then fails with an opaque
+      # "git failed with exit code 1" — no indication that the actual
+      # problem is a missing tag. This is a common foot-gun when
+      # triggering manually: `workflow_dispatch` lets you type any tag
+      # name, even one you haven't pushed yet.
+      #
+      # `git ls-remote --exit-code` returns 2 when the ref isn't found,
+      # which we surface as `::error::` + a copy-pasteable fix. Listing
+      # the available tags helps when the user mistyped (`0.17` vs
+      # `0.1.7`, or forgot the `v` prefix).
+      - name: verify tag exists on origin
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="${TAG#refs/tags/}"   # tolerate either bare name or refspec
+          REMOTE="${{ github.server_url }}/${{ github.repository }}"
+          echo "Verifying tag '$TAG' on $REMOTE..."
+          if git ls-remote --tags --exit-code "$REMOTE" "refs/tags/$TAG" >/dev/null 2>&1; then
+            SHA=$(git ls-remote --tags "$REMOTE" "refs/tags/$TAG" | awk '{print $1}')
+            echo "Resolved: $TAG -> $SHA"
+          else
+            echo "::error::tag '$TAG' does not exist on origin."
+            echo "::error::Push it first:  git tag $TAG && git push origin $TAG"
+            echo "Available tags on $REMOTE:"
+            git ls-remote --tags "$REMOTE" 2>/dev/null \
+              | awk -F'refs/tags/' '{print "  " $2}' \
+              | sort -V \
+              | tail -20
+            exit 1
+          fi
+
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
