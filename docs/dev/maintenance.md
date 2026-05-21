@@ -156,17 +156,18 @@ failure later.
 `src/chimera/chimera_pin_check.cpp` for the llama.cpp surface
 (every `server_routes` handler_t field, `common_params` field types
 including `webui`/`ui`, `LLAMA_POOLING_TYPE_*` enum values, key
-`llama_*` function signatures). A matching block in
-`chimera_sd.cpp` asserts the SD surface chimera reads (struct fields:
-`sd_image_t`, `sd_lora_t`, `sd_pm_params_t`, `sd_sample_params_t`;
-sentinel enum values `SAMPLE_METHOD_COUNT` / `SCHEDULER_COUNT` /
-`PREDICTION_COUNT`; function signatures: `new_sd_ctx`, `free_sd_ctx`,
-`generate_image`, `sd_ctx_params_init`, `str_to_sample_method`,
-`str_to_scheduler`, `sd_ctx_supports_image_generation`). ggml.h
-collisions mean whisper / sd can't share a TU with llama, which is why
-the assertions live alongside their call sites rather than in one
-central place. whisper signatures aren't asserted yet (whisper is the
-most stable of the three deps; add a block if it ever bites).
+`llama_*` function signatures including the `llama_memory_t` API
+that the persistent `chimera::Llama` ctx relies on). Matching
+per-modality pin blocks live in `chimera_whisper.cpp`
+(`whisper_init_from_file_with_params`, `whisper_free`,
+`whisper_full`) and `chimera_sd.cpp` (struct fields: `sd_image_t`,
+`sd_lora_t`, `sd_pm_params_t`, `sd_sample_params_t`; sentinel enum
+values `SAMPLE_METHOD_COUNT` / `SCHEDULER_COUNT` / `PREDICTION_COUNT`;
+function signatures: `new_sd_ctx`, `free_sd_ctx`, `generate_image`,
+`sd_ctx_params_init`, `str_to_sample_method`, `str_to_scheduler`,
+`sd_ctx_supports_image_generation`). ggml.h collisions mean whisper
+/ sd can't share a TU with llama, so each modality owns its own
+pin-check function.
 
 ### 4. Adapter shim between chimera_serve and `server_routes`
 

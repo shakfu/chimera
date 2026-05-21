@@ -316,7 +316,13 @@ struct WhisperOptions {
     // configured output sink and skips all format-file emission.
     bool detect_language = false;
 };
+struct whisper_context;
 int command_whisper(const WhisperOptions & opts);
+// Post-load body of command_whisper: takes a pre-loaded whisper_context
+// and runs the WAV-load -> resample -> transcribe -> diarize -> format-file
+// pipeline against it. Shared by command_whisper (loads then calls this)
+// and chimera::Whisper::run() (uses its persistent ctx then calls this).
+int run_whisper(whisper_context * ctx, const WhisperOptions & opts);
 #endif
 
 #ifdef CHIMERA_HAS_SD
@@ -459,7 +465,13 @@ struct SdOptions {
     std::string scm_mask;
     std::string scm_policy;
 };
+struct sd_ctx_t;
 int command_sd(const SdOptions & opts);
+// Post-load body of command_sd: takes a pre-loaded sd_ctx_t and runs the
+// prompt/img2img/inpaint generation + PNG-write pipeline. Shared by
+// command_sd (loads then calls this) and chimera::SD::run() (uses its
+// persistent ctx then calls this).
+int run_sd(sd_ctx_t * ctx, const SdOptions & opts);
 #endif
 
 // OpenAI-compatible HTTP server backed by llama.cpp's server-context engine.
@@ -653,6 +665,15 @@ struct ServeOptions {
 };
 
 int command_serve(const ServeOptions & opts);
+
+// llama.cpp-backed entrypoints (defined in chimera_llama.cpp). These mirror
+// the CLI subcommands of the same name; the chimera_cli/ shell wraps these
+// for argv handling, while the optional OOP layer in chimera.hpp wraps them
+// for C++ consumers. `command_chat` stays in the CLI shell because it owns
+// the interactive REPL (color streaming, signal handling, linenoise).
+int command_prompt(const LlamaCommonOptions & opts, const std::string & prompt);
+int command_embed(const EmbedOptions & opts);
+int command_tokenize(const TokenizeOptions & opts);
 
 #ifdef CHIMERA_HAS_WHISPER
 void chimera_silence_whisper_log();

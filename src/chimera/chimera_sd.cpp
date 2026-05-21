@@ -41,6 +41,13 @@ extern "C" const char * ggml_version(void);
 // surfacing as a cryptic crash inside generate() or a runtime "unknown
 // sampler" error.
 //
+// The OOP wrapper `chimera::SD` (chimera.hpp) additionally holds an
+// sd_ctx_t across many generate_image() calls. Its persistent-handle
+// correctness depends on (a) these function signatures staying stable,
+// (b) the behavioral contract that sd_ctx_t is safe to reuse across
+// calls — (b) is observed-not-documented upstream and can't be
+// static-asserted; hpp_smoke.cpp covers it at runtime instead.
+//
 // SD's headers can't share a TU with llama.cpp (different ggml.h enum
 // definitions collide), which is why these assertions live here in
 // chimera_sd.cpp rather than alongside the llama assertions in
@@ -825,32 +832,19 @@ void clear_log_buffer() {
 
 // ---- CLI subcommand ----------------------------------------------------
 
+// CLI driver: builds LoadParams from opts, loads sd_ctx_t, delegates the
+// rest to run_sd(ctx, opts). The OOP wrapper (chimera::SD) skips this and
+// calls run_sd directly against its persistent ctx.
 int command_sd(const SdOptions & opts) {
-    if (opts.prompt.empty()) {
-        fail(ExitCode::BadInput, "sd requires --prompt");
-    }
     if (opts.model.empty() && opts.diffusion_model.empty()) {
         fail(ExitCode::BadInput,
              "sd requires --model (combined checkpoint) or --diffusion-model "
              "(split layout, e.g. Z-Image / Flux)");
     }
-
-    if (!opts.control_image.empty() && opts.control_net.empty()) {
-        fail(ExitCode::BadInput,
-             "--control-image requires --control-net (the conditioning model)");
-    }
-
-    // Validate the cache/SCM bundle up-front so a typo doesn't waste a
-    // model load. The temp request is discarded; the real one below
-    // re-parses (same input, known-good).
-    {
-        chimera_sd::GenerateRequest validate_only;
-        chimera_sd::parse_cache_options(opts.cache_mode, opts.cache_option,
-                                        opts.scm_mask,   opts.scm_policy,
-                                        &validate_only);
-    }
-
-    // VAE encode path is only needed for img2img / inpaint.
+    // VAE encode path is only needed for img2img / inpaint. Setting this
+    // at load time means a ctx loaded with init_image="" can't later do
+    // img2img -- which matches the CLI lifecycle. The OOP wrapper does
+    // the same calculation in its ctor.
     const bool need_encode = !opts.init_image.empty();
     chimera_sd::LoadParams lp;
     lp.model                = opts.model;
@@ -890,6 +884,27 @@ int command_sd(const SdOptions & opts) {
     if (!ctx) {
         const std::string & shown = opts.model.empty() ? opts.diffusion_model : opts.model;
         fail(ExitCode::Load, "failed to load stable diffusion model: " + shown);
+    }
+    return run_sd(ctx.get(), opts);
+}
+
+int run_sd(sd_ctx_t * ctx, const SdOptions & opts) {
+    if (opts.prompt.empty()) {
+        fail(ExitCode::BadInput, "sd requires --prompt");
+    }
+    if (!opts.control_image.empty() && opts.control_net.empty()) {
+        fail(ExitCode::BadInput,
+             "--control-image requires --control-net (the conditioning model)");
+    }
+
+    // Validate the cache/SCM bundle up-front so a typo doesn't waste
+    // generation work. The temp request is discarded; the real one
+    // below re-parses (same input, known-good).
+    {
+        chimera_sd::GenerateRequest validate_only;
+        chimera_sd::parse_cache_options(opts.cache_mode, opts.cache_option,
+                                        opts.scm_mask,   opts.scm_policy,
+                                        &validate_only);
     }
 
     chimera_sd::GenerateRequest req;
@@ -1082,7 +1097,7 @@ int command_sd(const SdOptions & opts) {
     req.hires_denoising_strength = opts.hires_denoising_strength;
     req.hires_upscale_tile_size  = opts.hires_upscale_tile_size;
 
-    auto images = chimera_sd::generate(ctx.get(), req);
+    auto images = chimera_sd::generate(ctx, req);
 
     for (size_t i = 0; i < images.size(); ++i) {
         const std::string out_path = numbered_output_path(

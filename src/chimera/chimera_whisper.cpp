@@ -47,6 +47,23 @@ namespace {
         &whisper_full_get_token_text;
     [[maybe_unused]] whisper_token_data (*p_full_get_token_data)(struct whisper_context *, int, int) =
         &whisper_full_get_token_data;
+
+    // ---- persistent-handle dependencies (chimera::Whisper) ----------
+    //
+    // The OOP wrapper holds a whisper_context across many transcribe()
+    // calls. Its correctness rests on the upstream contract that
+    // whisper_full is safe to call repeatedly on the same context (the
+    // "context is reusable across calls" note in chimera_whisper.h).
+    // This is a behavioral contract; we can't static-assert it, but
+    // we can pin the signatures so a rename of any load/run/free
+    // symbol fails to compile here rather than inside chimera.hpp's
+    // template instantiation.
+    [[maybe_unused]] struct whisper_context * (*p_whisper_init_from_file_with_params)(
+        const char *, struct whisper_context_params) = &whisper_init_from_file_with_params;
+    [[maybe_unused]] void (*p_whisper_free)(struct whisper_context *) = &whisper_free;
+    [[maybe_unused]] int (*p_whisper_full)(
+        struct whisper_context *, struct whisper_full_params,
+        const float *, int) = &whisper_full;
 }
 }  // namespace
 
@@ -750,9 +767,29 @@ void emit_format_file(const std::string & path,
 
 // ---- CLI subcommand ----------------------------------------------------
 
+// CLI driver: loads a fresh whisper_context from opts.model and delegates
+// to run_whisper(ctx, opts) for the actual pipeline. The OOP wrapper
+// (chimera::Whisper) skips this and calls run_whisper directly against
+// its persistent ctx.
 int command_whisper(const WhisperOptions & opts) {
-    if (opts.model.empty() || opts.input.empty()) {
-        fail(ExitCode::BadInput, "whisper requires --model and --input");
+    if (opts.model.empty()) {
+        fail(ExitCode::BadInput, "whisper requires --model");
+    }
+    chimera_whisper::LoadParams lp;
+    lp.model      = opts.model;
+    lp.use_gpu    = !opts.no_gpu;
+    lp.flash_attn = opts.flash_attn;
+    lp.gpu_device = opts.gpu_device;
+    auto ctx = chimera_whisper::load_model(lp);
+    if (!ctx) {
+        fail(ExitCode::Load, "failed to load whisper model: " + opts.model);
+    }
+    return run_whisper(ctx.get(), opts);
+}
+
+int run_whisper(whisper_context * ctx, const WhisperOptions & opts) {
+    if (opts.input.empty()) {
+        fail(ExitCode::BadInput, "whisper requires --input");
     }
     // Fast checks before paying the WAV-load cost: mutually-exclusive
     // grammar sources. Detailed parse-time errors (bad rule name, GBNF
@@ -815,16 +852,6 @@ int command_whisper(const WhisperOptions & opts) {
         const char * id = (e0 > 1.1 * e1) ? "0" : (e1 > 1.1 * e0) ? "1" : "?";
         return std::string("(speaker ") + id + ")";
     };
-
-    chimera_whisper::LoadParams lp;
-    lp.model      = opts.model;
-    lp.use_gpu    = !opts.no_gpu;
-    lp.flash_attn = opts.flash_attn;
-    lp.gpu_device = opts.gpu_device;
-    auto ctx = chimera_whisper::load_model(lp);
-    if (!ctx) {
-        fail(ExitCode::Load, "failed to load whisper model: " + opts.model);
-    }
 
     std::ofstream out_file;
     std::ostream * out = &std::cout;
@@ -946,7 +973,7 @@ int command_whisper(const WhisperOptions & opts) {
         *out << s.text << '\n' << std::flush;
     };
 
-    auto result = chimera_whisper::transcribe(ctx.get(), req);
+    auto result = chimera_whisper::transcribe(ctx, req);
 
     // --detect-language short-circuit. whisper_full returns before
     // running any decode pass, so result has no segments. Emit just

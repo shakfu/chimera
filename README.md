@@ -294,20 +294,35 @@ thirdparty/
   stable-diffusion.cpp/,
   linenoise/, sqlite/,
   sqlite-vec/                   Populated by scripts/manage.py.
-src/chimera/
-  chimera.h                     CLI option structs + cross-TU declarations
-  chimera.cpp                   main(), llama gen, chat REPL, log silencing
+src/chimera/                    libchimera.a (chimera_lib target).
+  chimera.h                     Option structs + cross-TU declarations
+  chimera.hpp                   Optional header-only OOP layer over the
+                                procedural surface (chimera::Llama, etc.).
+                                Not compiled into the archive; see
+                                docs/dev/oop-layer.md.
+  chimera_llama.{h,cpp}         llama.cpp glue: model + context loaders,
+                                generation, sampler, LoRA, command_prompt /
+                                command_embed / command_tokenize.
   chimera_embed.{h,cpp}         Embedder helper (CLI embed + RAG ingest)
+  chimera_embed_cache.{h,cpp}   Persistent embedding cache (sqlite-backed)
   chimera_whisper.{h,cpp}       whisper transcription + ASR HTTP handler
   chimera_sd.{h,cpp}            stable-diffusion + image HTTP handlers
   chimera_serve.cpp             OpenAI-compatible HTTP server (LLM, audio,
-                                image, RAG, chat persistence)
+                                image, RAG, chat persistence). Split across
+                                chimera_serve_{audio,images,rag,
+                                chat_persist,chats_read}.cpp.
   chimera_db.{h,cpp}            SQLite connection, XDG paths, migrations
   chimera_chat_store.{h,cpp}    CRUD over chats + messages + messages_fts
   chimera_vector_store.{h,cpp}  CRUD over collections + documents + vec0
   llama_build_info_shim.cpp     stubs the symbols libllama-common.a expects
   stb_impl.cpp                  stb_image_write implementation
-  CMakeLists.txt                chimera target (consumes parent-scope vars)
+  CMakeLists.txt                chimera_lib target (consumes parent vars)
+src/chimera_cli/                chimera executable (links libchimera.a).
+  chimera.cpp                   main(), arg parsing, color, spinner,
+                                linenoise REPL, command_chat (the only
+                                command_* that stays out of the library
+                                because it owns terminal I/O).
+  CMakeLists.txt                chimera target.
 docs/
   serve.md, cheatsheet.md       User-facing prose + one-page reference.
   dev/server.md, dev/sqlite.md, Internal notes: what's bound, schema model,
@@ -319,7 +334,7 @@ docs/
 
 `llama.cpp/include/ggml.h` and `whisper.cpp/include/ggml.h` ship slightly different versions of the same header and define overlapping enums (e.g. `ggml_scale_flag`, `ggml_sort_order`). Including both in one TU is a hard compile error. The split:
 
-- `chimera.cpp` (+ `chimera_embed.cpp`, `chimera_chat_store.cpp`, `chimera_vector_store.cpp`, `chimera_db.cpp`, `chimera_serve.cpp`) include `llama.h` / `ggml.h` (llama.cpp's copy) — the LLM, embedding, and HTTP-server side.
+- `chimera_llama.cpp` (+ `chimera_cli/chimera.cpp`, `chimera_embed.cpp`, `chimera_chat_store.cpp`, `chimera_vector_store.cpp`, `chimera_db.cpp`, `chimera_serve.cpp`) include `llama.h` / `ggml.h` (llama.cpp's copy) — the LLM, embedding, and HTTP-server side.
 - `chimera_whisper.cpp` includes only `whisper.h` (which pulls whisper.cpp's ggml.h).
 - `chimera_sd.cpp` includes only `stable-diffusion.h`.
 
@@ -331,7 +346,7 @@ The vendored `sqlite3.c` and `sqlite-vec.c` are pulled into the chimera target d
 
 `main()` calls `silence_all_logging()` *before* `app.parse(argc, argv)`, installing no-op callbacks for `llama_log_set`, `ggml_log_set`, `whisper_log_set` (via `chimera_silence_whisper_log()` in the whisper TU), and `sd_set_log_callback` (via `chimera_silence_sd_log()` in the SD TU). The verbose flag re-installs `nullptr` callbacks (the upstream defaults) once parsing is complete.
 
-The whisper/sd silencers cannot live in `chimera.cpp` because their headers would re-introduce the ggml collision above.
+The whisper/sd silencers cannot live in `chimera_cli/chimera.cpp` because their headers would re-introduce the ggml collision above.
 
 ### Late backend init
 
@@ -351,6 +366,7 @@ The whisper/sd silencers cannot live in `chimera.cpp` because their headers woul
 | [`docs/dev/webui.md`](docs/dev/webui.md)                                   | maintainer    | Embedded web UI (Variant A shipped; Variant B post-mortem).                               |
 | [`docs/dev/maintenance.md`](docs/dev/maintenance.md)                       | maintainer    | Bump discipline, test discipline, opt-in fixture tests, what's still weak.                |
 | [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md)             | maintainer    | Three-archive split design (libchimera.a as a reusable artifact).                         |
+| [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md)                           | embedder      | Optional header-only C++ OOP layer (`chimera.hpp`) over libchimera's procedural surface.  |
 | [`CHANGELOG.md`](CHANGELOG.md)                                             | everyone      | Per-release feature notes.                                                                |
 | [`TODO.md`](TODO.md)                                                       | maintainer    | Forward backlog. Out-of-scope items at the bottom prevent re-litigation.                  |
 
@@ -359,6 +375,10 @@ for what chimera does, then [`docs/serve.md`](docs/serve.md) for the HTTP surfac
 Maintainers should read [`docs/dev/server.md`](docs/dev/server.md) (the architecture
 overview) and [`docs/dev/maintenance.md`](docs/dev/maintenance.md) (`make bump-check`,
 test discipline, env-var-gated fixture tests) before their first upstream bump.
+Embedders consuming `libchimera.a` from another C++ project should read
+[`docs/dev/combine_archives.md`](docs/dev/combine_archives.md) for the
+three-archive link contract and [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md)
+for the optional `chimera.hpp` wrapper.
 
 ## Origin
 
