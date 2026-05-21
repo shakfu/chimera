@@ -1,0 +1,238 @@
+name: fixture-tests
+
+# Manual-only. The six tests this workflow runs are gated on
+# adapter / aux-model fixtures chimera intentionally doesn't ship —
+# real LoRA / ControlNet / PhotoMaker `.safetensors` files plus a
+# ControlNet conditioning image and a directory of PhotoMaker identity
+# images. The operator supplies their URLs via workflow_dispatch inputs.
+#
+# Each fixture set is independent:
+#   - LoRA       → CHIMERA_TEST_LORA
+#   - ControlNet → CHIMERA_TEST_CONTROLNET + CHIMERA_TEST_CONTROL_IMAGE
+#   - PhotoMaker → CHIMERA_TEST_PHOTOMAKER + CHIMERA_TEST_PM_ID_DIR
+#
+# Setting a partial config (e.g. CHIMERA_TEST_CONTROLNET but not
+# CHIMERA_TEST_CONTROL_IMAGE) is a misuse, not a SKIP — scripts/test.py
+# will FAIL the run. Leave the matching pair blank to SKIP cleanly.
+#
+# A 7th `sd_model_url` input picks the base diffusion model used as the
+# substrate for every test. Defaults to a public v1.5 GGUF mirror.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_os:
+        description: "Runner OS"
+        type: choice
+        options:
+          - macos-14
+          - ubuntu-latest
+        default: macos-14
+      sd_model_url:
+        description: "URL to a base diffusion model .gguf (default is a public SD 1.5 q8_0 mirror)"
+        type: string
+        required: false
+        default: "https://huggingface.co/leejet/stable-diffusion-v1-5-GGUF/resolve/main/v1-5-pruned-emaonly.q8_0.gguf"
+      sd_model_filename:
+        description: "Filename to save the SD model as under models/ (must match an entry in test.py's SD_CANDIDATES, default works out-of-the-box)"
+        type: string
+        required: false
+        default: "v1-5-pruned-emaonly.q8_0.gguf"
+      lora_url:
+        description: "URL to a LoRA .safetensors. Empty = SKIP LoRA tests."
+        type: string
+        required: false
+        default: ""
+      controlnet_url:
+        description: "URL to a ControlNet .safetensors. Empty = SKIP ControlNet tests."
+        type: string
+        required: false
+        default: ""
+      control_image_url:
+        description: "URL to a control conditioning image (PNG/JPG). Required if controlnet_url is set."
+        type: string
+        required: false
+        default: ""
+      photomaker_url:
+        description: "URL to a PhotoMaker .safetensors. Empty = SKIP PhotoMaker tests."
+        type: string
+        required: false
+        default: ""
+      pm_id_images_archive_url:
+        description: "URL to a .tar.gz of PhotoMaker identity-set subdirectories (each subdir is one named set). Required if photomaker_url is set."
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  fixture-tests:
+    name: fixture-tests (${{ inputs.runner_os }})
+    runs-on: ${{ inputs.runner_os }}
+    # Generous timeout: SD model download is ~1–3 GB plus a fresh
+    # llama.cpp / stable-diffusion.cpp build. 60 min covers a worst-case
+    # cold cache + a CPU SD pass per fixture.
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: install linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake git python3 libssl-dev curl
+
+      - name: install macos deps
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v cmake >/dev/null 2>&1; then brew install cmake; fi
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          # Same key shape as ci.yml. CPU backend; the fixture tests are
+          # CPU-only by design (--gpu-layers 0 inside scripts/test.py).
+          key: thirdparty-${{ runner.os }}-cpu-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+
+      - name: build
+        run: make build
+
+      # ------------------------------------------------------------------
+      # Base models. The fixture tests need:
+      #   - GEN_MODEL (Llama-3.2-1B) for `chimera serve -m` (it spawns
+      #     the LLM context too even when --enable-image is set).
+      #   - WHISPER_MODEL (ggml-base.en.bin) is NOT needed here — none of
+      #     the six filtered tests touch audio. Skipping the download.
+      #   - SD_MODEL — a diffusion base. URL is configurable; default is
+      #     a public SD 1.5 q8_0 mirror.
+      # We cache the models directory keyed on the SD URL so repeat runs
+      # with the same fixtures don't re-download.
+      # ------------------------------------------------------------------
+
+      - name: cache models
+        uses: actions/cache@v5
+        with:
+          path: models
+          key: models-${{ runner.os }}-${{ hashFiles('scripts/manage.py') }}-${{ inputs.sd_model_filename }}
+
+      - name: download base LLM (Llama-3.2-1B)
+        run: python3 scripts/manage.py download --llama
+
+      - name: download base SD model
+        run: |
+          mkdir -p models
+          dst="models/${{ inputs.sd_model_filename }}"
+          if [[ -f "$dst" && -s "$dst" ]]; then
+            echo "SD model already present at $dst (size $(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst") bytes)"
+          else
+            echo "Downloading SD model from ${{ inputs.sd_model_url }}"
+            curl --fail --location --silent --show-error \
+              -o "$dst" \
+              "${{ inputs.sd_model_url }}"
+            echo "Downloaded $(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst") bytes to $dst"
+          fi
+
+      # ------------------------------------------------------------------
+      # Fixtures. Each block is independent — operator can mix and match.
+      # Missing the matching pair (e.g. CN model but no CN image) is a
+      # config error and the test will FAIL inside test.py with a clear
+      # message.
+      # ------------------------------------------------------------------
+
+      - name: fetch LoRA fixture
+        if: inputs.lora_url != ''
+        run: |
+          mkdir -p fixtures
+          curl --fail --location --silent --show-error \
+            -o fixtures/lora.safetensors \
+            "${{ inputs.lora_url }}"
+          echo "CHIMERA_TEST_LORA=$GITHUB_WORKSPACE/fixtures/lora.safetensors" >> "$GITHUB_ENV"
+          echo "Staged LoRA fixture: $(stat -c%s fixtures/lora.safetensors 2>/dev/null || stat -f%z fixtures/lora.safetensors) bytes"
+
+      - name: fetch ControlNet fixture
+        if: inputs.controlnet_url != ''
+        run: |
+          if [[ -z "${{ inputs.control_image_url }}" ]]; then
+            echo "::error::controlnet_url is set but control_image_url is empty — ControlNet tests need BOTH." >&2
+            exit 1
+          fi
+          mkdir -p fixtures
+          curl --fail --location --silent --show-error \
+            -o fixtures/controlnet.safetensors \
+            "${{ inputs.controlnet_url }}"
+          curl --fail --location --silent --show-error \
+            -o fixtures/control_image.png \
+            "${{ inputs.control_image_url }}"
+          echo "CHIMERA_TEST_CONTROLNET=$GITHUB_WORKSPACE/fixtures/controlnet.safetensors" >> "$GITHUB_ENV"
+          echo "CHIMERA_TEST_CONTROL_IMAGE=$GITHUB_WORKSPACE/fixtures/control_image.png" >> "$GITHUB_ENV"
+          echo "Staged ControlNet + conditioning image."
+
+      - name: fetch PhotoMaker fixture
+        if: inputs.photomaker_url != ''
+        run: |
+          if [[ -z "${{ inputs.pm_id_images_archive_url }}" ]]; then
+            echo "::error::photomaker_url is set but pm_id_images_archive_url is empty — PhotoMaker tests need BOTH." >&2
+            exit 1
+          fi
+          mkdir -p fixtures fixtures/pm_id_dir
+          curl --fail --location --silent --show-error \
+            -o fixtures/photomaker.safetensors \
+            "${{ inputs.photomaker_url }}"
+          curl --fail --location --silent --show-error \
+            -o fixtures/pm_id_images.tar.gz \
+            "${{ inputs.pm_id_images_archive_url }}"
+          # --strip-components=0: preserve the top-level subdir names
+          # (they become PhotoMaker identity-set names addressable as
+          # pm_id_image_set: "<subdir>"). The archive contract is
+          # "extract to a dir whose children are sets" — keep it simple.
+          tar -xzf fixtures/pm_id_images.tar.gz -C fixtures/pm_id_dir
+          echo "CHIMERA_TEST_PHOTOMAKER=$GITHUB_WORKSPACE/fixtures/photomaker.safetensors" >> "$GITHUB_ENV"
+          echo "CHIMERA_TEST_PM_ID_DIR=$GITHUB_WORKSPACE/fixtures/pm_id_dir" >> "$GITHUB_ENV"
+          echo "Identity sets staged:"
+          ls -la fixtures/pm_id_dir/
+
+      # ------------------------------------------------------------------
+      # Run the filtered subset. The regex picks exactly the 6 success-
+      # path tests + their SKIP placeholders — so operators with only a
+      # partial fixture set still see what got skipped vs ran.
+      #
+      # Tests that aren't in the filter are silently dropped (no SKIP
+      # noise), which matters because filtering to 6 tests means the
+      # OTHER 56 would otherwise emit SKIPs on this fresh-checkout-style
+      # CI environment (no embedding model, no mtmd model, etc.).
+      # ------------------------------------------------------------------
+
+      - name: run fixture-driven success-path tests
+        run: |
+          python3 scripts/test.py --no-color --filter '(sd --lora|sd --control-net|sd --photo-maker|serve loras success|serve control_image success|serve pm_id_image_set success)'
+
+      # ------------------------------------------------------------------
+      # Upload the chimera serve log if any test failed. Helps post-mortem
+      # without re-running with --verbose. The log file lives in a temp
+      # dir during the test; we tail the most-recent matching files into
+      # the artifact. Best-effort — failures here don't fail the job.
+      # ------------------------------------------------------------------
+
+      - name: collect serve logs on failure
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          # Capture any leftover chimera-test-serve-*.log files from the
+          # OS temp dir (test.py creates them via tempfile and unlinks on
+          # success; on failure they may persist briefly).
+          (find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'chimera-test-serve-*.log' \
+            -exec cp {} artifacts/ \; 2>/dev/null) || true
+          ls -la artifacts/ || true
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: chimera-serve-logs-${{ inputs.runner_os }}
+          path: artifacts/
+          if-no-files-found: ignore

@@ -4,6 +4,8 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.1.7]
+
 ### Changed
 
 - Converted `scripts/test.sh` to `scripts/test.py`. Bash → Python rewrite; same 62-test coverage (56 PASS + 6 SKIP-when-fixture-missing on a fresh checkout). `make test` and `make smoke` now invoke `python3 scripts/test.py` and `python3 scripts/test.py --smoke`. ~1100 LOC, down from ~1500 LOC of bash, despite gaining real argparse + per-test timing.
@@ -15,6 +17,13 @@ All notable changes to chimera will be documented in this file. Format is loosel
   - **Equivalence verified:** same 56 PASS + 6 SKIP on a fresh `make test` run, same test names, same FAIL diagnostics when intentionally broken (regression caught during the port: `combined=True` in `run_capture` puts combined output in `out`, not `err`).
 
 ### Added
+
+- `.github/workflows/fixture-tests.yml` — manual-only CI workflow that runs the six adapter / aux-model success-path tests left as SKIPs in `make test`. Triggered via `workflow_dispatch` from the Actions UI; takes fixture URLs as workflow inputs and runs `scripts/test.py --filter` scoped to exactly the six tests. ~200 LOC of YAML.
+  - **Inputs (all optional except SD-model):** `runner_os` (`macos-14` / `ubuntu-latest`), `sd_model_url` + `sd_model_filename` (default: public SD 1.5 q8_0 mirror), `lora_url`, `controlnet_url` + `control_image_url`, `photomaker_url` + `pm_id_images_archive_url`. Each fixture set is independent — supplying LoRA but not ControlNet runs the LoRA pair and SKIPs the rest. Supplying half a pair (e.g. ControlNet model with no conditioning image) is treated as a misconfig and fails the matching curl step before the test runs.
+  - **Filter regex:** `(sd --lora|sd --control-net|sd --photo-maker|serve loras success|serve control_image success|serve pm_id_image_set success)` — matches the 12 relevant test slots (6 success cases + 6 SKIP placeholders) and nothing else. Verified locally: 12 matches, 0 false positives against the full 62-test catalog.
+  - **Base models:** `scripts/manage.py download --llama` for the Llama-3.2-1B-Instruct gen model; `curl` for the SD model (URL is configurable so operators can swap in SDXL Turbo or Z-Image without editing the workflow). The `models/` directory is cached across runs keyed on the SD filename.
+  - **Why workflow_dispatch only:** each run downloads 2–5 GB of model files and takes 10–60 minutes. Wiring it to push / pull_request would burn CI quota and contributor patience. Documented under `docs/dev/maintenance.md` § "Opt-in fixture-driven tests".
+  - **Failure artifacts:** chimera serve logs from any failing test are uploaded as the `chimera-serve-logs-<runner_os>` artifact, so post-mortems don't need `--verbose` re-runs.
 
 - `POST /v1/audio/detect-language` — chimera-specific exit-after-detect probe on the audio surface. Was the cheapest of the Tier-2 audio design-open items in `docs/dev/server-api-coverage.md`; ~90 LOC.
   - **Why a separate endpoint, not a query parameter:** OpenAI's audio surface doesn't define a detect-only concept (their endpoints always transcribe). Conflating detect + transcribe under one route via a query flag would force every transcription client to handle a "transcription silently suppressed" code path. Separate endpoint = unambiguous response contract.

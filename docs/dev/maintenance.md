@@ -83,6 +83,19 @@ CHIMERA_TEST_PM_ID_DIR=/data/identities \
     make test
 ```
 
+These tests also have a CI surface:
+`.github/workflows/fixture-tests.yml` is manual-only (`workflow_dispatch`)
+and takes the fixture URLs as workflow inputs in the Actions UI. It
+downloads the base LLM via `scripts/manage.py download --llama`, fetches
+an SD base model from a configurable URL (defaulting to a public SD 1.5
+GGUF mirror), pulls each supplied fixture with `curl`, and runs
+`scripts/test.py` filtered to exactly the six fixture-driven tests.
+Empty inputs SKIP cleanly (the workflow still passes — operator chose
+to skip); a partial config (e.g. ControlNet model with no conditioning
+image) fails the matching step before the test runs so the misuse is
+obvious. The workflow is intentionally NOT wired to push / pull_request
+because each run takes 10–60 minutes and uses gigabytes of bandwidth.
+
 ## What's still weak, ranked by leverage
 
 ### 1. ~~HTTP-response golden tests~~ — DONE

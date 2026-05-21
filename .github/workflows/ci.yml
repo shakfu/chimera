@@ -27,7 +27,7 @@ jobs:
     env:
       # macOS binary stays portable to this minimum OS.
       MACOSX_DEPLOYMENT_TARGET: "12.0"
-    # Default to bash on every leg so Makefile + scripts/test.sh work
+    # Default to bash on every leg so Makefile + scripts/test.py work
     # uniformly. windows-latest ships git-bash; this avoids per-OS shell
     # forks for build / smoke / stage-artifact steps.
     defaults:
