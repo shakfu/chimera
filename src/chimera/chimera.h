@@ -654,6 +654,15 @@ struct ServeOptions {
 
 int command_serve(const ServeOptions & opts);
 
+// llama.cpp-backed entrypoints (defined in chimera_llama.cpp). These mirror
+// the CLI subcommands of the same name; the chimera_cli/ shell wraps these
+// for argv handling, while the optional OOP layer in chimera.hpp wraps them
+// for C++ consumers. `command_chat` stays in the CLI shell because it owns
+// the interactive REPL (color streaming, signal handling, linenoise).
+int command_prompt(const LlamaCommonOptions & opts, const std::string & prompt);
+int command_embed(const EmbedOptions & opts);
+int command_tokenize(const TokenizeOptions & opts);
+
 #ifdef CHIMERA_HAS_WHISPER
 void chimera_silence_whisper_log();
 void chimera_restore_whisper_log();

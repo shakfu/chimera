@@ -151,10 +151,11 @@ $(BUILD_DIR)/libchimera.a:
 # CHIMERA_SMOKE_MODEL=<path/to/.gguf> to additionally run a full
 # tokenize + llama_decode inference probe. See
 # doc/dev/combine_archives.md section 7 for what this validates.
-test-external-smoke: tests/external/build/chimera_smoke
+test-external-smoke: tests/external/build/chimera_smoke tests/external/build/chimera_hpp_smoke
 	@tests/external/build/chimera_smoke
+	@tests/external/build/chimera_hpp_smoke
 
-tests/external/build/chimera_smoke: tests/external/smoke.cpp tests/external/CMakeLists.txt $(BUILD_DIR)/libchimera.a $(BUILD_DIR)/libchimera_thirdparty.a $(BUILD_DIR)/libchimera_ggml.a
+tests/external/build/chimera_smoke tests/external/build/chimera_hpp_smoke: tests/external/smoke.cpp tests/external/hpp_smoke.cpp tests/external/CMakeLists.txt $(BUILD_DIR)/libchimera.a $(BUILD_DIR)/libchimera_thirdparty.a $(BUILD_DIR)/libchimera_ggml.a
 	@cmake -S tests/external -B tests/external/build
 	@cmake --build tests/external/build
 

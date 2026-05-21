@@ -337,3 +337,14 @@ Step 2:
   on macOS: 100,352 logits produced, all finite, max|x|=11.55.
   Proves the linked library actually computes, not just that
   symbols resolve. [PASSING on macOS]
+- OOP-layer probe: `tests/external/hpp_smoke.cpp` is a parallel
+  external test that goes through `src/chimera/chimera.hpp` (the
+  optional header-only C++ wrapper) instead of the procedural
+  `command_*` API. It instantiates every wrapper class
+  (`chimera::Llama`, `Embedder`, `Tokenizer`, `Whisper`, `SD`,
+  `Server`) to prove the header parses and links from an external
+  consumer, and (when `CHIMERA_SMOKE_MODEL` is set) round-trips
+  `Tokenizer::encode`/`decode` plus drives a two-call
+  `Llama::generate` to confirm persistent-handle behavior. Builds
+  from the same `tests/external/CMakeLists.txt` and runs as part
+  of `make test-external-smoke`. [PASSING on macOS]

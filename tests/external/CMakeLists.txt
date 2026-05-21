@@ -43,26 +43,37 @@ endforeach()
 # the archives without standing up a real install step.
 set(_repo_root "${CMAKE_CURRENT_LIST_DIR}/../..")
 set(_llama_inc "${_repo_root}/build/llama.cpp/include"
-               "${_repo_root}/build/llama.cpp/ggml/include")
+               "${_repo_root}/build/llama.cpp/ggml/include"
+               # The OOP header (chimera.hpp) re-includes chimera_llama.h,
+               # which pulls common.h / chat.h / sampling.h / mtmd.h. Those
+               # live in the staged llama.cpp install root, not in the
+               # narrower build/llama.cpp/include dir that exposes only
+               # llama.h. smoke.cpp doesn't need this; hpp_smoke.cpp does.
+               "${_repo_root}/thirdparty/llama.cpp/include")
 
 add_executable(chimera_smoke smoke.cpp)
-target_include_directories(chimera_smoke PRIVATE
-    "${_repo_root}/src/chimera"
-    "${_repo_root}/thirdparty"
-    ${_llama_inc}
-)
+add_executable(chimera_hpp_smoke hpp_smoke.cpp)
+foreach(_t chimera_smoke chimera_hpp_smoke)
+    target_include_directories(${_t} PRIVATE
+        "${_repo_root}/src/chimera"
+        "${_repo_root}/thirdparty"
+        ${_llama_inc}
+    )
+endforeach()
 
 # Forward the same CHIMERA_HAS_* defines libchimera.a was compiled
 # with so the conditional sections in smoke.cpp match. Default both
 # ON; override at configure time if your build dropped a modality.
 option(CHIMERA_HAS_WHISPER "Match the libchimera.a whisper-enabled build" ON)
 option(CHIMERA_HAS_SD      "Match the libchimera.a sd-enabled build"      ON)
-if(CHIMERA_HAS_WHISPER)
-    target_compile_definitions(chimera_smoke PRIVATE CHIMERA_HAS_WHISPER)
-endif()
-if(CHIMERA_HAS_SD)
-    target_compile_definitions(chimera_smoke PRIVATE CHIMERA_HAS_SD)
-endif()
+foreach(_t chimera_smoke chimera_hpp_smoke)
+    if(CHIMERA_HAS_WHISPER)
+        target_compile_definitions(${_t} PRIVATE CHIMERA_HAS_WHISPER)
+    endif()
+    if(CHIMERA_HAS_SD)
+        target_compile_definitions(${_t} PRIVATE CHIMERA_HAS_SD)
+    endif()
+endforeach()
 
 # Pull CHIMERA_VERSION out of scripts/manage.py (the project's single
 # source of truth, parsed in the same way the top-level CMakeLists
@@ -75,8 +86,10 @@ if(_ver_line MATCHES "\"([^\"]+)\"")
 else()
     set(_chimera_version "unknown")
 endif()
-target_compile_definitions(chimera_smoke PRIVATE
-    "CHIMERA_VERSION=\"${_chimera_version}\"")
+foreach(_t chimera_smoke chimera_hpp_smoke)
+    target_compile_definitions(${_t} PRIVATE
+        "CHIMERA_VERSION=\"${_chimera_version}\"")
+endforeach()
 
 # The link contract:
 #   - libchimera.a              : normal link (chimera's own code)
@@ -98,37 +111,39 @@ target_compile_definitions(chimera_smoke PRIVATE
 find_package(OpenSSL REQUIRED)
 find_package(OpenMP QUIET)
 
-if(APPLE)
-    target_link_libraries(chimera_smoke PRIVATE
-        "${_libchimera}"
-        "${_libchimera_thirdparty}"
-        "-Wl,-force_load,${_libchimera_ggml}"
-        OpenSSL::SSL OpenSSL::Crypto
-        "-framework Security"
-        "-framework CoreFoundation"
-        "-framework Accelerate"
-        "-framework Foundation"
-        "-framework Metal"
-        "-framework MetalKit"
-        pthread
-    )
-elseif(UNIX)
-    target_link_libraries(chimera_smoke PRIVATE
-        "${_libchimera}"
-        "${_libchimera_thirdparty}"
-        "-Wl,--whole-archive" "${_libchimera_ggml}" "-Wl,--no-whole-archive"
-        OpenSSL::SSL OpenSSL::Crypto
-        pthread dl m
-    )
-    if(OpenMP_CXX_FOUND)
-        target_link_libraries(chimera_smoke PRIVATE OpenMP::OpenMP_CXX)
+foreach(_t chimera_smoke chimera_hpp_smoke)
+    if(APPLE)
+        target_link_libraries(${_t} PRIVATE
+            "${_libchimera}"
+            "${_libchimera_thirdparty}"
+            "-Wl,-force_load,${_libchimera_ggml}"
+            OpenSSL::SSL OpenSSL::Crypto
+            "-framework Security"
+            "-framework CoreFoundation"
+            "-framework Accelerate"
+            "-framework Foundation"
+            "-framework Metal"
+            "-framework MetalKit"
+            pthread
+        )
+    elseif(UNIX)
+        target_link_libraries(${_t} PRIVATE
+            "${_libchimera}"
+            "${_libchimera_thirdparty}"
+            "-Wl,--whole-archive" "${_libchimera_ggml}" "-Wl,--no-whole-archive"
+            OpenSSL::SSL OpenSSL::Crypto
+            pthread dl m
+        )
+        if(OpenMP_CXX_FOUND)
+            target_link_libraries(${_t} PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+    elseif(WIN32)
+        get_filename_component(_ggml_name "${_libchimera_ggml}" NAME)
+        target_link_libraries(${_t} PRIVATE
+            "${_libchimera}"
+            "${_libchimera_thirdparty}"
+            "${_libchimera_ggml}"
+        )
+        target_link_options(${_t} PRIVATE "/WHOLEARCHIVE:${_ggml_name}")
     endif()
-elseif(WIN32)
-    get_filename_component(_ggml_name "${_libchimera_ggml}" NAME)
-    target_link_libraries(chimera_smoke PRIVATE
-        "${_libchimera}"
-        "${_libchimera_thirdparty}"
-        "${_libchimera_ggml}"
-    )
-    target_link_options(chimera_smoke PRIVATE "/WHOLEARCHIVE:${_ggml_name}")
-endif()
+endforeach()

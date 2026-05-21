@@ -4,6 +4,12 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Added
+
+- **`src/chimera/chimera_llama.{h,cpp}`** — moves the llama.cpp glue (model + context loaders, generation, sampler, LoRA, decode helpers) plus the `command_prompt` / `command_embed` / `command_tokenize` entrypoints out of `src/chimera_cli/chimera.cpp` and into the library. Before this, `libchimera.a` had no direct llama.cpp text-generation entrypoint — only `command_serve` and the lower-level `Embedder`. CLI shell drops ~1000 lines and `#include`s the new header. `command_chat` deliberately stays in `chimera_cli/` because it owns terminal I/O, signal handling, linenoise, and color streaming.
+- **`src/chimera/chimera.hpp`** — optional header-only OOP layer over the procedural surface. Persistent-handle classes (`chimera::Llama`, `Embedder`, `Tokenizer`) load the model once in the ctor and reuse it across calls; options-in-ctor wrappers (`Whisper`, `SD`, `Server`) mirror the CLI subcommand lifecycle. Header is not compiled into the archive; consumers `#include` it at their call site. See [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md).
+- **`tests/external/hpp_smoke.cpp`** — parallel external smoke test that goes through `chimera.hpp` instead of the procedural API. Instantiates every wrapper class (compile/link proof) and, when `CHIMERA_SMOKE_MODEL` is set, round-trips `Tokenizer::encode`/`decode` plus drives a two-call `Llama::generate` to confirm persistent-handle behavior. Runs alongside the existing `chimera_smoke` under `make test-external-smoke`.
+
 ### Changed
 
 - Sweep through the documentation set addressing a comprehensive audit. 11 doc files touched, +185/-152 lines net. No code changed; `make smoke` still 11/11 PASS. Specific fixes:
