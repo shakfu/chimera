@@ -114,21 +114,30 @@ struct PmServeState {
     const PmIdSetCache * id_sets             = nullptr;
 };
 
+// Per-request LoRA alias map (step 6). Built once at server start
+// from repeated `--sd-lora <name>=<path>` flags. Requests reference
+// adapters by name; the handler resolves names to paths via this map
+// and feeds GenerateRequest::loras with {path, scale}. Names are the
+// only public surface — request bodies never see filesystem paths.
+using LoraAliasMap = std::map<std::string, std::string>;  // name → path
+
 // `control_net_loaded` reports whether the server was started with a
 // ControlNet model (`--sd-control-net`). The handlers gate per-request
 // `control_image` on this flag — a request that supplies one without a
 // ControlNet loaded returns HTTP 400. Same shape used by the audio
 // handler for VAD: opt-in server-init, with a precise error when the
 // per-request feature is asked for but unavailable.
+// `lora_aliases` is borrowed (lifetime: command_serve) — handlers
+// hold a pointer because std::function captures must be copy-cheap.
 server_http_context::handler_t make_image_generations_handler(
     sd_ctx_t * ctx, std::mutex & ctx_mutex,
-    bool control_net_loaded, PmServeState pm);
+    bool control_net_loaded, PmServeState pm, const LoraAliasMap * lora_aliases);
 server_http_context::handler_t make_image_edits_handler(
     sd_ctx_t * ctx, std::mutex & ctx_mutex,
-    bool control_net_loaded, PmServeState pm);
+    bool control_net_loaded, PmServeState pm, const LoraAliasMap * lora_aliases);
 server_http_context::handler_t make_image_variations_handler(
     sd_ctx_t * ctx, std::mutex & ctx_mutex,
-    bool control_net_loaded, PmServeState pm);
+    bool control_net_loaded, PmServeState pm, const LoraAliasMap * lora_aliases);
 #endif
 
 // ----------------------------------------------------------------------------

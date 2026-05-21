@@ -205,6 +205,19 @@ We expose the ASR pipeline; the mtmd path is reachable via
 | `POST /v1/images/generations` | `make_image_generations_handler` | application/json body. txt2img. |
 | `POST /v1/images/edits` | `make_image_edits_handler` | multipart (`image` + optional `mask` + form fields). img2img / inpaint. |
 | `POST /v1/images/variations` | `make_image_variations_handler` | multipart (`image`). img2img with no prompt. |
+| `GET /v1/images/lora-adapters` | inline lambda in `command_serve` | Lists registered SD LoRA aliases (names only). Returns `[]` when no `--sd-lora` is set. |
+
+The three POST handlers share a per-request opt-in surface for
+ControlNet / PhotoMaker / LoRA, gated on server-init flags. Each
+opt-in feature follows the same shape: a `maybe_attach_*()` helper
+returns either `nullptr` (success / feature not requested) or an
+HTTP error response naming the missing flag.
+
+| Server-init flag(s) | Per-request field(s) | Helper | Notes |
+|---------------------|----------------------|--------|-------|
+| `--sd-control-net <path>` | `control_image` (multipart), `control_strength` (JSON) | `maybe_attach_control()` | 400 + named-flag hint when the field is supplied but the server has no ControlNet loaded. |
+| `--sd-photo-maker <path>` (+ optional `--sd-pm-id-dir`, `--sd-pm-id-embed-path`) | `pm_id_images` (JSON base64 array), `pm_id_image_set` (named subdir), `pm_style_strength` | `maybe_attach_pm()` | `pm_id_images` wins if both shapes supplied. `--sd-pm-id-dir` is scanned eagerly at startup — empty subdirs are a `BadInput` config error, not a deferred 400. |
+| `--sd-lora <name>=<path>` (repeatable) | `loras: [{"name", "scale"}, ...]` | `maybe_attach_loras()` | Closed-set by design — request bodies cannot supply raw paths. SD reloads adapter tensors per-generate, so the alias map is pure metadata; no files open at server start. Unknown alias name returns 400 listing the known names. |
 
 ### 4.2b Opt-in via `--persist-chats` (shipped)
 

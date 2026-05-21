@@ -366,6 +366,14 @@ chimera serve -m model.gguf --enable-embeddings embed.gguf     # +/v1/embeddings
 chimera serve -m model.gguf --reranking rerank.gguf            # +/v1/rerank (cross-encoder)
 chimera serve -m model.gguf --enable-audio whisper.gguf        # +/v1/audio/{transcriptions,translations}
 chimera serve -m model.gguf --enable-image sd.gguf             # +/v1/images/*
+chimera serve -m model.gguf --enable-image sd.gguf \
+              --sd-control-net cn.safetensors                  # per-request control_image
+chimera serve -m model.gguf --enable-image sd.gguf \
+              --sd-photo-maker pm.safetensors \
+              --sd-pm-id-dir identities/                       # per-request PhotoMaker (pm_id_images / pm_id_image_set)
+chimera serve -m model.gguf --enable-image sd.gguf \
+              --sd-lora pixelart=loras/pixelart.safetensors \
+              --sd-lora cyberpunk=loras/cyberpunk.safetensors  # per-request SD LoRA by name
 chimera serve -m model.gguf --enable-rag embed.gguf            # +/v1/vector_stores/*
 chimera serve -m model.gguf --persist-chats                    # log every chat to DB
 chimera serve -m model.gguf --enable-rag embed.gguf --cache-embeddings  # memoize embed(text)
@@ -471,6 +479,28 @@ curl -s http://127.0.0.1:8080/v1/images/edits \
 # Image variation (img2img, no prompt)
 curl -s http://127.0.0.1:8080/v1/images/variations \
   -F image=@in.png
+
+# Image with per-request ControlNet (server started with --sd-control-net)
+curl -s http://127.0.0.1:8080/v1/images/edits \
+  -F image=@in.png \
+  -F control_image=@canny.png \
+  -F control_strength=0.7 \
+  -F prompt="a cyberpunk skyline"
+
+# Image with per-request PhotoMaker (server started with --sd-photo-maker)
+# Two shapes — explicit base64 (`pm_id_images`) or named set from --sd-pm-id-dir
+# (`pm_id_image_set`). `pm_id_images` wins if both are supplied.
+curl -s http://127.0.0.1:8080/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"a portrait of <person>","pm_id_image_set":"alice","pm_style_strength":25}'
+
+# Image with per-request SD LoRA selection (server started with --sd-lora foo=...)
+curl -s http://127.0.0.1:8080/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"a moonlit forest","loras":[{"name":"pixelart","scale":0.7}]}'
+
+# List registered SD LoRA aliases (names only; paths are server-side)
+curl -s http://127.0.0.1:8080/v1/images/lora-adapters
 
 # Vector store (requires --enable-rag)
 curl -s -X POST http://127.0.0.1:8080/v1/vector_stores \

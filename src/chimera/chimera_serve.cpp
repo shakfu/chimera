@@ -745,6 +745,37 @@ int command_serve(const ServeOptions & opts) {
         std::cout << "chimera serve: loaded " << pm_id_sets.size()
                   << " PhotoMaker identity set(s) from " << opts.sd_pm_id_dir << "\n";
     }
+
+    // Step 6 — per-request LoRA aliases. Parse each "<name>=<path>"
+    // spec into a closed allowlist; requests then reference adapters
+    // by name. SD reloads LoRA tensors on every generate() call, so
+    // there's nothing to "load" at server start — the alias map is
+    // pure metadata. We fail-fast on malformed specs and duplicate
+    // names so a typo doesn't surface as a confusing 400 on the first
+    // request.
+    LoraAliasMap sd_lora_aliases;
+    for (const auto & spec : opts.sd_loras) {
+        const auto eq = spec.find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 == spec.size()) {
+            std::cerr << "chimera serve: --sd-lora expects \"<name>=<path>\" "
+                         "(got: '" << spec << "')\n";
+            ctx_http.stop(); ctx_server.terminate();
+            return static_cast<int>(ExitCode::BadInput);
+        }
+        std::string name = spec.substr(0, eq);
+        std::string path = spec.substr(eq + 1);
+        if (sd_lora_aliases.count(name)) {
+            std::cerr << "chimera serve: --sd-lora name '" << name
+                      << "' was supplied more than once\n";
+            ctx_http.stop(); ctx_server.terminate();
+            return static_cast<int>(ExitCode::BadInput);
+        }
+        sd_lora_aliases.emplace(std::move(name), std::move(path));
+    }
+    if (!sd_lora_aliases.empty()) {
+        std::cout << "chimera serve: registered " << sd_lora_aliases.size()
+                  << " LoRA alias(es) for /v1/images/*\n";
+    }
 #endif
 
     // Opt-in dedicated embedding model. When --enable-embeddings is set
@@ -928,7 +959,8 @@ int command_serve(const ServeOptions & opts) {
                               /*model_loaded=*/!opts.sd_photo_maker.empty(),
                               opts.sd_pm_id_embed_path,
                               &pm_id_sets,
-                          })));
+                          },
+                          &sd_lora_aliases)));
         ctx_http.post("/v1/images/edits",
                       ex_wrapper(make_image_edits_handler(
                           sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty(),
@@ -936,7 +968,8 @@ int command_serve(const ServeOptions & opts) {
                               /*model_loaded=*/!opts.sd_photo_maker.empty(),
                               opts.sd_pm_id_embed_path,
                               &pm_id_sets,
-                          })));
+                          },
+                          &sd_lora_aliases)));
         ctx_http.post("/v1/images/variations",
                       ex_wrapper(make_image_variations_handler(
                           sd_ctx.get(), sd_mutex, !opts.sd_control_net.empty(),
@@ -944,7 +977,24 @@ int command_serve(const ServeOptions & opts) {
                               /*model_loaded=*/!opts.sd_photo_maker.empty(),
                               opts.sd_pm_id_embed_path,
                               &pm_id_sets,
-                          })));
+                          },
+                          &sd_lora_aliases)));
+        // GET /v1/images/lora-adapters — list the named aliases the
+        // server is willing to honor on per-request `loras: [...]`.
+        // Returns names only (paths are server-side state, not part
+        // of the public surface). Empty array when no --sd-lora was
+        // supplied — matches the LLM-side /lora-adapters shape.
+        ctx_http.get("/v1/images/lora-adapters",
+            ex_wrapper([&sd_lora_aliases](const server_http_req &) -> server_http_res_ptr {
+                json out = json::array();
+                for (const auto & kv : sd_lora_aliases) {
+                    out.push_back({{ "name", kv.first }});
+                }
+                auto r = std::make_unique<server_http_res>();
+                r->status = 200;
+                r->data   = out.dump();
+                return r;
+            }));
     }
 #endif
     // /v1/rerank takes {"query": "...", "documents": ["..."]} and returns
@@ -1029,7 +1079,7 @@ int command_serve(const ServeOptions & opts) {
     if (whisper_ctx) std::cout << "  audio: /v1/audio/transcriptions  /v1/audio/translations\n";
 #endif
 #ifdef CHIMERA_HAS_SD
-    if (sd_ctx)      std::cout << "  image: /v1/images/generations  /v1/images/edits  /v1/images/variations\n";
+    if (sd_ctx)      std::cout << "  image: /v1/images/generations  /v1/images/edits  /v1/images/variations  /v1/images/lora-adapters\n";
 #endif
     if (rag_ctx.embedder) std::cout << "  rag:   /v1/vector_stores  /v1/vector_stores/:name{,/delete,/files,/search}\n";
     if (emb_ctx)     std::cout << "  embed: /v1/embeddings (dedicated model: " << opts.embed_model << ")\n";

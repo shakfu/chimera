@@ -1,7 +1,7 @@
 # Chimera Serve — CLI/HTTP Parity Inventory
 
 Report date: 2026-05-21
-Last status update: 2026-05-21 (waves 1–4 + steps 5a–5e landed; full sd LoadParams surface exposed on serve, 30 --sd-* flags + per-request PhotoMaker. Only step 6 (per-request LoRA) remains.)
+Last status update: 2026-05-21 (waves 1–4 + steps 5a–5e + step 6 all landed. The numbered roadmap is closed. Full sd LoadParams surface exposed on serve, 30 --sd-* flags + per-request PhotoMaker + per-request LoRA via named aliases.)
 Companion to [cli-api-coverage.md](cli-api-coverage.md), which audits the
 CLI subcommand surface against upstream. This document audits the
 **HTTP server surface** (`chimera serve`) against the matching CLI
@@ -194,12 +194,13 @@ All map to existing `GenerateRequest` fields. **Wave 1 (14 fields) landed 2026-0
   of `--sd-pm-id-dir` scanned eagerly at server start. The
   explicit-base64 form wins over the named-set form when both are
   given. See step 5e in the [Recommended order](#recommended-order).
-- `lora` — per-request LoRA selection. **Design question:** should the
-  server load a fixed set of LoRAs at startup and let requests pick by
-  name, or should requests reference filesystem paths the server
-  resolves at request time? The former is safer; the latter more
-  flexible. Mirrors the choice llama-server made with its
-  `--lora-adapters` config.
+- ~~`lora` — per-request LoRA selection.~~ ✅ Landed 2026-05-21 as
+  step 6. The design question resolved in favor of **named aliases at
+  startup** (option A): repeatable `--sd-lora <name>=<path>` at server
+  start registers a closed allowlist; requests use `loras: [{"name":
+  "...", "scale": 0.7}, ...]`. Request bodies can't reference raw
+  filesystem paths. `GET /v1/images/lora-adapters` lists registered
+  names (no paths). See step 6 in the [Recommended order](#recommended-order).
 
 ### Tier 3 — server-init only (needs `LoadParams` routing first)
 
@@ -335,10 +336,28 @@ Pareto-shaped roadmap:
      all three image endpoints. ~250 LOC (the bulk is the
      self-contained `base64_decode()` for the JSON array path and the
      `PmIdSetCache` eager-scan at server start).
-6. **Per-request LoRA selection.** Pending. Choose between "named
-   adapters loaded at startup" (safer) vs. "paths resolved at request
-   time" (more flexible, security implications). Mirrors the choice
-   llama-server made with its `--lora-adapters` config.
+6. **Per-request LoRA selection.** ✅ Landed 2026-05-21. Resolved in
+   favor of **option A (named aliases at startup)** — `--sd-lora
+   <name>=<path>` repeatable registers a closed allowlist; requests
+   use `loras: [{"name": "...", "scale": 0.7}, ...]`. ~140 LOC across
+   `chimera.h` (ServeOptions field), `chimera_serve.cpp` (alias-map
+   build + GET endpoint binding), `chimera_serve_images.cpp` (new
+   `maybe_attach_loras()` helper parallel to `maybe_attach_control` /
+   `maybe_attach_pm`), `chimera_cli/chimera.cpp` (CLI binding). SD
+   reloads LoRA tensors per-generate, so the alias map is pure
+   metadata — no files open at server start; malformed specs and
+   duplicate names fail-fast with `BadInput`. **Closed-set by design:**
+   request bodies cannot reference raw filesystem paths — paths are
+   server-side state, never reflected back to the client. A
+   `--sd-allow-lora-paths` opt-in flag would gate path-mode if a
+   future need emerges; today's behavior is "names only." New `GET
+   /v1/images/lora-adapters` returns `[{"name": "..."}, ...]` of
+   registered aliases. Gating 400s for: unknown alias name (listing
+   known names), non-array `loras`, non-object element, missing /
+   non-string `name`, non-numeric `scale`, and `loras` against a
+   server with no aliases registered (with the missing-flag hint).
+   Same opt-in shape as 5a (VAD), 5b (ControlNet), and 5e
+   (PhotoMaker). Four new integration tests in `scripts/test.sh`.
 
 **Honest correction from the original roadmap:** `--sd-upscale-model`
 was originally listed in the "unblocking trio" — it isn't actually
@@ -351,7 +370,17 @@ Steps 1–4 closed the entire per-request gap (40 fields). Steps 5a–5e
 closed the server-init gap: audio LoadParams + VAD (5a), sd LoadParams
 + ControlNet (5b), sd split-checkpoint flags (5c, 13 flags), sd
 perf/offload long-tail (5d, 16 flags), PhotoMaker (5e, 3 server-init
-flags + 3 per-request fields). The full `chimera_sd::LoadParams`
-surface is exposed on serve. Remaining work — step 6 (per-request
-LoRA) — needs API-shape design (named-adapters-at-startup vs.
-paths-resolved-at-request) rather than more mechanical wiring.
+flags + 3 per-request fields). Step 6 closed per-request LoRA via
+named aliases. The numbered roadmap is now complete.
+
+Remaining work — none on the numbered roadmap. Tier-2 design-open
+items remain in the inventory (ref_image / IP-adapter style
+conditioning on the image side; `grammar`/`detect_language` shape
+questions on the audio side); those need API-shape decisions before
+landing, not mechanical wiring.
+
+Also worth a follow-up at some point: the image-serve gating tests
+in `scripts/test.sh` exercise 400-class responses but not success
+paths — verifying actual ControlNet / PhotoMaker / LoRA generation
+output would need real adapter/model fixtures that chimera does not
+ship today.

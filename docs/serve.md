@@ -221,6 +221,80 @@ curl -s http://127.0.0.1:8080/v1/images/edits \
   -F strength=0.6
 ```
 
+### ControlNet (per-request conditioning image)
+
+```
+chimera serve -m model.gguf --enable-image sd.gguf \
+              --sd-control-net /models/canny.safetensors
+```
+
+With `--sd-control-net` set at startup, all three image endpoints
+accept a `control_image` multipart file plus an optional
+`control_strength` field. A request that supplies `control_image`
+against a server with no ControlNet loaded returns HTTP 400 with the
+missing-flag hint.
+
+```
+curl -s http://127.0.0.1:8080/v1/images/edits \
+  -F image=@input.png \
+  -F control_image=@canny_edges.png \
+  -F control_strength=0.7 \
+  -F prompt="a cyberpunk skyline"
+```
+
+### PhotoMaker (per-request identity conditioning)
+
+```
+chimera serve -m model.gguf --enable-image sd.gguf \
+              --sd-photo-maker /models/photomaker.safetensors \
+              --sd-pm-id-dir /models/identities
+```
+
+Identity images travel as a **JSON base64 array** under `pm_id_images`
+(rather than as multipart files, since OpenAI's body has no precedent
+for repeatable image uploads). For curated identity sets,
+`--sd-pm-id-dir <dir>` scans each subdirectory as a named set
+addressable per-request via `pm_id_image_set: "<subdir-name>"`. Both
+shapes are accepted; if a request supplies both, `pm_id_images` wins.
+`pm_style_strength` is optional.
+
+```
+curl -s http://127.0.0.1:8080/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "a portrait of <person>",
+       "pm_id_image_set": "alice",
+       "pm_style_strength": 25}'
+```
+
+A PM field against a server with no `--sd-photo-maker` returns HTTP
+400; an unknown `pm_id_image_set` name returns HTTP 400 listing the
+known sets.
+
+### Per-request LoRA selection (SD)
+
+```
+chimera serve -m model.gguf --enable-image sd.gguf \
+              --sd-lora pixelart=/models/loras/pixelart.safetensors \
+              --sd-lora cyberpunk=/models/loras/cyberpunk.safetensors
+```
+
+Each `--sd-lora` registers one alias (`<name>=<path>`, repeatable).
+Requests reference adapters by **name**, with an optional `scale`:
+
+```
+curl -s http://127.0.0.1:8080/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "a moonlit forest",
+       "loras": [{"name": "pixelart", "scale": 0.7},
+                 {"name": "cyberpunk", "scale": 0.4}]}'
+```
+
+`GET /v1/images/lora-adapters` returns the registered names (no
+paths). Request bodies **cannot** reference raw filesystem paths;
+this is a deliberate closed-set design so a network-exposed server
+can't be coerced into opening arbitrary files. Unknown alias names
+return HTTP 400 listing the registered names.
+
 ### KV-cache snapshots
 
 ```
@@ -291,9 +365,10 @@ Bound when `--enable-image` is set:
 
 | Method | Path | Body | Notes |
 |--------|------|------|-------|
-| POST | `/v1/images/generations` | JSON | txt2img. |
-| POST | `/v1/images/edits` | multipart | img2img / inpaint. `image` field required, optional `mask`. |
-| POST | `/v1/images/variations` | multipart | img2img with no prompt. `image` field required. |
+| POST | `/v1/images/generations` | JSON | txt2img. Accepts `control_image` (multipart, if `--sd-control-net`), `pm_id_images` / `pm_id_image_set` (if `--sd-photo-maker`), and `loras` (if any `--sd-lora` registered). |
+| POST | `/v1/images/edits` | multipart | img2img / inpaint. `image` field required, optional `mask`, optional `control_image`. |
+| POST | `/v1/images/variations` | multipart | img2img with no prompt. `image` field required, optional `control_image`. |
+| GET | `/v1/images/lora-adapters` | — | List registered SD LoRA aliases (names only — paths are server-side). Returns `[]` when no `--sd-lora` is set. |
 
 Bound when `--enable-rag` is set:
 

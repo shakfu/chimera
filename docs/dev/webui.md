@@ -302,7 +302,13 @@ UI just doesn't know about them.
 - **`/v1/audio/{transcriptions,translations}`** (when `--enable-audio`)
   — no UI.
 - **`/v1/images/{generations,edits,variations}`** (when
-  `--enable-image`) — no UI.
+  `--enable-image`) — no UI. The per-request ControlNet
+  (`control_image`), PhotoMaker (`pm_id_images` /
+  `pm_id_image_set`), and SD LoRA (`loras` by named alias) surfaces
+  are equally invisible.
+- **`GET /v1/images/lora-adapters`** (when any `--sd-lora` is
+  registered) — no UI; a webui would need to fetch this list to
+  populate a LoRA picker that chooses by name.
 - **`/v1/rerank`** (when `--reranking`) — no UI.
 - **`/v1/embeddings`** when chimera was started with `--enable-embeddings`
   routing to a dedicated embedding model — the webui has no embedding

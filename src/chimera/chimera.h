@@ -566,6 +566,17 @@ struct ServeOptions {
     std::string sd_pm_id_dir;
     std::string sd_pm_id_embed_path;
 
+    // Per-request LoRA aliases (step 6). Repeatable `--sd-lora
+    // <name>=<path>` flags register a closed allowlist of adapters
+    // addressable from JSON requests as `loras: [{"name":"...",
+    // "scale": 0.7}, ...]`. SD reloads LoRAs per-generate (unlike the
+    // LLM side, which pre-loads), so the aliases are purely a
+    // name→path map; no files open at server start. Raw filesystem
+    // paths from requests are intentionally not supported — closed-set
+    // is the safer default. If a future need for path-mode emerges, a
+    // separate `--sd-allow-lora-paths` opt-in flag would gate it.
+    std::vector<std::string> sd_loras;  // each entry is "<name>=<path>"
+
     // Opt-in vector store / RAG. When non-empty, the named GGUF embedding
     // model is loaded alongside the LLM and the POST/GET /v1/vector_stores/*
     // routes are bound. Ingest and search requests targeting a collection

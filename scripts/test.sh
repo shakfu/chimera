@@ -932,6 +932,301 @@ else
     skip_test "/slots /lora-adapters" "needs $GEN_MODEL + python3 + curl"
 fi
 
+# image-serve gating: covers steps 5b (ControlNet), 5d (enum validators),
+# and 5e (PhotoMaker) of the server CLI/HTTP parity work. The bar here
+# is that opt-in features fail closed when their server-init prereq is
+# missing — i.e. a request that asks for ControlNet / PhotoMaker against
+# a server started without --sd-control-net / --sd-photo-maker returns
+# HTTP 400 with a message that names the missing flag.
+#
+# Two phases:
+#   1. CLI11 enum validators (5d) — pure parse-time, no serve spawn.
+#      Bogus --sd-rng / --sd-sampler-rng / --sd-prediction /
+#      --sd-lora-apply-mode values must exit non-zero before model load.
+#   2. Per-request gating (5b + 5e) — one SD serve spawn against
+#      sd_xl_turbo. Verifies the 400 + named-flag responses.
+#
+# Skipped when sd_xl_turbo isn't present; success paths (a real
+# ControlNet / PhotoMaker model loaded) need fixtures we don't ship.
+
+# Phase 1: CLI11 enum validator smoke (5d). No serve spawn, no model
+# load — CLI11's IsMember validator fires at parse time. We use an
+# obviously-missing model path so even if the validator were silently
+# stripped, the test would still distinguish "rejected at parse" from
+# "got past parse to load."
+SD_ENUM_GEN_MODEL="$GEN_MODEL"
+if [[ -f "$SD_ENUM_GEN_MODEL" ]]; then
+    for pair in "--sd-rng:bogus_rng" "--sd-sampler-rng:bogus_srng" \
+                "--sd-prediction:bogus_pred" "--sd-lora-apply-mode:bogus_lam"; do
+        flag="${pair%%:*}"
+        val="${pair##*:}"
+        if "$CHIMERA" serve -m "$SD_ENUM_GEN_MODEL" "$flag" "$val" \
+                --host 127.0.0.1 --port 1 --gpu-layers 0 >/dev/null 2>&1; then
+            # Got a zero exit — validator missing, this is a regression.
+            printf "  ${FAIL_TAG}  %s\n" "serve $flag $val exits non-zero"
+            fail=$((fail + 1))
+            failed_names+=("sd-enum-validator-$flag")
+        else
+            printf "  ${PASS_TAG}  %s\n" "serve $flag $val exits non-zero (CLI11 enum)"
+            pass=$((pass + 1))
+        fi
+    done
+else
+    skip_test "serve --sd-* enum validators (5d)" "missing $SD_ENUM_GEN_MODEL"
+fi
+
+# Phase 2: per-request ControlNet / PhotoMaker gating (5b + 5e).
+SD_MODEL="$MODELS/sd_xl_turbo_1.0.q8_0.gguf"
+if [[ -f "$GEN_MODEL" && -f "$SD_MODEL" ]] \
+        && command -v python3 >/dev/null && command -v curl >/dev/null; then
+    IMG_LOG="$(mktemp -t chimera-imggate-log-XXXXXX)"
+    IMG_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    # Start serve with the SD model loaded but NO --sd-control-net and
+    # NO --sd-photo-maker. The features are opt-in and the negative
+    # space is exactly what we want to exercise.
+    "$CHIMERA" serve -m "$GEN_MODEL" --enable-image "$SD_MODEL" \
+        --host 127.0.0.1 --port "$IMG_PORT" --gpu-layers 0 \
+        > "$IMG_LOG" 2>&1 &
+    IMG_PID=$!
+
+    # Poll until SD finishes loading. /health flips to 200 as soon as
+    # the LLM is up but the SD route returns 503 "Loading model" until
+    # the SD context is ready. POST an empty body and watch for the
+    # 400-class response (prompt-required) that means the handler is
+    # bound and the SD context is live. We use a `case` rather than
+    # `!= 000 && != 503` because curl on connect failure can emit
+    # multi-token http_code values (e.g. "000000") that aren't equal
+    # to "000" as strings and would otherwise false-positive the loop.
+    ready=0
+    for _ in $(seq 1 240); do
+        code="$(curl -sS -o /dev/null -w '%{http_code}' -m 2 -X POST \
+            -H 'Content-Type: application/json' -d '{}' \
+            "http://127.0.0.1:$IMG_PORT/v1/images/generations" 2>/dev/null)"
+        case "$code" in
+            200|400|405|415|422) ready=1; break ;;
+        esac
+        sleep 0.5
+    done
+
+    if [[ "$ready" != "1" ]]; then
+        printf "  ${FAIL_TAG}  %s\n" "image-serve gating (server failed to start)"
+        printf "        log tail:\n"
+        tail -5 "$IMG_LOG" | sed 's/^/          /'
+        fail=$((fail + 1))
+        failed_names+=("image-serve-startup")
+    else
+        # 5e: pm_id_images without --sd-photo-maker → 400 + "--sd-photo-maker"
+        # in the message body. Use a single-element base64 array; the
+        # contents are irrelevant because the gating check fires before
+        # any decode.
+        PM1="$(curl -sS -o /dev/stdout -w "\n__HTTP__%{http_code}" -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"prompt":"x","pm_id_images":["AAAA"]}' \
+            "http://127.0.0.1:$IMG_PORT/v1/images/generations" 2>/dev/null || true)"
+        PM1_CODE="${PM1##*__HTTP__}"
+        PM1_BODY="${PM1%__HTTP__*}"
+        if [[ "$PM1_CODE" == "400" ]] \
+                && printf '%s' "$PM1_BODY" | grep -q -- "--sd-photo-maker"; then
+            printf "  ${PASS_TAG}  %s\n" "5e pm_id_images without --sd-photo-maker → 400 + named-flag hint"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (HTTP %s)\n" \
+                "5e pm_id_images gating" "$PM1_CODE"
+            printf "        got body: %s\n" "$PM1_BODY"
+            fail=$((fail + 1))
+            failed_names+=("5e-pm-id-images-gate")
+        fi
+
+        # 5e: pm_id_image_set without --sd-photo-maker → 400 + named-flag.
+        # Same gate (model_loaded=false) fires for both option-C and
+        # option-E shapes; this asserts the second entrypoint also routes
+        # through the gate, not just the array form.
+        PM2="$(curl -sS -o /dev/stdout -w "\n__HTTP__%{http_code}" -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"prompt":"x","pm_id_image_set":"foo"}' \
+            "http://127.0.0.1:$IMG_PORT/v1/images/generations" 2>/dev/null || true)"
+        PM2_CODE="${PM2##*__HTTP__}"
+        PM2_BODY="${PM2%__HTTP__*}"
+        if [[ "$PM2_CODE" == "400" ]] \
+                && printf '%s' "$PM2_BODY" | grep -q -- "--sd-photo-maker"; then
+            printf "  ${PASS_TAG}  %s\n" "5e pm_id_image_set without --sd-photo-maker → 400 + named-flag hint"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (HTTP %s)\n" \
+                "5e pm_id_image_set gating" "$PM2_CODE"
+            printf "        got body: %s\n" "$PM2_BODY"
+            fail=$((fail + 1))
+            failed_names+=("5e-pm-id-image-set-gate")
+        fi
+
+        # 5b: control_image (multipart) without --sd-control-net → 400 +
+        # "--sd-control-net" in the body. Routed via /v1/images/edits
+        # (the natural multipart endpoint). The /edits handler decodes
+        # the init `image` BEFORE calling maybe_attach_control(), so we
+        # have to supply a valid image for `image`; otherwise the test
+        # short-circuits with a 415 on init decode and never reaches
+        # the gate under test. We materialize a 1x1 PNG via python3 —
+        # the contents are irrelevant, only that decode_image_bytes
+        # succeeds. The same PNG is reused for `control_image`; gating
+        # fires before that file is decoded so it would work as raw
+        # bytes too, but reusing keeps the fixture count at one.
+        CN_PNG="$(mktemp -t chimera-cn-XXXXXX).png"
+        python3 -c "import base64,sys; sys.stdout.buffer.write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAUAAeImBZsAAAAASUVORK5CYII='))" > "$CN_PNG"
+        CN="$(curl -sS -o /dev/stdout -w "\n__HTTP__%{http_code}" -X POST \
+            -F "prompt=x" \
+            -F "image=@$CN_PNG" \
+            -F "control_image=@$CN_PNG" \
+            "http://127.0.0.1:$IMG_PORT/v1/images/edits" 2>/dev/null || true)"
+        CN_CODE="${CN##*__HTTP__}"
+        CN_BODY="${CN%__HTTP__*}"
+        if [[ "$CN_CODE" == "400" ]] \
+                && printf '%s' "$CN_BODY" | grep -q -- "--sd-control-net"; then
+            printf "  ${PASS_TAG}  %s\n" "5b control_image without --sd-control-net → 400 + named-flag hint"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (HTTP %s)\n" \
+                "5b control_image gating" "$CN_CODE"
+            printf "        got body: %s\n" "$CN_BODY"
+            fail=$((fail + 1))
+            failed_names+=("5b-control-image-gate")
+        fi
+        rm -f "$CN_PNG"
+
+        # 6: loras without --sd-lora registered → 400 + named-flag hint.
+        # This server was started with no --sd-lora flags so aliases is
+        # empty; the gate's "no aliases registered" branch fires.
+        L1="$(curl -sS -o /dev/stdout -w "\n__HTTP__%{http_code}" -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"prompt":"x","loras":[{"name":"foo","scale":0.7}]}' \
+            "http://127.0.0.1:$IMG_PORT/v1/images/generations" 2>/dev/null || true)"
+        L1_CODE="${L1##*__HTTP__}"
+        L1_BODY="${L1%__HTTP__*}"
+        if [[ "$L1_CODE" == "400" ]] \
+                && printf '%s' "$L1_BODY" | grep -q -- "--sd-lora"; then
+            printf "  ${PASS_TAG}  %s\n" "6 loras without --sd-lora → 400 + named-flag hint"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (HTTP %s)\n" "6 loras gating" "$L1_CODE"
+            printf "        got body: %s\n" "$L1_BODY"
+            fail=$((fail + 1))
+            failed_names+=("6-loras-gate")
+        fi
+
+        # 6: GET /v1/images/lora-adapters with no --sd-lora → 200 + [].
+        # Empty alias map should produce an empty JSON array, mirroring
+        # the LLM-side /lora-adapters shape with no --lora registered.
+        GL_BODY="$(curl -sS "http://127.0.0.1:$IMG_PORT/v1/images/lora-adapters" 2>/dev/null || true)"
+        if printf '%s' "$GL_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if isinstance(d,list) and len(d)==0 else 1)' 2>/dev/null; then
+            printf "  ${PASS_TAG}  %s\n" "6 GET /v1/images/lora-adapters (no --sd-lora) returns []"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "6 GET /v1/images/lora-adapters empty list"
+            printf "        got: %s\n" "$GL_BODY"
+            fail=$((fail + 1))
+            failed_names+=("6-lora-adapters-empty")
+        fi
+    fi
+
+    if kill -0 "$IMG_PID" 2>/dev/null; then
+        kill -TERM "$IMG_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$IMG_PID" 2>/dev/null || break
+            sleep 0.25
+        done
+        kill -KILL "$IMG_PID" 2>/dev/null || true
+    fi
+    wait "$IMG_PID" 2>/dev/null || true
+    rm -f "$IMG_LOG"
+
+    # Second pass: start with two --sd-lora aliases registered. The
+    # alias paths point to a file that doesn't exist; the server-start
+    # gate doesn't stat the path (SD reloads adapters per-generate),
+    # so registration succeeds. We only exercise the alias-resolution
+    # surface — GET lists the names, and a request with an unknown
+    # name returns 400 listing the known names — both of which fire
+    # before generate() would try to open the file.
+    IMG_LOG2="$(mktemp -t chimera-imggate2-log-XXXXXX)"
+    IMG_PORT2="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    "$CHIMERA" serve -m "$GEN_MODEL" --enable-image "$SD_MODEL" \
+        --sd-lora "alpha=/nonexistent/alpha.safetensors" \
+        --sd-lora "beta=/nonexistent/beta.safetensors" \
+        --host 127.0.0.1 --port "$IMG_PORT2" --gpu-layers 0 \
+        > "$IMG_LOG2" 2>&1 &
+    IMG_PID2=$!
+
+    ready=0
+    for _ in $(seq 1 240); do
+        code="$(curl -sS -o /dev/null -w '%{http_code}' -m 2 -X POST \
+            -H 'Content-Type: application/json' -d '{}' \
+            "http://127.0.0.1:$IMG_PORT2/v1/images/generations" 2>/dev/null)"
+        case "$code" in
+            200|400|405|415|422) ready=1; break ;;
+        esac
+        sleep 0.5
+    done
+
+    if [[ "$ready" != "1" ]]; then
+        printf "  ${FAIL_TAG}  %s\n" "6 lora-aliases pass (server failed to start)"
+        tail -5 "$IMG_LOG2" | sed 's/^/          /'
+        fail=$((fail + 1))
+        failed_names+=("6-lora-aliases-startup")
+    else
+        # GET /v1/images/lora-adapters lists both registered names
+        # (order-independent) and reveals no path information.
+        GL2_BODY="$(curl -sS "http://127.0.0.1:$IMG_PORT2/v1/images/lora-adapters" 2>/dev/null || true)"
+        if printf '%s' "$GL2_BODY" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+ok = isinstance(d, list) and len(d) == 2 \
+     and {item["name"] for item in d if "name" in item} == {"alpha", "beta"} \
+     and all("path" not in item for item in d)
+sys.exit(0 if ok else 1)
+' 2>/dev/null; then
+            printf "  ${PASS_TAG}  %s\n" "6 GET /v1/images/lora-adapters lists registered aliases (names only)"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s\n" "6 GET /v1/images/lora-adapters with aliases"
+            printf "        got: %s\n" "$GL2_BODY"
+            fail=$((fail + 1))
+            failed_names+=("6-lora-adapters-listing")
+        fi
+
+        # Unknown alias name → 400 listing known names.
+        L2="$(curl -sS -o /dev/stdout -w "\n__HTTP__%{http_code}" -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"prompt":"x","loras":[{"name":"gamma","scale":0.5}]}' \
+            "http://127.0.0.1:$IMG_PORT2/v1/images/generations" 2>/dev/null || true)"
+        L2_CODE="${L2##*__HTTP__}"
+        L2_BODY="${L2%__HTTP__*}"
+        if [[ "$L2_CODE" == "400" ]] \
+                && printf '%s' "$L2_BODY" | grep -q "not registered" \
+                && printf '%s' "$L2_BODY" | grep -q "alpha" \
+                && printf '%s' "$L2_BODY" | grep -q "beta"; then
+            printf "  ${PASS_TAG}  %s\n" "6 loras unknown name → 400 listing known aliases"
+            pass=$((pass + 1))
+        else
+            printf "  ${FAIL_TAG}  %s (HTTP %s)\n" \
+                "6 loras unknown-name gating" "$L2_CODE"
+            printf "        got body: %s\n" "$L2_BODY"
+            fail=$((fail + 1))
+            failed_names+=("6-loras-unknown-name")
+        fi
+    fi
+
+    if kill -0 "$IMG_PID2" 2>/dev/null; then
+        kill -TERM "$IMG_PID2" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$IMG_PID2" 2>/dev/null || break
+            sleep 0.25
+        done
+        kill -KILL "$IMG_PID2" 2>/dev/null || true
+    fi
+    wait "$IMG_PID2" 2>/dev/null || true
+    rm -f "$IMG_LOG2"
+else
+    skip_test "image-serve gating (5b + 5e + 6)" "needs $GEN_MODEL + $SD_MODEL + python3 + curl"
+fi
+
 echo
 # Color the fail-count green at zero, red otherwise; pass is always
 # green if non-zero. The summary line is what readers scan first, so

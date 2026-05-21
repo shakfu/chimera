@@ -3722,6 +3722,14 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--sd-pm-id-embed-path", p.serve_opts.sd_pm_id_embed_path,
         "Path to a precomputed PhotoMaker ID embedding (.bin). Applied to every "
         "PM request unless the request later supplies its own override.");
+    // Step 6: per-request LoRA selection via named aliases. Each
+    // --sd-lora flag registers one entry in the allowlist; requests
+    // reference adapters by name. Repeatable.
+    cmd->add_option("--sd-lora", p.serve_opts.sd_loras,
+        "Register a named LoRA adapter, format <name>=<path>. Repeatable. "
+        "Requests select adapters via JSON `loras: [{\"name\":\"<name>\","
+        "\"scale\":<float>}, ...]` on /v1/images/* endpoints. Names only — "
+        "request bodies cannot reference arbitrary filesystem paths.");
 #endif
     cmd->add_option("--enable-rag", p.serve_opts.rag_embedding_model,
         "Embedding GGUF to load alongside the LLM (enables /v1/vector_stores/*)");

@@ -550,10 +550,96 @@ server_http_res_ptr maybe_attach_control(
     return nullptr;
 }
 
+// Step 6: per-request LoRA selection via named aliases. Reads
+// `loras: [{"name":"foo","scale":0.7}, ...]` from the JSON body,
+// looks up each name in the alias map registered via `--sd-lora`,
+// and populates GenerateRequest::loras with {path, scale} entries.
+//
+// Returns nullptr on success (no `loras` field present, or all names
+// resolved cleanly); otherwise an HTTP error response the caller
+// should propagate.
+//
+// Gating shape mirrors the other maybe_attach_* helpers — opt-in
+// server-init via --sd-lora, precise 400s when a request asks for
+// what isn't registered. Specifically:
+//   - `loras` against a server with no --sd-lora registered → 400
+//     pointing at the missing flag
+//   - `loras` is not an array                                → 400
+//   - an array element isn't an object                       → 400
+//   - the element's `name` is missing / not a string         → 400
+//   - the name doesn't match any registered alias            → 400
+//     (listing the known names so the client can self-correct)
+//   - `scale` is present but not a number                    → 400
+//
+// Raw filesystem paths (`{"path": "..."}` instead of `{"name": "..."}`)
+// are intentionally rejected — closed-set is the safer default. If a
+// future need for path-mode emerges, a `--sd-allow-lora-paths` flag
+// would gate it; today's behavior is "names only".
+server_http_res_ptr maybe_attach_loras(
+    const json &                  fields,
+    const LoraAliasMap *          aliases,
+    chimera_sd::GenerateRequest & sreq) {
+    auto err_res = [](int code, const std::string & msg) {
+        auto r = std::make_unique<server_http_res>();
+        r->status = code;
+        r->data = json{{ "error", { { "message", msg }, { "code", code }, { "type", "invalid_request_error" } }}}.dump();
+        return r;
+    };
+    if (!fields.contains("loras")) return nullptr;
+    const auto & arr = fields["loras"];
+    if (!arr.is_array()) {
+        return err_res(400, "loras must be a JSON array of {name, scale} objects");
+    }
+    if (arr.empty()) return nullptr;  // empty array is a no-op, not an error
+    if (aliases == nullptr || aliases->empty()) {
+        return err_res(400,
+            "loras was supplied but the server has no LoRA aliases registered; "
+            "restart chimera serve with --sd-lora <name>=<path> (repeatable) "
+            "to enable per-request LoRA selection");
+    }
+    sreq.loras.reserve(sreq.loras.size() + arr.size());
+    for (size_t i = 0; i < arr.size(); ++i) {
+        const auto & entry = arr[i];
+        if (!entry.is_object()) {
+            return err_res(400,
+                "loras[" + std::to_string(i) + "] must be an object with `name` and optional `scale`");
+        }
+        if (!entry.contains("name") || !entry["name"].is_string()) {
+            return err_res(400,
+                "loras[" + std::to_string(i) + "] is missing a string `name`");
+        }
+        const std::string name = entry["name"].get<std::string>();
+        const auto it = aliases->find(name);
+        if (it == aliases->end()) {
+            std::string known;
+            for (const auto & kv : *aliases) {
+                if (!known.empty()) known += ", ";
+                known += kv.first;
+            }
+            return err_res(400,
+                "loras[" + std::to_string(i) + "].name '" + name +
+                "' is not registered (known aliases: " + known + ")");
+        }
+        chimera_sd::LoraEntry le;
+        le.path  = it->second;
+        le.scale = 1.0f;
+        if (entry.contains("scale")) {
+            const auto & sc = entry["scale"];
+            if (!sc.is_number()) {
+                return err_res(400,
+                    "loras[" + std::to_string(i) + "].scale must be a number");
+            }
+            le.scale = sc.get<float>();
+        }
+        sreq.loras.push_back(std::move(le));
+    }
+    return nullptr;
+}
+
 server_http_context::handler_t make_image_generations_handler(
     sd_ctx_t * ctx, std::mutex & ctx_mutex,
-    bool control_net_loaded, PmServeState pm) {
-    return [ctx, &ctx_mutex, control_net_loaded, pm](const server_http_req & req) -> server_http_res_ptr {
+    bool control_net_loaded, PmServeState pm, const LoraAliasMap * lora_aliases) {
+    return [ctx, &ctx_mutex, control_net_loaded, pm, lora_aliases](const server_http_req & req) -> server_http_res_ptr {
         json fields = json::object();
         if (!req.body.empty()) {
             try { fields = json::parse(req.body); }
@@ -585,6 +671,9 @@ server_http_context::handler_t make_image_generations_handler(
         if (auto e = maybe_attach_pm(fields, pm, sreq)) {
             return e;
         }
+        if (auto e = maybe_attach_loras(fields, lora_aliases, sreq)) {
+            return e;
+        }
         return run_image_generate(ctx, ctx_mutex, std::move(sreq), fields);
     };
 }
@@ -592,8 +681,8 @@ server_http_context::handler_t make_image_generations_handler(
 // POST /v1/images/edits — img2img + optional mask (inpaint). Multipart.
 server_http_context::handler_t make_image_edits_handler(
     sd_ctx_t * ctx, std::mutex & ctx_mutex,
-    bool control_net_loaded, PmServeState pm) {
-    return [ctx, &ctx_mutex, control_net_loaded, pm](const server_http_req & req) -> server_http_res_ptr {
+    bool control_net_loaded, PmServeState pm, const LoraAliasMap * lora_aliases) {
+    return [ctx, &ctx_mutex, control_net_loaded, pm, lora_aliases](const server_http_req & req) -> server_http_res_ptr {
         auto err_res = [](int code, const std::string & msg) {
             auto r = std::make_unique<server_http_res>();
             r->status = code;
@@ -645,6 +734,9 @@ server_http_context::handler_t make_image_edits_handler(
         if (auto e = maybe_attach_pm(fields, pm, sreq)) {
             return e;
         }
+        if (auto e = maybe_attach_loras(fields, lora_aliases, sreq)) {
+            return e;
+        }
         return run_image_generate(ctx, ctx_mutex, std::move(sreq), fields);
     };
 }
@@ -653,8 +745,8 @@ server_http_context::handler_t make_image_edits_handler(
 // prompt; SD will produce variations driven by the init latent + noise.
 server_http_context::handler_t make_image_variations_handler(
     sd_ctx_t * ctx, std::mutex & ctx_mutex,
-    bool control_net_loaded, PmServeState pm) {
-    return [ctx, &ctx_mutex, control_net_loaded, pm](const server_http_req & req) -> server_http_res_ptr {
+    bool control_net_loaded, PmServeState pm, const LoraAliasMap * lora_aliases) {
+    return [ctx, &ctx_mutex, control_net_loaded, pm, lora_aliases](const server_http_req & req) -> server_http_res_ptr {
         auto err_res = [](int code, const std::string & msg) {
             auto r = std::make_unique<server_http_res>();
             r->status = code;
@@ -690,6 +782,9 @@ server_http_context::handler_t make_image_variations_handler(
             return e;
         }
         if (auto e = maybe_attach_pm(fields, pm, sreq)) {
+            return e;
+        }
+        if (auto e = maybe_attach_loras(fields, lora_aliases, sreq)) {
             return e;
         }
         return run_image_generate(ctx, ctx_mutex, std::move(sreq), fields);
