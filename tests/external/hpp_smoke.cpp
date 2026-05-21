@@ -60,6 +60,20 @@ int main() {
         return 0;
     }
 
+    // Path-only convenience ctor: chimera::Llama("model.gguf") with all
+    // other LlamaCommonOptions fields defaulted. Built and then thrown
+    // away here -- this is just a compile/link proof that the overload
+    // resolves and the model loads.
+    {
+        chimera::Llama defaults(model_path);
+        if (defaults.raw() == nullptr) {
+            std::fprintf(stderr, "FAIL: path-only Llama ctor produced null model\n");
+            return 1;
+        }
+        std::printf("path-only ctor: chimera::Llama(\"%s\") loads cleanly\n",
+                    model_path);
+    }
+
     std::printf("inference probe: loading %s via chimera::Tokenizer\n", model_path);
     chimera::Tokenizer tok(model_path);
     const auto ids = tok.encode("Hello");

@@ -165,6 +165,43 @@ void chimera_pin_check_signatures() {
     [[maybe_unused]] int32_t (*p_llama_model_n_embd)(
         const struct llama_model *) = &llama_model_n_embd;
 
+    // ---- persistent-handle dependencies (chimera::Llama) ------------
+    //
+    // The OOP layer in chimera.hpp holds a llama_context across many
+    // generate() calls and relies on these symbols staying compatible:
+    //
+    //   * llama_get_memory + llama_memory_clear replaced the older
+    //     llama_kv_self_clear API in late 2024. If they're renamed
+    //     again, Llama::reset() and Llama::generate()'s pre-decode
+    //     KV-clear break. Catch the signature drift here rather than
+    //     deep inside chimera.hpp's template instantiation errors.
+    //
+    //   * llama_init_from_model is the backbone of new_llama_context;
+    //     llama_model_load_from_file is the backbone of
+    //     load_llama_model. Both are called by the OOP ctor.
+    //
+    //   * llama_decode + llama_batch_get_one + llama_vocab_is_eog are
+    //     the core loop body of sample_loop, now publicly exposed in
+    //     chimera_llama.h.
+    [[maybe_unused]] llama_memory_t (*p_llama_get_memory)(
+        const struct llama_context *) = &llama_get_memory;
+    [[maybe_unused]] void (*p_llama_memory_clear)(
+        llama_memory_t, bool) = &llama_memory_clear;
+    [[maybe_unused]] struct llama_context * (*p_llama_init_from_model)(
+        struct llama_model *, struct llama_context_params) = &llama_init_from_model;
+    [[maybe_unused]] struct llama_model * (*p_llama_model_load_from_file)(
+        const char *, struct llama_model_params) = &llama_model_load_from_file;
+    [[maybe_unused]] void (*p_llama_model_free)(
+        struct llama_model *) = &llama_model_free;
+    [[maybe_unused]] void (*p_llama_free)(
+        struct llama_context *) = &llama_free;
+    [[maybe_unused]] int32_t (*p_llama_decode)(
+        struct llama_context *, struct llama_batch) = &llama_decode;
+    [[maybe_unused]] struct llama_batch (*p_llama_batch_get_one)(
+        llama_token *, int32_t) = &llama_batch_get_one;
+    [[maybe_unused]] bool (*p_llama_vocab_is_eog)(
+        const struct llama_vocab *, llama_token) = &llama_vocab_is_eog;
+
     // Whisper / SD signature pins live in their per-TU isolated
     // files (see file-top comment). Add new ones there.
 }

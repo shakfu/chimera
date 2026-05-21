@@ -375,6 +375,10 @@ for what chimera does, then [`docs/serve.md`](docs/serve.md) for the HTTP surfac
 Maintainers should read [`docs/dev/server.md`](docs/dev/server.md) (the architecture
 overview) and [`docs/dev/maintenance.md`](docs/dev/maintenance.md) (`make bump-check`,
 test discipline, env-var-gated fixture tests) before their first upstream bump.
+Embedders consuming `libchimera.a` from another C++ project should read
+[`docs/dev/combine_archives.md`](docs/dev/combine_archives.md) for the
+three-archive link contract and [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md)
+for the optional `chimera.hpp` wrapper.
 
 ## Origin
 

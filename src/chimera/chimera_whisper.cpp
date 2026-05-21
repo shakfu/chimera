@@ -47,6 +47,23 @@ namespace {
         &whisper_full_get_token_text;
     [[maybe_unused]] whisper_token_data (*p_full_get_token_data)(struct whisper_context *, int, int) =
         &whisper_full_get_token_data;
+
+    // ---- persistent-handle dependencies (chimera::Whisper) ----------
+    //
+    // The OOP wrapper holds a whisper_context across many transcribe()
+    // calls. Its correctness rests on the upstream contract that
+    // whisper_full is safe to call repeatedly on the same context (the
+    // "context is reusable across calls" note in chimera_whisper.h).
+    // This is a behavioral contract; we can't static-assert it, but
+    // we can pin the signatures so a rename of any load/run/free
+    // symbol fails to compile here rather than inside chimera.hpp's
+    // template instantiation.
+    [[maybe_unused]] struct whisper_context * (*p_whisper_init_from_file_with_params)(
+        const char *, struct whisper_context_params) = &whisper_init_from_file_with_params;
+    [[maybe_unused]] void (*p_whisper_free)(struct whisper_context *) = &whisper_free;
+    [[maybe_unused]] int (*p_whisper_full)(
+        struct whisper_context *, struct whisper_full_params,
+        const float *, int) = &whisper_full;
 }
 }  // namespace
 

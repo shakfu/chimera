@@ -136,9 +136,13 @@ extension is straightforward if a bump bites).
 `src/chimera/chimera_pin_check.cpp` for the llama.cpp surface
 (every `server_routes` handler_t field, `common_params` field types,
 `LLAMA_POOLING_TYPE_*` enum values, key `llama_*` function
-signatures). A matching per-modality block lives in
-`chimera_whisper.cpp` for whisper signatures (ggml.h collisions mean
-whisper / sd can't share a TU with llama).
+signatures including the `llama_memory_t` API that the persistent
+`chimera::Llama` ctx relies on). Matching per-modality pin blocks
+live in `chimera_whisper.cpp` (`whisper_init_from_file_with_params`,
+`whisper_free`, `whisper_full`) and `chimera_sd.cpp` (`new_sd_ctx`,
+`free_sd_ctx`, `generate_image`) — ggml.h collisions mean whisper
+/ sd can't share a TU with llama, so each modality owns its own
+pin-check function.
 
 ### 4. Adapter shim between chimera_serve and `server_routes`
 

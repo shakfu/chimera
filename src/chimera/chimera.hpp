@@ -99,6 +99,13 @@ public:
         : opts_(std::move(opts)),
           model_(load_llama_model(opts_)) {}
 
+    // Path-only convenience ctor. Defaults the rest of LlamaCommonOptions.
+    // The lazy-ctx design means callers can still `.options().n_predict = N`
+    // (or any other field) between this ctor and the first generate() to
+    // override defaults -- the ctx isn't built until first use.
+    explicit Llama(const std::string & model_path)
+        : Llama([&] { LlamaCommonOptions o; o.model = model_path; return o; }()) {}
+
     // Run one generation against the persistent model. Returns the
     // generated text. With `stream=true` the tokens are also written to
     // stdout as they're sampled (matches the CLI's `gen` behavior; a
@@ -219,6 +226,11 @@ private:
 // -------------------------------------------------------------------------
 class Embedder {
 public:
+    // Path-only convenience ctor. Defaults the rest of EmbedOptions
+    // (pooling=mean, normalize=true, n_ctx=0, etc.).
+    explicit Embedder(const std::string & model_path)
+        : Embedder([&] { EmbedOptions o; o.model = model_path; return o; }()) {}
+
     explicit Embedder(EmbedOptions opts)
         : opts_(std::move(opts)), inner_(make_config(opts_)) {
         if (opts_.cache_embeddings) {
@@ -302,6 +314,12 @@ private:
 // -------------------------------------------------------------------------
 class Whisper {
 public:
+    // Path-only convenience ctor. Defaults the rest of WhisperOptions
+    // (translate=false, language="en", etc.). Set .options().input later
+    // or use the `transcribe(wav_path)` / `run(wav_path)` overloads.
+    explicit Whisper(const std::string & model_path)
+        : Whisper([&] { WhisperOptions o; o.model = model_path; return o; }()) {}
+
     explicit Whisper(WhisperOptions opts)
         : opts_(std::move(opts)) {
         load_();
@@ -430,6 +448,16 @@ private:
 // -------------------------------------------------------------------------
 class SD {
 public:
+    // Path-only convenience ctor. Defaults the rest of SdOptions
+    // (steps=20, width=512, height=512, etc.). Set .options().prompt
+    // later or use the `generate(prompt)` / `run(prompt)` overloads.
+    // Note: an SD instance constructed this way has vae_decode_only=true
+    // baked in (no .init_image set) and cannot do img2img later -- set
+    // .init_image before the ctor (use the SdOptions overload) or call
+    // reset(/*reload=*/true) after setting it.
+    explicit SD(const std::string & model_path)
+        : SD([&] { SdOptions o; o.model = model_path; return o; }()) {}
+
     explicit SD(SdOptions opts) : opts_(std::move(opts)) {
         load_();
     }

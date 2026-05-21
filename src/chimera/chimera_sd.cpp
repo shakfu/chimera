@@ -30,6 +30,29 @@ extern "C" const char * ggml_version(void);
 #include "stb_image.h"
 #include "stb_image_write.h"
 
+// Pin-asserts: upstream signatures the OOP wrapper (chimera::SD) holds
+// across many generate() calls. If stable-diffusion.cpp renames or
+// changes the prototype of new_sd_ctx / free_sd_ctx / generate_image,
+// this TU fails to compile with a pointer at the broken contract --
+// before the failure cascades into chimera.hpp's template instantiation.
+// The OOP wrapper's persistent-handle correctness also depends on the
+// (undocumented but observed) contract that an sd_ctx_t is safe to
+// reuse across multiple generate_image calls; that's a behavioral
+// contract we can't static-assert, but pinning the signatures catches
+// the rename case.
+//
+// Cross-cutting llama.cpp pins live in chimera_pin_check.cpp; per-TU
+// isolation is forced by the ggml.h enum collision between whisper/sd
+// and llama.cpp (see chimera_pin_check.cpp's file-top comment).
+namespace {
+[[maybe_unused]] void chimera_sd_pin_check() {
+    [[maybe_unused]] sd_ctx_t * (*p_new_sd_ctx)(const sd_ctx_params_t *) = &new_sd_ctx;
+    [[maybe_unused]] void (*p_free_sd_ctx)(sd_ctx_t *) = &free_sd_ctx;
+    [[maybe_unused]] sd_image_t * (*p_generate_image)(
+        sd_ctx_t *, const sd_img_gen_params_t *) = &generate_image;
+}
+}  // namespace
+
 void SdContextDeleter::operator()(sd_ctx_t * ctx) const {
     if (ctx != nullptr) {
         free_sd_ctx(ctx);

@@ -164,19 +164,31 @@ chat-templated prompts or talk to a `chimera::Server`.
 #include "chimera.hpp"
 
 int main() {
+    // Path-only ctor (defaults everything else):
+    chimera::Llama llm("Qwen3-1.7B-Q4_0.gguf");
+    llm.options().n_predict = 128;       // tweak before first generate()
+    auto reply  = llm.generate("What is the capital of France?");
+    llm.options().n_predict = 32;        // re-tweak between calls
+    auto reply2 = llm.generate("And the capital of Spain?");
+
+    // Or hand a fully-populated options struct in for finer control:
     LlamaCommonOptions opts;
     opts.model     = "Qwen3-1.7B-Q4_0.gguf";
     opts.n_predict = 128;
+    opts.temp      = 0.0f;
+    chimera::Llama deterministic(opts);
 
-    chimera::Llama llm(opts);            // model loads here
-    auto reply  = llm.generate("What is the capital of France?");
-    llm.options().n_predict = 32;        // tweak between calls
-    auto reply2 = llm.generate("And the capital of Spain?");
-
-    chimera::Embedder emb({.model = "bge-small.gguf"});
+    chimera::Embedder emb("bge-small.gguf");
     auto vec = emb.embed("hello world");
 }
 ```
+
+Every persistent-handle class (`Llama`, `Embedder`, `Tokenizer`,
+`Whisper`, `SD`) accepts either a path-only string or the full
+options struct. Because the persistent context is lazily built on
+first use, mutating `options()` between the ctor and the first
+`generate()` / `transcribe()` / `generate()` call still takes
+effect.
 
 Every class also exposes `options()` (mutable + const) and most expose
 `raw()` for callers that need to drop down to the underlying C handle.
@@ -217,6 +229,30 @@ for the header. It runs as part of `make test-external-smoke`:
 
 The procedural-API counterpart is `tests/external/smoke.cpp`. Both
 build from the same `tests/external/CMakeLists.txt`.
+
+## Upstream-drift guards
+
+The persistent-handle design adds direct dependencies on three
+upstream APIs that don't appear in the procedural surface:
+
+- llama.cpp's `llama_memory_t` API (`llama_get_memory`,
+  `llama_memory_clear`) — replaces the older `llama_kv_self_clear`
+  family and could be renamed/restructured again.
+- The (mostly observed, not formally documented) contract that
+  `whisper_context` and `sd_ctx_t` are safe to reuse across many
+  `whisper_full` / `generate_image` calls.
+
+Signature drift on the first set is caught at compile time by
+`static_assert`s in `chimera_pin_check.cpp` (llama.cpp surface) and
+in per-modality pin-check functions inside `chimera_whisper.cpp` and
+`chimera_sd.cpp`. The behavioral contract for ctx reuse can't be
+`static_assert`ed; `tests/external/hpp_smoke.cpp` covers it at
+runtime by asserting that the cached ctx pointer is stable across
+two consecutive `transcribe()` / `generate()` calls on the same
+instance.
+
+When you add a new upstream symbol to the OOP layer, drop a matching
+pin in the appropriate file. See `docs/dev/maintenance.md` §3.
 
 ## Relationship to the library refactor
 
