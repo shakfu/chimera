@@ -527,9 +527,10 @@ or two items here, not the whole list.
 - Per-collection ingest from a server-side path or glob (the
   `chimera index ingest -g '...'` CLI shape). The browser can't
   reach the server's filesystem; needs a new endpoint.
-- Build / backend info and DB status panels (the data `chimera info`
-  and `chimera db status` print). Small new `GET` handlers; data is
-  already collected, not currently HTTP-exposed.
+- ~~Build / backend info and DB status panels (the data `chimera info`
+  and `chimera db status` print).~~ Shipped — `GET /v1/chimera/info`
+  and `GET /v1/chimera/db` (see chimera_serve_meta.cpp). Also
+  `POST /v1/chimera/shutdown` for graceful exit from a wrapper.
 - Cross-engine pipelines surfaced as one UI gesture ("transcribe →
   chat → image", "retrieve → rerank → chat with citations"). All
   pieces exist; orchestration can live client-side, but a server-side

@@ -374,16 +374,20 @@ Mirror `webui.md` § 7 / § 8 — minimum useful smoke, no Playwright.
   Selenium is exactly the kind of dependency creep § 6.2 warned
   against.
 
-**Deferred (would need new endpoints):**
+**Shipped after this doc was written:**
 
-- `GET /v1/chimera/info` — surface the data `chimera info` prints
-  (built backends, loaded backends, devices, CPU features). Useful
-  for a "what is this binary capable of" page in the landing chrome.
-- `GET /v1/chimera/db` — surface `chimera db status` (path, size,
-  table row counts). Useful for the persisted-chats page footer.
-
-Both are tiny handlers; defer until a sidecar page actually wants
-them.
+- `GET /v1/chimera/info` — JSON form of `chimera info` (versions,
+  built/loaded backends, devices, GPU/mmap/mlock/RPC flags, whisper/sd
+  linkage + CPU features, SQLite versions, build flags). Implemented
+  in `chimera_serve_meta.cpp`, always bound. Use this for a
+  "what is this binary capable of" page in the landing chrome.
+- `GET /v1/chimera/db` — JSON form of `chimera db status` (path,
+  size, schema version, table list, per-table row counts). Use this
+  for the persisted-chats page footer.
+- `POST /v1/chimera/shutdown` — graceful exit. Returns 202 then
+  triggers SIGINT-equivalent teardown 150 ms later. Was added with
+  chimera-desktop's wrapper-process cleanup in mind, but useful for
+  any sidecar setup that wants a clean shutdown signal.
 
 ---
 

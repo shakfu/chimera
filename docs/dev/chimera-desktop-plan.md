@@ -97,17 +97,24 @@ The remainder of this document expands each decision.
 - Mobile (iOS / Android). Tauri 2 supports it, but the chimera
   binary is desktop-shaped today.
 
-**Deferred to chimera (not chimera-desktop):**
+**Landed in chimera (was previously deferred):**
 
-- `GET /v1/chimera/info` endpoint — surface the data `chimera info`
-  prints. Currently CLI-only. Trivial new handler in
-  `chimera_serve.cpp`; needed by the About pane.
-- `GET /v1/chimera/db` endpoint — surface `chimera db status` data
-  (path, size, table counts). Needed by the Settings page footer.
-- Both would also benefit the in-tree sidecar (§ 8 of
-  `webui-impl.md` flagged them) — chimera-desktop is the second
-  consumer to want them, which tips the scales toward binding them
-  upstream.
+- `GET /v1/chimera/info` — JSON form of `chimera info`. Versions,
+  built / loaded backends, devices, GPU/mmap/mlock/RPC flags,
+  whisper/sd linkage + CPU features, SQLite versions, build flags.
+  Consumed by chimera-desktop's About pane at `/#/chimera/about`.
+- `GET /v1/chimera/db` — JSON form of `chimera db status`. Path,
+  size, schema version, table list, per-table row counts. Consumed
+  by chimera-desktop's chats-page footer.
+- `POST /v1/chimera/shutdown` — graceful exit endpoint. Returns 202
+  then triggers SIGINT-equivalent teardown on a detached thread
+  150 ms later. Consumed by chimera-desktop's `sidecar::kill()`,
+  which prefers it to SIGKILL when terminating the bundled child.
+
+All three live in `src/chimera/chimera_serve_meta.cpp`; bound
+unconditionally (no opt-in flag) since the data they expose is
+read-only and useful to any downstream client. See chimera's
+CHANGELOG `[Unreleased]` for the full design rationale.
 
 ---
 
@@ -451,9 +458,10 @@ The first public release ships when all of:
    against bundled-default sample models.
 6. Auto-update from v0.x to v1.0 has been smoke-tested on at least
    one OS.
-7. The "About" pane surfaces chimera's `info` data via the new
-   `/v1/chimera/info` endpoint (which chimera ships as a
-   prerequisite).
+7. The "About" pane surfaces chimera's `info` data via the
+   `/v1/chimera/info` endpoint (shipped — see § 3 "Landed in
+   chimera"). The chats panel footer surfaces DB size + row
+   counts via `/v1/chimera/db`.
 8. Code signing on macOS and Windows; AppImage on Linux.
 9. `docs/upstream-rebase.md` documents the `llama-ui` vendoring
    so a second contributor can perform the next rebase from notes
@@ -512,9 +520,10 @@ The recommended sequencing:
    endpoints accept what a UI sends? does the LoRA list endpoint
    include the data a picker needs?) without committing to the
    desktop build.
-2. **Bind the `/v1/chimera/info` and `/v1/chimera/db` endpoints**
-   in chimera. They are useful for the in-tree sidecar *and* are
-   chimera-desktop prerequisites.
+2. ~~**Bind the `/v1/chimera/info` and `/v1/chimera/db` endpoints**
+   in chimera.~~ Shipped — see § 3 "Landed in chimera". chimera
+   also ships `POST /v1/chimera/shutdown` for graceful child
+   termination from a wrapper process.
 3. **Watch the chimera serve `make webui-serve` traffic.** If
    anyone external uses it and asks for a desktop version, that is
    the § 6.4 trigger that justifies the chimera-desktop investment.

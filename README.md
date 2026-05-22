@@ -1,32 +1,44 @@
 # chimera
 
-A single statically-linked C++ executable that bundles [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), [SQLite](https://sqlite.org), and [sqlite-vec](https://github.com/asg017/sqlite-vec) into a busybox-style multitool. The same binary handles text generation, interactive chat with persistent history, speech-to-text, text-to-image, a personal RAG / vector store, and an OpenAI-compatible HTTP server exposing all three inference capabilities at once — all sharing a single ggml backend set and one SQLite database.
+A single statically-linked C++ executable that bundles [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), [SQLite](https://sqlite.org), and [sqlite-vec](https://github.com/asg017/sqlite-vec) into an inference multitool. The same binary handles text generation, interactive chat with persistent history, speech-to-text, text-to-image, a personal RAG / vector store, and an OpenAI-compatible HTTP server exposing all three inference capabilities at once — all sharing a single ggml backend set and one SQLite database.
 
 If you want the same capabilities from Python instead of a native binary, see [**cyllama**](https://github.com/shakfu/cyllama) — chimera's sibling project, which exposes llama.cpp / whisper.cpp / stable-diffusion.cpp as Cython bindings with a high-level Python API.
 
-The same build also produces **`libchimera.a`**, a redistributable static library that hosts the engines and the OpenAI-compatible HTTP server. Other C++ projects can link it directly to embed text generation, embeddings, transcription, image generation, RAG, and the HTTP server inside their own process — without forking chimera or shelling out to the `chimera` binary. See [§ "As a library"](#as-a-library) below and [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) for the embedder-facing surface.
+There's also a showcase / demo desktop app which uses chimera (forked llama.cpp webui in a Tauri shell, with chimera-specific features like a persisted-chat browser and a sidecar-status bar), see [**chimera-desktop**](https://github.com/shakfu/chimera-desktop).
+
+The same build also produces **`libchimera.a`**, a redistributable static library that hosts the engines and the OpenAI-compatible HTTP server. Other C++ projects can link it directly to embed text generation, embeddings, transcription, image generation, RAG, and the HTTP server inside their own process — without forking chimera or shelling out to the `chimera` binary. See [§ "As a library"](#as-a-library) below and [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) for the embedder-facing api.
 
 ## Who it's for
 
-chimera targets CLI-first users who run more than one ggml-backed modality (text + audio + image) and want them sharing one process, one ggml backend set, one SQLite database, and one OpenAI-compatible HTTP surface — rather than running, configuring, and gluing together three separate servers. It is most useful when:
+chimera targets CLI-first users who run more than one ggml-backed modality (text + audio + image) and want them sharing one process, one ggml backend set, one SQLite database, and one OpenAI-compatible HTTP api — rather than running, configuring, and gluing together three separate servers. It is most useful when:
 
 - You want faithful upstream flag coverage (`gen`, `chat`, `embed` expose most llama.cpp sampler / RoPE / YaRN / multi-GPU / cache / adapter flags directly), not a curated subset.
+
 - You distribute a single static binary across machines and don't want a Python or Node runtime on the target host.
+
 - You build against multiple ggml backends (CPU, CUDA, ROCm, SYCL, Vulkan, Metal) from the same source tree, and want to verify the linked backend with `chimera info` rather than runtime probing.
+
 - You're building on top of the HTTP server and need text, audio, image, embeddings, RAG, and chat-history routes in one origin.
+
 - You're a C++ embedder who wants to drive llama.cpp / whisper.cpp / sd.cpp from your own process without reimplementing the load-and-run scaffolding. Linking `libchimera.a` (and optionally `#include "chimera.hpp"` for the persistent-handle OOP layer) gives you the same model lifecycle, sampler wiring, and HTTP-server code paths the `chimera` binary uses.
 
-chimera is not a GUI application. The optional embedded web UI (`make build-with-webui`) bakes in upstream llama.cpp's chat UI for the `/` endpoint, but there is no model browser, launcher, or settings panel. Users who primarily want point-and-click are better served by Ollama, LM Studio, or Jan.
+chimera is not a GUI application. The optional embedded web UI (`make build-with-webui`) bakes in upstream llama.cpp's chat UI for the `/` endpoint, but there is no model browser, launcher, or settings panel. Users who want a packaged desktop experience built specifically around chimera should look at [chimera-desktop](https://github.com/shakfu/chimera-desktop) (above); other point-and-click options that work against chimera's OpenAI-compatible api include Ollama, LM Studio, and Jan.
 
 ## Project properties
 
 - **Three engines, one ggml.** llama.cpp, whisper.cpp, and stable-diffusion.cpp all link against a single shared copy of ggml (`--sd-shared-ggml` in the deps build). One process can host an LLM, a Whisper model, and a Stable Diffusion pipeline without three separately-configured servers.
+
 - **Shared persistence.** Chat history, embedding caches, and vector-store collections live in a single SQLite database (sqlite-vec for ANN search). `chat`, `serve`, `index`, and `search` read and write the same file.
+
 - **OpenAI-compatible HTTP across modalities.** `chimera serve` exposes `/v1/chat/completions`, `/v1/embeddings`, `/v1/audio/transcriptions`, `/v1/images/generations`, plus chimera-specific RAG, KV-slot-snapshot, and chat-history routes.
+
 - **Upstream-pin discipline.** Vendored llama.cpp / whisper.cpp / sd.cpp versions are pinned in `scripts/manage.py`. `make bump-check` diffs the currently-vendored upstream-server headers against a target llama.cpp version, and `chimera_pin_check.cpp` static-asserts on the struct fields chimera relies on — so a version bump that silently retypes or renames a depended-on field fails at compile time rather than at runtime.
+
 - **Backend matrix.** CPU, CUDA, ROCm (HIP), SYCL, Vulkan, and Metal are first-class build targets in the Makefile. `chimera info` reports built / loaded / registered backends and enumerated devices.
+
 - **Flag-coverage audit.** [`docs/dev/cli-api-coverage.md`](docs/dev/cli-api-coverage.md) tracks which upstream flags chimera exposes and which are deliberately skipped, so the gap between chimera's CLI and upstream's is auditable rather than implicit.
-- **Library artifact.** The same build produces `libchimera.a` (chimera's own code), `libchimera_thirdparty.a` (the bundled C++ stack), and `libchimera_ggml.a` (ggml core + per-backend archives, must be whole-archived). An external C++ project can link the three and consume chimera's procedural surface (`command_*`, `load_llama_model`, `make_sampler`, `run_generation`, …) or the optional header-only OOP layer (`#include "chimera.hpp"` — persistent-handle classes for Llama / Embedder / Tokenizer / Whisper / SD / Server). See [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md) for the link contract and [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) for the OOP wrapper.
+
+- **Library artifact.** The same build produces `libchimera.a` (chimera's own code), `libchimera_thirdparty.a` (the bundled C++ stack), and `libchimera_ggml.a` (ggml core + per-backend archives, must be whole-archived). An external C++ project can link the three and consume chimera's procedural api (`command_*`, `load_llama_model`, `make_sampler`, `run_generation`, …) or the optional header-only OOP layer (`#include "chimera.hpp"` — persistent-handle classes for Llama / Embedder / Tokenizer / Whisper / SD / Server). See [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md) for the link contract and [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) for the OOP wrapper.
 
 ## Subcommands
 
@@ -84,6 +96,7 @@ int main() {
 
 Reading order for embedders:
 1. [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md) — the three-archive link contract, why whole-archiving ggml is non-optional, validation plan.
+
 2. [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) — `chimera.hpp` design (persistent-handle semantics, dirty-options policy, streaming hook, upstream-drift guards).
 
 ## Build
@@ -95,7 +108,9 @@ make build
 This will:
 
 1. Run `python scripts/manage.py build --all --deps-only --sd-shared-ggml`, which clones and builds llama.cpp, whisper.cpp, and stable-diffusion.cpp into `thirdparty/<project>/{include,lib}` and vendors the SQLite + sqlite-vec amalgamations into `thirdparty/{sqlite,sqlite-vec}/`. The `--sd-shared-ggml` flag is load-bearing: stable-diffusion.cpp normally vendors its own copy of ggml, which would collide with llama.cpp's at link time. Building all three projects against the single ggml set is what makes the static binary possible.
+
 2. Configure with `cmake -S . -B build -DSD_USE_VENDORED_GGML=OFF`.
+
 3. Build the `chimera` target.
 
 Output: `build/chimera`.
@@ -203,7 +218,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="not-used")
 ```
 
-Supported endpoints, by default: `/v1/chat/completions`, `/v1/completions`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic compat), `/v1/responses`, `/v1/models`, `/v1/embeddings`, `/infill`, `/tokenize`, `/detokenize`, `/apply-template`, `/health`, `/metrics`, `/props`. Opt-in endpoints add `/v1/audio/{transcriptions,translations}`, `/v1/images/{generations,edits,variations}`, `/v1/rerank`, and `/v1/vector_stores/*`. See [`docs/serve.md`](docs/serve.md) for the full surface and [`docs/dev/server.md`](docs/dev/server.md) for the implementation notes (what's bound, what's deliberately not, why).
+Supported endpoints, by default: `/v1/chat/completions`, `/v1/completions`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic compat), `/v1/responses`, `/v1/models`, `/v1/embeddings`, `/infill`, `/tokenize`, `/detokenize`, `/apply-template`, `/health`, `/metrics`, `/props`. Opt-in endpoints add `/v1/audio/{transcriptions,translations}`, `/v1/images/{generations,edits,variations}`, `/v1/rerank`, and `/v1/vector_stores/*`. See [`docs/serve.md`](docs/serve.md) for the full api and [`docs/dev/server.md`](docs/dev/server.md) for the implementation notes (what's bound, what's deliberately not, why).
 
 ### Vector store / RAG (`index`, `search`)
 
@@ -247,9 +262,13 @@ The DB location defaults to `$CHIMERA_DB` then to the platform XDG path (`~/Libr
 Notes:
 
 - The prompt is auto-wrapped in the model's chat template (VL models are almost always instruct-tuned and otherwise stall on turn 0).
+
 - If your prompt does not already contain the media marker (`<__media__>` by default), one is prepended per `--image` so images appear before the text. To interleave, place the marker yourself.
+
 - `--image` may be repeated; each gets its own marker.
+
 - The vision encoder runs on the default backend (Metal on macOS), independent of `--gpu-layers` (which only controls LLM offload).
+
 - Vision input is supported on `gen` only; multi-turn vision in `chat` is not yet wired up (see `TODO.md`).
 
 ### Image-to-image / inpainting (`sd --init-image`)
@@ -289,8 +308,8 @@ What disappears when a modality is OFF:
 
 | Off | Removed |
 |---|---|
-| `WHISPER=OFF` | `chimera whisper` subcommand; `chimera serve --enable-audio`; `POST /v1/audio/{transcriptions,translations}`; `whisper.cpp` link surface |
-| `SD=OFF` | `chimera sd` subcommand; `chimera serve --enable-image`; `POST /v1/images/{generations,edits,variations}`; stable-diffusion.cpp + stb_image_write link surface |
+| `WHISPER=OFF` | `chimera whisper` subcommand; `chimera serve --enable-audio`; `POST /v1/audio/{transcriptions,translations}`; `whisper.cpp` link api |
+| `SD=OFF` | `chimera sd` subcommand; `chimera serve --enable-image`; `POST /v1/images/{generations,edits,variations}`; stable-diffusion.cpp + stb_image_write link api |
 
 `gen --mmproj --image` (LLM vision pipeline) is **unaffected** by either flag — it routes through libmtmd (llama.cpp's vision pipeline), not chimera_sd.
 
@@ -339,7 +358,7 @@ thirdparty/
 src/chimera/                    libchimera.a (chimera_lib target).
   chimera.h                     Option structs + cross-TU declarations
   chimera.hpp                   Optional header-only OOP layer over the
-                                procedural surface (chimera::Llama, etc.).
+                                procedural api (chimera::Llama, etc.).
                                 Not compiled into the archive; see
                                 docs/dev/oop-layer.md.
   chimera_llama.{h,cpp}         llama.cpp glue: model + context loaders,
@@ -400,7 +419,7 @@ The whisper/sd silencers cannot live in `chimera_cli/chimera.cpp` because their 
 |----------------------------------------------------------------------------|---------------|-------------------------------------------------------------------------------------------|
 | [`docs/cheatsheet.md`](docs/cheatsheet.md)                                 | user          | One-page command + curl reference.                                                        |
 | [`docs/serve.md`](docs/serve.md)                                           | user          | `chimera serve` walkthrough: flags, endpoints, errors, SDK setup.                         |
-| [`docs/dev/server.md`](docs/dev/server.md)                                 | maintainer    | What's bound on the HTTP surface, what's deliberately not, threading model, gotchas.      |
+| [`docs/dev/server.md`](docs/dev/server.md)                                 | maintainer    | What's bound on the HTTP api, what's deliberately not, threading model, gotchas.      |
 | [`docs/dev/server-api-coverage.md`](docs/dev/server-api-coverage.md)       | maintainer    | CLI vs HTTP parity audit: which subcommand flags are surfaced on the server, what's not.  |
 | [`docs/dev/cli-api-coverage.md`](docs/dev/cli-api-coverage.md)             | maintainer    | Chimera CLI vs upstream (llama/whisper/sd) flag coverage audit.                           |
 | [`docs/dev/server-router-mode.md`](docs/dev/server-router-mode.md)         | maintainer    | Decision record: why chimera serve is single-model (wontfix on router mode).              |
@@ -408,15 +427,16 @@ The whisper/sd silencers cannot live in `chimera_cli/chimera.cpp` because their 
 | [`docs/dev/webui.md`](docs/dev/webui.md)                                   | maintainer    | Embedded web UI (Variant A shipped; Variant B post-mortem).                               |
 | [`docs/dev/maintenance.md`](docs/dev/maintenance.md)                       | maintainer    | Bump discipline, test discipline, opt-in fixture tests, what's still weak.                |
 | [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md)             | maintainer    | Three-archive split design (libchimera.a as a reusable artifact).                         |
-| [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md)                           | embedder      | Optional header-only C++ OOP layer (`chimera.hpp`) over libchimera's procedural surface.  |
+| [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md)                           | embedder      | Optional header-only C++ OOP layer (`chimera.hpp`) over libchimera's procedural api.  |
 | [`CHANGELOG.md`](CHANGELOG.md)                                             | everyone      | Per-release feature notes.                                                                |
 | [`TODO.md`](TODO.md)                                                       | maintainer    | Forward backlog. Out-of-scope items at the bottom prevent re-litigation.                  |
 
 **New contributor reading order.** Start with [`docs/cheatsheet.md`](docs/cheatsheet.md)
-for what chimera does, then [`docs/serve.md`](docs/serve.md) for the HTTP surface.
+for what chimera does, then [`docs/serve.md`](docs/serve.md) for the HTTP api.
 Maintainers should read [`docs/dev/server.md`](docs/dev/server.md) (the architecture
 overview) and [`docs/dev/maintenance.md`](docs/dev/maintenance.md) (`make bump-check`,
 test discipline, env-var-gated fixture tests) before their first upstream bump.
+
 Embedders consuming `libchimera.a` from another C++ project should read
 [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md) for the
 three-archive link contract and [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md)

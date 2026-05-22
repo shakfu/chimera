@@ -354,6 +354,9 @@ Always bound:
 | POST | `/slots/:id_slot` | JSON | `?action=save` / `?action=restore` / `?action=erase` for KV-cache snapshots. Save/restore require `--slot-save-path`; erase works without it. |
 | GET  | `/lora-adapters` | — | List LoRAs loaded via `--lora` and their current scales. |
 | POST | `/lora-adapters` | JSON array | Hot-swap which adapters are active. Body: `[{"id": 0, "scale": 0.8}, ...]` — ids index into the `--lora` list. |
+| GET  | `/v1/chimera/info` | — | JSON form of `chimera info`. Versions, built / loaded backends, devices, GPU/mmap/mlock/RPC capability flags, whisper/sd link state + CPU features, SQLite versions, build flags. Always bound. |
+| GET  | `/v1/chimera/db` | — | JSON form of `chimera db status`. Path, file size, schema version + target, table list, per-table row counts. Always bound. |
+| POST | `/v1/chimera/shutdown` | — | Graceful exit. Returns 202 then triggers the same teardown SIGINT does, on a detached thread 150 ms later. No body required. |
 
 Bound when `--reranking <model>` is set:
 
