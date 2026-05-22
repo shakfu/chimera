@@ -494,6 +494,105 @@ Re-open this **only** if one of these specific signals shows up. Generic
 
 Until then: chimera does the server, third-party UIs do the UI.
 
+### 6.5. If revisited: candidate features for an extended UI
+
+Feature-level inventory of what an extended UI could surface *without
+new server work*, grouped by the chimera flag that gates the backing
+route. Complements the route-level audit in § 5.6 (same data, product
+framing instead of endpoint framing). Use this as the menu when
+evaluating a re-open trigger from § 6.4 — most triggers will name one
+or two items here, not the whole list.
+
+**Persistent chat history (`--persist-chats`).**
+
+- Chat browser sidebar — `GET /v1/chats?limit=N`.
+- Resume a past chat — `GET /v1/chats/:id` returns metadata +
+  ordered `messages[]`.
+- FTS5 search across all chats — `GET /v1/chats/search?q=...` with
+  `[word]`-highlighted snippets. No upstream equivalent.
+- Conversation consolidation — send `X-Chimera-Chat-Id` on
+  `/v1/chat/completions` so multi-turn flows append into one chats
+  row instead of one row per request. The upstream webui's blind
+  spot per § 5.6.
+
+**RAG / vector stores (`--enable-rag`).**
+
+- Collection list / create / drop / stats —
+  `GET|POST /v1/vector_stores`, `GET /v1/vector_stores/:name`,
+  `POST /v1/vector_stores/:name/delete`.
+- Browser-side ingest — `POST /v1/vector_stores/:name/files`
+  (multipart or JSON `{"text": "..."}`). Drag-and-drop into a
+  collection, mirroring the upstream webui's PDF-attach flow but
+  persisting to RAG instead of one-shot context.
+- KNN search panel — `POST /v1/vector_stores/:name/search`.
+- RAG-augmented chat — UI-side composition: search first, inject
+  top-k as context, then call `/v1/chat/completions`. No new server
+  route required.
+
+**Audio (`--enable-audio`).**
+
+- Mic-to-text input — `POST /v1/audio/transcriptions` (WAV-only
+  today).
+- Translate-to-English toggle — `POST /v1/audio/translations`.
+
+**Image generation (`--enable-image`).**
+
+- Text-to-image panel — `POST /v1/images/generations`.
+- Img2img — `POST /v1/images/edits` with init image.
+- Inpainting — same route with mask.
+- Variations — `POST /v1/images/variations`.
+- LoRA picker by name — `GET /v1/images/lora-adapters` populates
+  a dropdown; selected names flow into the `loras` array on the
+  generation request.
+- ControlNet / PhotoMaker fields — per-request `control_image`,
+  `pm_id_images`, `pm_id_image_set` on the same endpoints.
+
+**Reranking (`--reranking`).**
+
+- Rerank-after-RAG step — `POST /v1/rerank` between the KNN search
+  and the chat completion.
+
+**LLM runtime.**
+
+- LoRA hot-swap UI — `GET /lora-adapters` lists registered adapters;
+  `POST /lora-adapters` rescales without a model reload. Upstream
+  webui doesn't expose this.
+- KV-slot snapshots — `POST /slots/:id` save / restore / erase
+  (requires `--slot-save-path`). UI could let a user bookmark a
+  conversation state and restore it. Orthogonal to the client-side
+  "edit and branch" feature in the upstream guide.
+- Anthropic Messages playground — `POST /v1/messages` +
+  `/count_tokens`. The upstream UI is OpenAI-shape only; an alternate
+  request panel could exercise the Anthropic shape against the same
+  model.
+- Dedicated embedding model — `POST /v1/embeddings` routes to a
+  separate embedder under `--enable-embeddings`; UI could expose an
+  "embed this text" tool.
+
+**Genuinely requires new server work** (not free with an extended UI):
+
+- Per-collection ingest from a server-side path or glob (the
+  `chimera index ingest -g '...'` CLI shape). The browser can't
+  reach the server's filesystem; needs a new endpoint.
+- ~~Build / backend info and DB status panels (the data `chimera info`
+  and `chimera db status` print).~~ Shipped — `GET /v1/chimera/info`
+  and `GET /v1/chimera/db` (see chimera_serve_meta.cpp). Also
+  `POST /v1/chimera/shutdown` for graceful exit from a wrapper.
+- Cross-engine pipelines surfaced as one UI gesture ("transcribe →
+  chat → image", "retrieve → rerank → chat with citations"). All
+  pieces exist; orchestration can live client-side, but a server-side
+  pipeline abstraction would be net-new.
+
+**The § 6.4 decision filter applied to this list.** Items that no
+third-party OpenAI-compatible UI can express today — and therefore
+meet the re-open bar on their own — are the chimera-only shapes:
+`/v1/chats*`, `X-Chimera-Chat-Id` consolidation, the RAG ingest +
+search panels, the image-side LoRA / ControlNet / PhotoMaker fields,
+and `/v1/messages`. Everything else (audio in/out, basic image gen,
+rerank, embeddings) is already reachable from Open WebUI / LibreChat
+/ Jan against chimera's existing endpoints, and does not on its own
+justify owning a frontend.
+
 ## 7. Other follow-ups
 
 Two smaller things, kept around because they apply regardless of UI

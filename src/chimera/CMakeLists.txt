@@ -50,6 +50,7 @@ add_library(chimera_lib STATIC
     "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_rag.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_chat_persist.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_chats_read.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/chimera_serve_meta.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/llama_build_info_shim.cpp"
     # server-http.cpp is the HTTP-frontend half of llama-server. Upstream
     # compiles it directly into the llama-server executable rather than into

@@ -204,4 +204,18 @@ server_http_context::handler_t make_chats_list_handler  (ChatHistoryContext * ct
 server_http_context::handler_t make_chats_get_handler   (ChatHistoryContext * ctx);
 server_http_context::handler_t make_chats_search_handler(ChatHistoryContext * ctx);
 
+// ----------------------------------------------------------------------------
+// Meta — chimera-specific introspection + shutdown
+//   GET  /v1/chimera/info     — JSON form of `chimera info`
+//   GET  /v1/chimera/db       — JSON form of `chimera db status`
+//   POST /v1/chimera/shutdown — graceful exit; triggers the same teardown
+//                               that SIGINT does, on a detached thread
+//                               150 ms after the 202 response is queued.
+// Defined in chimera_serve_meta.cpp.
+// ----------------------------------------------------------------------------
+
+server_http_context::handler_t make_chimera_info_handler();
+server_http_context::handler_t make_chimera_db_handler(const std::string & db_path_override);
+server_http_context::handler_t make_chimera_shutdown_handler(std::function<void()> trigger);
+
 }  // namespace chimera_serve

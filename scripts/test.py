@@ -23,6 +23,9 @@ Usage:
   scripts/test.py                # smoke + e2e (where models available)
   scripts/test.py --smoke        # smoke only
   scripts/test.py --filter PAT   # run only tests whose name matches the regex
+  scripts/test.py --exclude PAT  # skip tests whose name matches the regex
+  scripts/test.py --slow-only    # only the tests listed in SLOW_TEST_RE
+  scripts/test.py --no-slow      # skip the tests listed in SLOW_TEST_RE
   scripts/test.py --verbose      # stream subprocess output as it happens
   scripts/test.py --no-color     # disable ANSI escapes
   scripts/test.py --no-timing    # don't print the slowest-first table
@@ -118,6 +121,17 @@ def tag(status: str) -> str:
     return status
 
 
+# Names of the tests that take noticeably longer than the others. Used by
+# --slow-only / --no-slow to split the suite into a quick "fast" tier for
+# tight inner-loop iteration and a separate "slow" tier for the heavy
+# vision / SD round trips. The regex matches against test names (see the
+# `name=` argument to each `rec.pass_` / `maybe()` call). Update when a
+# new test crosses the ~20-second mark.
+SLOW_TEST_RE = re.compile(
+    r"(gen --mmproj --image|sd img2img round-trip|sd sd_xl_turbo)"
+)
+
+
 class Recorder:
     """Collects Outcome records, prints them live, and reports the summary.
 
@@ -126,12 +140,22 @@ class Recorder:
     formatting path, which makes --no-color / --verbose toggles one switch.
     """
 
-    def __init__(self, *, name_filter: Optional[re.Pattern] = None) -> None:
+    def __init__(
+        self,
+        *,
+        name_filter: Optional[re.Pattern] = None,
+        name_exclude: Optional[re.Pattern] = None,
+    ) -> None:
         self.outcomes: list[Outcome] = []
         self._filter = name_filter
+        self._exclude = name_exclude
 
     def matches(self, name: str) -> bool:
-        return self._filter is None or self._filter.search(name) is not None
+        if self._filter is not None and self._filter.search(name) is None:
+            return False
+        if self._exclude is not None and self._exclude.search(name) is not None:
+            return False
+        return True
 
     def record(self, name: str, status: str, duration: float, detail: str = "") -> Outcome:
         outcome = Outcome(name=name, status=status, duration=duration, detail=detail)
@@ -1719,6 +1743,18 @@ def parse_args(argv: list) -> argparse.Namespace:
                    help="Run smoke tests only (skip end-to-end).")
     p.add_argument("--filter", metavar="REGEX",
                    help="Run only tests whose name matches REGEX.")
+    p.add_argument("--exclude", metavar="REGEX",
+                   help="Skip tests whose name matches REGEX. Composes with "
+                        "--filter (a test must pass both: match --filter, not "
+                        "match --exclude).")
+    slow_group = p.add_mutually_exclusive_group()
+    slow_group.add_argument("--slow-only", action="store_true",
+                            help="Run only the heavy tests listed in "
+                                 "SLOW_TEST_RE (the vision + SD round-trips). "
+                                 "Convenience for `--filter <SLOW_TEST_RE>`.")
+    slow_group.add_argument("--no-slow", action="store_true",
+                            help="Skip the heavy tests listed in SLOW_TEST_RE. "
+                                 "Convenience for `--exclude <SLOW_TEST_RE>`.")
     p.add_argument("--no-color", action="store_true",
                    help="Disable ANSI color output. Forced off if stdout isn't a TTY.")
     p.add_argument("--verbose", action="store_true",
@@ -1754,8 +1790,33 @@ def main(argv: list) -> int:
         except re.error as e:
             print(f"FAIL: invalid --filter regex: {e}", file=sys.stderr)
             return 1
+    if args.slow_only:
+        # --slow-only narrows the active filter; if the user also passed
+        # --filter the intersection is what runs (a test must match both).
+        if name_filter is None:
+            name_filter = SLOW_TEST_RE
+        else:
+            name_filter = re.compile(
+                f"(?=.*(?:{name_filter.pattern}))(?=.*(?:{SLOW_TEST_RE.pattern}))"
+            )
 
-    rec = Recorder(name_filter=name_filter)
+    name_exclude: Optional[re.Pattern] = None
+    if args.exclude:
+        try:
+            name_exclude = re.compile(args.exclude)
+        except re.error as e:
+            print(f"FAIL: invalid --exclude regex: {e}", file=sys.stderr)
+            return 1
+    if args.no_slow:
+        # Union with any user-supplied --exclude so both take effect.
+        if name_exclude is None:
+            name_exclude = SLOW_TEST_RE
+        else:
+            name_exclude = re.compile(
+                f"(?:{name_exclude.pattern})|(?:{SLOW_TEST_RE.pattern})"
+            )
+
+    rec = Recorder(name_filter=name_filter, name_exclude=name_exclude)
 
     print("== smoke ==")
     _SECTIONS[0][1](rec, chimera)

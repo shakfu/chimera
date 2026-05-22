@@ -1029,10 +1029,42 @@ int command_serve(const ServeOptions & opts) {
         ctx_http.get("/v1/chats/:id",     ex_wrapper(make_chats_get_handler   (&chat_hist_ctx)));
     }
 
+    // Meta endpoints — JSON introspection + graceful shutdown.
+    // /v1/chimera/info and /v1/chimera/db are always available (no
+    // gating flag). /v1/chimera/shutdown captures the same teardown
+    // SIGINT triggers; binds after `clean_up` is declared so the
+    // capture closure has it available. See chimera_serve_meta.cpp.
+    ctx_http.get ("/v1/chimera/info",
+                  ex_wrapper(make_chimera_info_handler()));
+    // For the DB path we prefer the chat-persistence override (since
+    // chats + vector_store share one SQLite file in chimera), then
+    // fall back to the rag-db override, then to the default
+    // resolution (env var / XDG path). All three resolve to the same
+    // file in practice; the precedence matches what chat persistence
+    // and RAG do above.
+    {
+        const std::string meta_db_path =
+            !opts.chat_db_path.empty() ? opts.chat_db_path :
+            !opts.rag_db_path.empty()  ? opts.rag_db_path  : std::string{};
+        ctx_http.get("/v1/chimera/db",
+                     ex_wrapper(make_chimera_db_handler(meta_db_path)));
+    }
+
     auto clean_up = [&]() {
         ctx_http.stop();
         ctx_server.terminate();
     };
+
+    // /v1/chimera/shutdown — triggers the same termination the SIGINT
+    // handler would, on a detached thread 150 ms after the 202
+    // response is queued so the client actually sees it before the
+    // socket goes away.
+    ctx_http.post("/v1/chimera/shutdown",
+                  ex_wrapper(make_chimera_shutdown_handler([&]() {
+                      if (emb_ctx) emb_ctx->ctx->terminate();
+                      if (rrk_ctx) rrk_ctx->ctx->terminate();
+                      ctx_server.terminate();
+                  })));
 
     // Start HTTP before loading the model so /health responds early.
     if (!ctx_http.start()) {

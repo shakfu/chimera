@@ -1,7 +1,7 @@
 .PHONY: deps build build-with-webui build-cuda build-rocm build-sycl \
-	    build-vulkan rebuild clean reset test smoke install uninstall \
-	    release-notes bump-check test-db-migrate test-golden combine \
-	    test-external-smoke test-external-oop
+	    build-vulkan rebuild clean reset test test-fast test-slow smoke \
+	    install uninstall release-notes bump-check test-db-migrate \
+	    test-golden combine test-external-smoke test-external-oop
 
 # Override with `make PYTHON=<cmd>` for
 # unusual environments (e.g. `PYTHON="uv run python"`).
@@ -74,6 +74,20 @@ deps:
 
 test:
 	@$(PYTHON) scripts/test.py
+
+# test-fast: same suite as `test` but skip the three vision / SD round-trips
+# that dominate wall-clock time (vision pipeline ~165s, sd img2img ~75s,
+# sd_xl_turbo ~30s). Tight inner-loop tier for edits that don't touch the
+# vision or SD paths. The slow set is centralised in SLOW_TEST_RE in
+# scripts/test.py — update there when a new test crosses the ~20s mark.
+test-fast:
+	@$(PYTHON) scripts/test.py --no-slow
+
+# test-slow: complement of test-fast. Runs only the heavy vision / SD
+# round-trips. Useful when iterating on the SD pipeline or the mtmd
+# vision integration without paying for the rest of the suite.
+test-slow:
+	@$(PYTHON) scripts/test.py --slow-only
 
 smoke:
 	@$(PYTHON) scripts/test.py --smoke
