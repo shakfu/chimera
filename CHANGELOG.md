@@ -4,6 +4,14 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Added
+
+- **Per-run test-timing capture and diff tooling.** `scripts/test.py` gains two flags: `--timings-out FILE` writes a JSON file at end of run containing every outcome's wall-clock duration plus a metadata header (chimera + llama.cpp + whisper.cpp + sd.cpp + sqlite versions from `chimera --version`, ISO timestamp, binary path); `--timings-baseline FILE` loads a previously-captured file and annotates each test line with `Δ +N.NNs (+P%)` against the baseline, colored red for regressions, green for speedups, gray for neutral. Regression threshold is `abs > 0.5s AND rel > 20%` so trivial 0.02s → 0.04s flips don't crowd the output.
+- **`scripts/test_diff.py`** — standalone offline diff between two timings JSONs. Sorts by absolute wall-clock delta by default (`--by-rel` switches to %, `--by-name` for stable alpha order). `--only regressions|speedups|changed|all` filters the table. Exit code 1 if any test regressed past both thresholds, making it usable as a CI gate. Reports tests that exist on only one side as separate "only in baseline / only in current" lines.
+- **`make test-bench` / `make test-bench-fast` targets.** Run the suite with `--timings-out $(BENCH)`, defaulting to `build/test_timings.json`; override with `make test-bench BENCH=foo.json`. `test-bench-fast` skips the slow set per `--no-slow`. Standard workflow: capture baseline on a known-good ref, capture current on a suspect ref, run `scripts/test_diff.py baseline.json current.json` to see where wall-clock cost moved.
+
+### Changed
+
 ## [0.2.1]
 
 ### Added

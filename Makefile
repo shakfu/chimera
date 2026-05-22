@@ -1,7 +1,8 @@
 .PHONY: deps build build-with-webui build-cuda build-rocm build-sycl \
-	    build-vulkan rebuild clean reset test test-fast test-slow smoke \
-	    install uninstall release-notes bump-check test-db-migrate \
-	    test-golden combine test-external-smoke test-external-oop
+	    build-vulkan rebuild clean reset test test-fast test-slow \
+	    test-bench test-bench-fast smoke install uninstall release-notes \
+	    bump-check test-db-migrate test-golden combine \
+	    test-external-smoke test-external-oop
 
 # Override with `make PYTHON=<cmd>` for
 # unusual environments (e.g. `PYTHON="uv run python"`).
@@ -88,6 +89,24 @@ test-fast:
 # vision integration without paying for the rest of the suite.
 test-slow:
 	@$(PYTHON) scripts/test.py --slow-only
+
+# test-bench: run the full suite and write per-test timings to a JSON
+# file for later comparison. Override the destination with
+# `make test-bench BENCH=mybench.json`. Companion to scripts/test_diff.py,
+# which diffs two of these files and flags regressions:
+#
+#   git checkout main && make build && make test-bench BENCH=main.json
+#   git checkout dev  && make build && make test-bench BENCH=dev.json
+#   scripts/test_diff.py main.json dev.json
+#
+# `test-bench-fast` runs the same with --no-slow for a quick check that
+# omits the heavy vision / SD round-trips.
+BENCH ?= $(BUILD_DIR)/test_timings.json
+test-bench:
+	@$(PYTHON) scripts/test.py --timings-out $(BENCH)
+
+test-bench-fast:
+	@$(PYTHON) scripts/test.py --no-slow --timings-out $(BENCH)
 
 smoke:
 	@$(PYTHON) scripts/test.py --smoke
