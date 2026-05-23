@@ -29,8 +29,17 @@ Usage:
   scripts/test.py --verbose      # stream subprocess output as it happens
   scripts/test.py --no-color     # disable ANSI escapes
   scripts/test.py --no-timing    # don't print the slowest-first table
+  scripts/test.py --timings-out FILE        # write per-test timings as JSON
+  scripts/test.py --timings-baseline FILE   # annotate every test line with the
+                                            # delta vs a previously-captured
+                                            # JSON; flag obvious regressions
 
 Set CHIMERA=/path/to/chimera to test a non-default binary.
+
+The JSON format produced by --timings-out (and consumed by
+--timings-baseline) is documented in docs/dev/maintenance.md and
+scripts/test_diff.py. Schema is intentionally simple: an array of
+{name, status, duration_s} records plus a small metadata header.
 """
 
 from __future__ import annotations
@@ -132,6 +141,18 @@ SLOW_TEST_RE = re.compile(
 )
 
 
+# Thresholds for the inline regression annotation when --timings-baseline
+# is in use. Any test that ran in the baseline AND in the current run gets
+# a `Δ +N.NNs` suffix on its result line. We highlight regressions if the
+# slowdown is BOTH absolutely (`REGRESSION_ABS_S`) and relatively
+# (`REGRESSION_REL`) significant — both conditions must be true so that a
+# 0.1s test going to 0.2s (100% but trivial in wall clock) doesn't crowd
+# the output. Symmetric thresholds for speedups so improvements are
+# visible too.
+REGRESSION_ABS_S = 0.5
+REGRESSION_REL   = 0.20  # i.e. 20%
+
+
 class Recorder:
     """Collects Outcome records, prints them live, and reports the summary.
 
@@ -145,10 +166,15 @@ class Recorder:
         *,
         name_filter: Optional[re.Pattern] = None,
         name_exclude: Optional[re.Pattern] = None,
+        baseline: Optional[dict] = None,
     ) -> None:
         self.outcomes: list[Outcome] = []
         self._filter = name_filter
         self._exclude = name_exclude
+        # baseline: { test_name -> duration_s } loaded from a prior run.
+        # When set, _print appends a delta annotation to every PASS line
+        # that has a matching baseline entry.
+        self._baseline = baseline or {}
 
     def matches(self, name: str) -> bool:
         if self._filter is not None and self._filter.search(name) is None:
@@ -163,10 +189,35 @@ class Recorder:
         self._print(outcome)
         return outcome
 
+    def _baseline_annotation(self, name: str, duration: float) -> str:
+        """Return a ` Δ +1.23s (+45%)` style suffix when a baseline timing
+        exists for this test, else empty string. ANSI-colored when colors
+        are on: red for regression, green for speedup."""
+        if name not in self._baseline:
+            return ""
+        prev = self._baseline[name]
+        if prev <= 0:
+            return ""
+        delta = duration - prev
+        rel = delta / prev
+        # Always annotate, but only colorize when both abs + rel exceed
+        # the threshold. A "neutral" delta (within thresholds) is printed
+        # without color so the noise floor is visible without dominating.
+        is_regression = delta >  REGRESSION_ABS_S and rel >  REGRESSION_REL
+        is_speedup    = delta < -REGRESSION_ABS_S and rel < -REGRESSION_REL
+        sign = "+" if delta >= 0 else ""
+        text = f"  Δ {sign}{delta:.2f}s ({sign}{rel * 100:.0f}%)"
+        if is_regression:
+            return _ansi("31", text)
+        if is_speedup:
+            return _ansi("32", text)
+        return _ansi("90", text)  # gray — visible but quiet
+
     def _print(self, o: Outcome) -> None:
         # Two-space indent matches the bash output convention so existing
         # log scrapers (and human muscle memory) keep working.
-        print(f"  {tag(o.status)}  {o.name}")
+        annot = self._baseline_annotation(o.name, o.duration) if o.status == Status.PASS else ""
+        print(f"  {tag(o.status)}  {o.name}{annot}")
         if o.detail:
             for line in o.detail.splitlines():
                 print(f"        {line}")
@@ -1067,10 +1118,10 @@ def e2e_chat_cli_tests(rec: Recorder, chimera: Path) -> None:
 
 def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
     names = [
-        "X-Chimera-Chat-Id new chat → header echoed",
-        "X-Chimera-Chat-Id echo → same id reused",
-        "X-Chimera-Chat-Id unknown id → 404",
-        "X-Chimera-Chat-Id malformed → 400",
+        "X-Chimera-Chat-Id new chat -> header echoed",
+        "X-Chimera-Chat-Id echo -> same id reused",
+        "X-Chimera-Chat-Id unknown id -> 404",
+        "X-Chimera-Chat-Id malformed -> 400",
         "X-Chimera-Chat-Id DB state (1 chat, 4 messages)",
     ]
     if not GEN_MODEL.is_file():
@@ -1087,7 +1138,7 @@ def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
                 ["-m", str(GEN_MODEL), "--persist-chats", "--chat-db", str(chat_db)],
             ) as srv:
                 first_id: Optional[str] = None
-                # Case 1: no incoming header → server assigns + echoes a new id.
+                # Case 1: no incoming header -> server assigns + echoes a new id.
                 with maybe(rec, names[0]) as t:
                     r = http_post_json(f"{srv.base_url}/v1/chat/completions", {
                         "model": "any",
@@ -1116,7 +1167,7 @@ def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
                         if echo != first_id:
                             t.fail(f"expected {first_id}, got {echo!r}")
 
-                # Case 3: unknown id → 404.
+                # Case 3: unknown id -> 404.
                 with maybe(rec, names[2]) as t:
                     r = http_post_json(f"{srv.base_url}/v1/chat/completions", {
                         "model": "any",
@@ -1126,7 +1177,7 @@ def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
                     if r.status != 404:
                         t.fail(f"got HTTP {r.status}")
 
-                # Case 4: malformed id → 400.
+                # Case 4: malformed id -> 400.
                 with maybe(rec, names[3]) as t:
                     r = http_post_json(f"{srv.base_url}/v1/chat/completions", {
                         "model": "any",
@@ -1167,8 +1218,8 @@ def e2e_chats_endpoints_tests(rec: Recorder, chimera: Path) -> None:
         "GET /v1/chats lists persisted chats",
         "GET /v1/chats/:id returns chat + ordered messages",
         "GET /v1/chats/search returns FTS5-highlighted hit",
-        "GET /v1/chats/99999 → 400 (not 404)",
-        "GET /v1/chats/search without q → 400",
+        "GET /v1/chats/99999 -> 400 (not 404)",
+        "GET /v1/chats/search without q -> 400",
         "GET / with --public-path serves index.html",
     ]
     if not GEN_MODEL.is_file():
@@ -1262,13 +1313,13 @@ def e2e_chats_endpoints_tests(rec: Recorder, chimera: Path) -> None:
 def e2e_slots_lora_tests(rec: Recorder, chimera: Path) -> None:
     pass1_names = [
         "GET /slots returns JSON array of slot status",
-        "POST /slots/0?action=save without --slot-save-path → 501",
+        "POST /slots/0?action=save without --slot-save-path -> 501",
         "GET /lora-adapters (no --lora) returns []",
-        "POST /lora-adapters [] → 200",
+        "POST /lora-adapters [] -> 200",
     ]
     pass2_names = [
-        "POST /slots/0?action=save with --slot-save-path → 200 + file written",
-        "POST /slots/0?action=restore → 200",
+        "POST /slots/0?action=save with --slot-save-path -> 200 + file written",
+        "POST /slots/0?action=restore -> 200",
     ]
     if not GEN_MODEL.is_file():
         for n in pass1_names + pass2_names:
@@ -1453,10 +1504,10 @@ def _tiny_png_bytes() -> bytes:
 
 def e2e_image_serve_gating(rec: Recorder, chimera: Path) -> None:
     names = [
-        "5e pm_id_images without --sd-photo-maker → 400 + named-flag hint",
-        "5e pm_id_image_set without --sd-photo-maker → 400 + named-flag hint",
-        "5b control_image without --sd-control-net → 400 + named-flag hint",
-        "6 loras without --sd-lora → 400 + named-flag hint",
+        "5e pm_id_images without --sd-photo-maker -> 400 + named-flag hint",
+        "5e pm_id_image_set without --sd-photo-maker -> 400 + named-flag hint",
+        "5b control_image without --sd-control-net -> 400 + named-flag hint",
+        "6 loras without --sd-lora -> 400 + named-flag hint",
         "6 GET /v1/images/lora-adapters (no --sd-lora) returns []",
     ]
     if not (GEN_MODEL.is_file() and SD_MODEL is not None):
@@ -1532,7 +1583,7 @@ def e2e_image_serve_aliases(rec: Recorder, chimera: Path) -> None:
     only opens them at generate() time, and these tests fire before that."""
     names = [
         "6 GET /v1/images/lora-adapters lists registered aliases (names only)",
-        "6 loras unknown name → 400 listing known aliases",
+        "6 loras unknown name -> 400 listing known aliases",
     ]
     if not (GEN_MODEL.is_file() and SD_MODEL is not None):
         for n in names:
@@ -1761,7 +1812,105 @@ def parse_args(argv: list) -> argparse.Namespace:
                    help="Stream chimera subprocess stdout/stderr to the terminal.")
     p.add_argument("--no-timing", action="store_true",
                    help="Don't print the timing table at the end of the summary.")
+    p.add_argument("--timings-out", metavar="FILE",
+                   help="Write per-test timings as JSON to FILE after the run "
+                        "completes. Schema: { schema, generated_at, "
+                        "chimera_binary, chimera_version, llamacpp_version, "
+                        "tests: [{name, status, duration_s}, ...] }. Suitable "
+                        "input for --timings-baseline and scripts/test_diff.py.")
+    p.add_argument("--timings-baseline", metavar="FILE",
+                   help="Load a previously-captured timings JSON and annotate "
+                        "every test line with the wall-clock delta vs the "
+                        "baseline. Tests not present in the baseline are "
+                        "unmarked; tests with both abs and rel deltas above "
+                        "the regression threshold are highlighted in red.")
     return p.parse_args(argv)
+
+
+# ----------------------------------------------------------------------------
+# Timings JSON I/O. The schema is kept intentionally flat — a top-level
+# metadata header plus an array of records — so external tools can ingest
+# it with one json.load() and no further mapping. Schema version starts
+# at 1; bump and update the consumer in scripts/test_diff.py if you ever
+# need to break it.
+
+TIMINGS_SCHEMA = 1
+
+
+def _query_chimera_versions(chimera: Path) -> dict:
+    """Best-effort `chimera --version` parse. Returns {} if it fails for
+    any reason — the timings file is still useful without it."""
+    try:
+        rc, out, _ = run_capture([str(chimera), "--version"], timeout=10)
+    except Exception:
+        return {}
+    if rc != 0:
+        return {}
+    meta: dict = {}
+    # Output is one heading line "chimera X.Y.Z" plus indented
+    # "  <component>: <version>" lines. Parse loosely.
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("chimera "):
+            meta["chimera_version"] = line.split(" ", 1)[1].strip()
+        elif ":" in line:
+            k, v = line.split(":", 1)
+            k = k.strip().lower()
+            v = v.strip()
+            # Normalise the two we care most about; ignore the rest.
+            if k in ("llama.cpp", "llamacpp"):
+                meta["llamacpp_version"] = v
+            elif k in ("whisper.cpp", "whispercpp"):
+                meta["whispercpp_version"] = v
+            elif k in ("stable-diffusion.cpp", "sdcpp"):
+                meta["sdcpp_version"] = v
+            elif k == "sqlite":
+                meta["sqlite_version"] = v
+    return meta
+
+
+def write_timings_json(path: Path, chimera: Path, outcomes: list) -> None:
+    import datetime
+    meta = _query_chimera_versions(chimera)
+    doc = {
+        "schema":         TIMINGS_SCHEMA,
+        "generated_at":   datetime.datetime.now(datetime.timezone.utc).isoformat(
+                              timespec="seconds"
+                          ).replace("+00:00", "Z"),
+        "chimera_binary": str(chimera),
+        **meta,
+        "tests": [
+            {"name": o.name, "status": o.status, "duration_s": round(o.duration, 3)}
+            for o in outcomes
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    print(f"timings written to {path}")
+
+
+def load_timings_baseline(path: Path) -> dict:
+    """Return { test_name -> duration_s } from a timings JSON, ignoring
+    SKIP and FAIL rows (a baseline of "skipped because fixture missing"
+    is a useless reference). Raises FileNotFoundError / ValueError to
+    let main() surface a clean error."""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict) or "tests" not in doc:
+        raise ValueError(f"{path}: not a timings-JSON document")
+    schema = doc.get("schema")
+    if schema not in (TIMINGS_SCHEMA, None):
+        # Forward-compat: tolerate unknown but mention it.
+        print(f"warning: {path}: schema={schema}, expected {TIMINGS_SCHEMA}",
+              file=sys.stderr)
+    out = {}
+    for row in doc.get("tests", []):
+        if row.get("status") != Status.PASS:
+            continue
+        name = row.get("name")
+        dur = row.get("duration_s")
+        if isinstance(name, str) and isinstance(dur, (int, float)):
+            out[name] = float(dur)
+    return out
 
 
 def main(argv: list) -> int:
@@ -1816,7 +1965,18 @@ def main(argv: list) -> int:
                 f"(?:{name_exclude.pattern})|(?:{SLOW_TEST_RE.pattern})"
             )
 
-    rec = Recorder(name_filter=name_filter, name_exclude=name_exclude)
+    baseline: Optional[dict] = None
+    if args.timings_baseline:
+        try:
+            baseline = load_timings_baseline(Path(args.timings_baseline))
+            print(f"baseline: {len(baseline)} test(s) from {args.timings_baseline}")
+        except (FileNotFoundError, ValueError, json.JSONDecodeError) as e:
+            print(f"FAIL: --timings-baseline {args.timings_baseline}: {e}",
+                  file=sys.stderr)
+            return 1
+
+    rec = Recorder(name_filter=name_filter, name_exclude=name_exclude,
+                   baseline=baseline)
 
     print("== smoke ==")
     _SECTIONS[0][1](rec, chimera)
@@ -1828,6 +1988,13 @@ def main(argv: list) -> int:
             fn(rec, chimera)
 
     failed = rec.summary(show_timing=not args.no_timing)
+
+    if args.timings_out:
+        try:
+            write_timings_json(Path(args.timings_out), chimera, rec.outcomes)
+        except OSError as e:
+            print(f"warning: failed to write timings JSON: {e}", file=sys.stderr)
+
     return 1 if failed > 0 else 0
 
 
