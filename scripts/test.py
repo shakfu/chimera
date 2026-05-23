@@ -1118,10 +1118,10 @@ def e2e_chat_cli_tests(rec: Recorder, chimera: Path) -> None:
 
 def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
     names = [
-        "X-Chimera-Chat-Id new chat → header echoed",
-        "X-Chimera-Chat-Id echo → same id reused",
-        "X-Chimera-Chat-Id unknown id → 404",
-        "X-Chimera-Chat-Id malformed → 400",
+        "X-Chimera-Chat-Id new chat -> header echoed",
+        "X-Chimera-Chat-Id echo -> same id reused",
+        "X-Chimera-Chat-Id unknown id -> 404",
+        "X-Chimera-Chat-Id malformed -> 400",
         "X-Chimera-Chat-Id DB state (1 chat, 4 messages)",
     ]
     if not GEN_MODEL.is_file():
@@ -1138,7 +1138,7 @@ def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
                 ["-m", str(GEN_MODEL), "--persist-chats", "--chat-db", str(chat_db)],
             ) as srv:
                 first_id: Optional[str] = None
-                # Case 1: no incoming header → server assigns + echoes a new id.
+                # Case 1: no incoming header -> server assigns + echoes a new id.
                 with maybe(rec, names[0]) as t:
                     r = http_post_json(f"{srv.base_url}/v1/chat/completions", {
                         "model": "any",
@@ -1167,7 +1167,7 @@ def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
                         if echo != first_id:
                             t.fail(f"expected {first_id}, got {echo!r}")
 
-                # Case 3: unknown id → 404.
+                # Case 3: unknown id -> 404.
                 with maybe(rec, names[2]) as t:
                     r = http_post_json(f"{srv.base_url}/v1/chat/completions", {
                         "model": "any",
@@ -1177,7 +1177,7 @@ def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
                     if r.status != 404:
                         t.fail(f"got HTTP {r.status}")
 
-                # Case 4: malformed id → 400.
+                # Case 4: malformed id -> 400.
                 with maybe(rec, names[3]) as t:
                     r = http_post_json(f"{srv.base_url}/v1/chat/completions", {
                         "model": "any",
@@ -1218,8 +1218,8 @@ def e2e_chats_endpoints_tests(rec: Recorder, chimera: Path) -> None:
         "GET /v1/chats lists persisted chats",
         "GET /v1/chats/:id returns chat + ordered messages",
         "GET /v1/chats/search returns FTS5-highlighted hit",
-        "GET /v1/chats/99999 → 400 (not 404)",
-        "GET /v1/chats/search without q → 400",
+        "GET /v1/chats/99999 -> 400 (not 404)",
+        "GET /v1/chats/search without q -> 400",
         "GET / with --public-path serves index.html",
     ]
     if not GEN_MODEL.is_file():
@@ -1313,13 +1313,13 @@ def e2e_chats_endpoints_tests(rec: Recorder, chimera: Path) -> None:
 def e2e_slots_lora_tests(rec: Recorder, chimera: Path) -> None:
     pass1_names = [
         "GET /slots returns JSON array of slot status",
-        "POST /slots/0?action=save without --slot-save-path → 501",
+        "POST /slots/0?action=save without --slot-save-path -> 501",
         "GET /lora-adapters (no --lora) returns []",
-        "POST /lora-adapters [] → 200",
+        "POST /lora-adapters [] -> 200",
     ]
     pass2_names = [
-        "POST /slots/0?action=save with --slot-save-path → 200 + file written",
-        "POST /slots/0?action=restore → 200",
+        "POST /slots/0?action=save with --slot-save-path -> 200 + file written",
+        "POST /slots/0?action=restore -> 200",
     ]
     if not GEN_MODEL.is_file():
         for n in pass1_names + pass2_names:
@@ -1504,10 +1504,10 @@ def _tiny_png_bytes() -> bytes:
 
 def e2e_image_serve_gating(rec: Recorder, chimera: Path) -> None:
     names = [
-        "5e pm_id_images without --sd-photo-maker → 400 + named-flag hint",
-        "5e pm_id_image_set without --sd-photo-maker → 400 + named-flag hint",
-        "5b control_image without --sd-control-net → 400 + named-flag hint",
-        "6 loras without --sd-lora → 400 + named-flag hint",
+        "5e pm_id_images without --sd-photo-maker -> 400 + named-flag hint",
+        "5e pm_id_image_set without --sd-photo-maker -> 400 + named-flag hint",
+        "5b control_image without --sd-control-net -> 400 + named-flag hint",
+        "6 loras without --sd-lora -> 400 + named-flag hint",
         "6 GET /v1/images/lora-adapters (no --sd-lora) returns []",
     ]
     if not (GEN_MODEL.is_file() and SD_MODEL is not None):
@@ -1583,7 +1583,7 @@ def e2e_image_serve_aliases(rec: Recorder, chimera: Path) -> None:
     only opens them at generate() time, and these tests fire before that."""
     names = [
         "6 GET /v1/images/lora-adapters lists registered aliases (names only)",
-        "6 loras unknown name → 400 listing known aliases",
+        "6 loras unknown name -> 400 listing known aliases",
     ]
     if not (GEN_MODEL.is_file() and SD_MODEL is not None):
         for n in names:
