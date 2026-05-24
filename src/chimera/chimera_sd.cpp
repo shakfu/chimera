@@ -872,11 +872,18 @@ int command_sd(const SdOptions & opts) {
     lp.sampler_rng_type      = opts.sampler_rng;
     lp.threads               = opts.threads;
     lp.flash_attn                = opts.flash_attn_global;
-    // Metal can't use mmap-backed buffers (ggml_metal_buffer_get_id returns nil),
-    // forcing per-tensor host->device copies that 3-7x SD inference. Disable
-    // mmap until upstream sd.cpp learns Metal-compatible mmap or we add
-    // backend-aware gating.
+    // Metal (macOS) can't use mmap-backed buffers for sd.cpp's reshape
+    // ops -- ggml_metal_buffer_get_id returns nil and inference falls
+    // back to per-tensor host->device copies that 3-7x SD wall time.
+    // sd.cpp's own backend-aware check (buffer_from_host_ptr) reports
+    // true on Apple Silicon's unified memory but the encoder path still
+    // fails. On Linux/CUDA/CPU mmap is the upstream perf win it was
+    // designed to be, so only force-disable on Apple platforms.
+#if defined(__APPLE__)
     lp.enable_mmap               = false;
+#else
+    lp.enable_mmap               = !opts.no_mmap;
+#endif
     lp.max_vram                  = opts.max_vram;
     lp.keep_clip_on_cpu          = opts.keep_clip_on_cpu;
     lp.keep_vae_on_cpu           = opts.keep_vae_on_cpu;
