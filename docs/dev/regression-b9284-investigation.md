@@ -408,10 +408,206 @@ overhead that surfaces only when there are two loads -- e.g., a new
 per-load tensor-copy or VAE-init path introduced somewhere in the
 sd.cpp 596..645 range.
 
-Not investigated further in this round. If pursued, the approach is
-the same one used here: bisect sd.cpp on `img2img round-trip` with
-the mmap fix applied throughout, using the patched `manage.py` and
-warm-staged clone.
+### Follow-up investigation -- img2img residual bisect
+
+Followed the same machinery (patched `manage.py`, warm-staged sd.cpp
+clone, per-step purge of `build/stable-diffusion.cpp` and
+`thirdparty/stable-diffusion.cpp` only) to bisect the residual.
+
+Probe 1 -- pre-57ff2eb baseline (sd at `9d68341`, **main** chimera
+because pre-57ff2eb sd doesn't have the `enable_mmap` field):
+
+```
+sd img2img round-trip   12.92s   [PASS]
+```
+
+Same as main median (12.97s). So the residual lives **post-57ff2eb**
+-- the entire pre-57ff2eb range is clean.
+
+Bisect of `57ff2eb..645e6e9` (45 commits) using **dev** chimera (with
+the committed mmap fix). Required one orchestrator fix on top of the
+prior bisect machinery: the initial per-iteration approach only
+rebuilt sd.cpp, leaving `thirdparty/llama.cpp/` at b9119 from the
+prior probe. Dev's `chimera_pin_check.cpp` static-asserts on b9200+
+fields (`common_params::ui`) and didn't compile. Fix: do a one-time
+full `make reset && manage.py build --all` at the start of the
+orchestrator to land llama at b9284 first, then per-iteration steps
+only touch sd.cpp.
+
+Bisect verdicts (threshold 17s):
+
+| SHA       | img2img | Verdict |
+|-----------|--------:|---------|
+| `82e03ef` | 24.10s  | BAD     |
+| `3633072` | 23.55s  | BAD     |
+| `686856e` | 23.52s  | BAD     |
+| `0665a7f` | 24.65s  | BAD     |
+| `eeac950` | 24.12s  | BAD (reported as first bad) |
+
+Every tested commit was BAD; bisect implicitly trusted `57ff2eb`
+(the GOOD endpoint) without testing it -- same failure mode as the
+original llama.cpp bisect. The reported "first bad commit"
+`eeac950` is `fix: Use PkgConfig for WebP and WebM (#1400)` -- a
+CMake-only change with no C++ delta, which cannot cause a runtime
+regression. Verdict is unsafe.
+
+Probe 2 -- 57ff2eb itself with mmap fix (the missing control):
+
+```
+sd img2img round-trip   23.95s   [PASS]   (build: llama=b9284, sd=master-645-645e6e9)
+```
+
+Same as dev+fix (23.43s). **The residual is inside `57ff2eb`
+itself.** The same commit introduced two regressions: the
+mmap-default path (fixed via `lp.enable_mmap = false`) and a
+non-mmap slowdown that survives disabling mmap. Bisect cannot
+subdivide a single commit.
+
+### Working hypothesis for the non-mmap residual
+
+`img2img round-trip` runs two sequential `chimera sd` invocations
+(txt2img to synthesize an input image, then img2img using that as
+init). The split across builds:
+
+| Build          | sd_xl_turbo (single invocation) | img2img round-trip (2 invocations) | second-invocation delta |
+|----------------|--------------------------------:|-----------------------------------:|------------------------:|
+| sd 596 (main)  | 10.75s                          | 12.97s                             | ~2.2s                   |
+| sd 9d68341     | 10.80s (earlier bisect)         | 12.92s                             | ~2.1s                   |
+| sd 57ff2eb+fix | ~11.2s                          | 23.95s                             | ~12.7s                  |
+| sd 645+fix     | 11.21s                          | 23.43s                             | ~12.2s                  |
+
+Pre-57ff2eb, the second invocation is essentially free (~2s),
+consistent with OS page cache servicing the second model load from
+RAM-cached pages. Post-57ff2eb, the second invocation pays nearly a
+full load cost (~12s). Plausible mechanism: 57ff2eb's load refactor
+(+195 lines in `src/model.cpp`) builds an `MmapTensorStore`
+intermediate per load even when mmap is disabled, or restructures
+the read pattern in a way that no longer benefits from cross-process
+page cache reuse.
+
+Suggestive but not conclusive -- a definitive answer needs source
+reading or instrumentation of the load path. Files touched by
+57ff2eb worth reading in priority order:
+
+- `src/model.cpp` (+195 lines) -- the load-path rewrite
+- `src/stable-diffusion.cpp` (+110 lines) -- ctx setup
+- `src/model.h` (+21 lines) -- `MmapTensorStore` type, plus
+  `process_model_files(bool enable_mmap = false, bool writable_mmap = true)`
+
+### Intermediate conclusion
+
+At this point we believed: bisect-resolution limit reached, the
+1.81x residual on `sd img2img round-trip` is a non-mmap side effect
+of `57ff2eb`'s load-path refactor, almost certainly tied to OS-page-
+cache-friendly behavior the rewrite gave up. The next two
+verifications overturned this.
+
+### Source-diff read of 57ff2eb -- inconclusive
+
+Read the full 382-line diff for `model.cpp`, `stable-diffusion.cpp`,
+`model.h`, `ggml_extend.hpp`, `util.cpp/h`, `denoiser.hpp`. On the
+mmap-OFF path:
+
+- `load_tensors` was split into `process_model_files` +
+  `load_tensors`; net work unchanged, just reorganized.
+- `file_tensors` changed from `vector<const TensorStorage*>` to
+  `vector<TensorStorage>` (value-copy); negligible CPU cost.
+- `alloc_params_buffer` calls in `stable-diffusion.cpp` were
+  reordered to run after all tensor registration; same total count.
+- An `all_have_data` quick-scan was added in `alloc_params_buffer`;
+  with mmap off, the very first tensor's `data == nullptr` exits
+  the loop immediately.
+- All other new code paths (`MmapWrapper::create`, `mmap_tensors`,
+  `posix_fadvise`, `madvise`, `MmapTensorStore`) are gated on the
+  mmap flag and don't run with the fix applied.
+
+No code path in 57ff2eb that should cost ~10s per invocation when
+mmap is off. The read path itself (`std::ifstream::seekg + read`
+per worker thread) is unchanged.
+
+### IO probe -- the residual is NOT disk I/O
+
+Three back-to-back `chimera sd` invocations on the dev+fix binary
+with `vm_stat` pageins snapshotted around each:
+
+| Invocation | Pageins delta | Wall time |
+|------------|--------------:|----------:|
+| 1          | 5986 (~23 MB) | 11.17s    |
+| 2          | 5419 (~21 MB) | 11.16s    |
+| 3          | 5741 (~22 MB) | 11.17s    |
+
+Model file is **3910 MB**. ~22 MB pageins per invocation means the
+model is fully in OS page cache after the first read; subsequent
+invocations do almost no disk I/O. Yet each invocation still takes
+~11s. So the cost is **non-IO work** (Metal/GPU setup, sampling,
+decode) that runs every invocation regardless of cache state.
+
+This contradicts the "lost page cache benefit" hypothesis derived
+from the first measurement (where `img2img` on main showed 12.97s
+total for two invocations vs single-invocation `sd_xl_turbo` of
+10.75s, implying the second invocation cost only ~2.2s on main).
+
+### Re-measurement on main today -- the baseline was the artifact
+
+Built main fresh (`make reset && make` on b9119 + sd-596) and ran
+`scripts/test.py` for the three relevant tests:
+
+| Test                                  | main today (fresh) | recorded `test_timings_main_1.json` |
+|---------------------------------------|-------------------:|------------------------------------:|
+| `sd sd_xl_turbo`                      |  11.69s            | 10.75s                              |
+| `sd img2img round-trip`               | **23.88s**         | 12.97s                              |
+| `gen --mmproj --image (vision)`       |  44.63s            | 39.68s                              |
+
+`sd_xl_turbo` and `vision pipeline` are within ~10% of the recorded
+baseline (typical noise). `img2img` is at **23.88s -- essentially
+identical to dev+fix's 23.43s.** The 12.97s baseline is not
+reproducible today.
+
+### Cross-side parity check today
+
+Re-built **dev+fix** fresh (`make reset && make` on b9284 + sd-645
+with `lp.enable_mmap = false`) and ran the same three tests:
+
+| Test                            | main today | dev+fix today | Δ      |
+|---------------------------------|-----------:|--------------:|-------:|
+| `sd sd_xl_turbo`                |  11.69s    |  11.74s       | +0.4%  |
+| `sd img2img round-trip`         |  23.88s    |  24.43s       | +2.3%  |
+| `gen --mmproj --image (vision)` |  44.63s    |  46.13s       | +3.4%  |
+
+All within single-run noise. **There is no residual regression.**
+
+### Conclusion on residual -- it was a phantom
+
+The 1.81x "residual" was an artifact of comparing dev+fix against a
+single-N main baseline (`test_timings_main_1.json`) that was a
+transient outlier on the `img2img round-trip` test. The same class
+of artifact as the original 39s vision-pipeline outlier that
+started this whole investigation: a model-loading-heavy test
+captured during an unusually favorable OS state (page cache, kernel
+scheduling, thermal headroom) and not reproducible later.
+
+The investigation pipeline did its job correctly at each step --
+bisect, control probe, source diff, IO probe -- but each step was
+chasing a target that had already shifted. The mistake was upstream,
+in trusting the original N=3 main bench as a tight envelope when in
+fact `img2img round-trip` has very wide variance across system
+states (today's range alone: ~24s; the recorded N=3 spanned
+12.38-17.01s).
+
+### Methodology takeaway
+
+For cache-sensitive multi-invocation tests like `img2img round-trip`:
+
+- N=3 is not enough. The recorded main run had min=12.38s, max=17.01s
+  and we treated it as a tight cluster, but the same code today
+  cleanly hits 24s. The "tight cluster" was on the same warm-cache
+  side of the bimodal distribution.
+- A more reliable bench would: (a) flush OS page cache between
+  iterations (`sudo purge` on macOS), (b) report cold-cache and warm-
+  cache numbers separately, (c) record kernel/OS state hash.
+- Tests that load the model twice have nonlinear cache interactions
+  and are particularly noisy. They are the canary for measurement-
+  setup deficiencies, not necessarily for code regressions.
 
 ## Status
 
@@ -439,9 +635,25 @@ warm-staged clone.
 - Verification 3 (N=3 bench with committed fix):
   - `sd_xl_turbo` and `vision pipeline` fully recovered (within noise).
   - `sd img2img round-trip` partially recovered: 85s -> 23.4s, but
-    still 1.81x main. Real, deterministic residual -- a smaller
-    per-invocation regression in sd.cpp 596..645 unrelated to mmap.
-    Follow-up if desired; same bisect mechanics apply.
+    still 1.81x main. Real, deterministic residual.
+- Residual investigation: bisect on `57ff2eb..645e6e9` reported
+  `eeac950` (CMake-only commit, can't cause runtime regression) --
+  unsafe verdict because GOOD endpoint `57ff2eb` was never tested.
+- Control probes appeared to pin the residual to `57ff2eb` itself:
+  pre-57ff2eb img2img = 12.92s (clean); 57ff2eb+fix img2img =
+  23.95s (vs. main's recorded 12.97s).
+- Source-diff read of 57ff2eb: inconclusive, no code path that
+  should cost ~10s per invocation when mmap is off.
+- IO probe (vm_stat around three back-to-back invocations): only
+  ~22 MB pageins per invocation on a 3910 MB model. The residual
+  is NOT disk I/O.
+- Re-measurement today: main img2img = 23.88s freshly built (vs.
+  the recorded 12.97s baseline); dev+fix img2img = 24.43s; delta
+  +2.3%, within noise. **The "residual" was a phantom:** the
+  recorded N=3 main baseline was a transient outlier on a cache-
+  sensitive multi-invocation test.
+- Investigation closed. Real recovery from the b9284/sd-645 sync is
+  full, via the single `lp.enable_mmap = false` commit (`0cdf7a8`).
 
 ## Artifacts
 
