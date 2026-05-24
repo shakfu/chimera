@@ -70,6 +70,7 @@ __pycache__/
 .*_cache
 .cache
 REVIEW.md
+tests/timings/
 
 # vcpkg
 vcpkg_installed/
