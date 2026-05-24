@@ -872,7 +872,11 @@ int command_sd(const SdOptions & opts) {
     lp.sampler_rng_type      = opts.sampler_rng;
     lp.threads               = opts.threads;
     lp.flash_attn                = opts.flash_attn_global;
-    lp.enable_mmap               = !opts.no_mmap;
+    // Metal can't use mmap-backed buffers (ggml_metal_buffer_get_id returns nil),
+    // forcing per-tensor host->device copies that 3-7x SD inference. Disable
+    // mmap until upstream sd.cpp learns Metal-compatible mmap or we add
+    // backend-aware gating.
+    lp.enable_mmap               = false;
     lp.max_vram                  = opts.max_vram;
     lp.keep_clip_on_cpu          = opts.keep_clip_on_cpu;
     lp.keep_vae_on_cpu           = opts.keep_vae_on_cpu;
