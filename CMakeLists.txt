@@ -392,15 +392,28 @@ endif()
 # the final chimera link needs the runtime. macOS / Apple clang has no
 # OpenMP by default so find_package fails silently and ggml builds
 # without OpenMP -- nothing to link.
-# OpenSSL: cpp-httplib is compiled with LLAMA_OPENSSL=ON (manage.py) so it
-# references X509_*, SSL_*, EVP_*, etc. The chimera serve subcommand uses
-# cpp-httplib to host the OpenAI-compatible API; we therefore need the
-# system OpenSSL runtime at link time. Brew-installed OpenSSL on macOS
-# typically lives outside CMake's default search paths -- caller can set
-# OPENSSL_ROOT_DIR if find_package can't locate it.
-find_package(OpenSSL REQUIRED)
-message(STATUS "OpenSSL:                found (${OPENSSL_VERSION})")
-list(APPEND SYSTEM_LIBS OpenSSL::SSL OpenSSL::Crypto)
+# OpenSSL is opt-in. When CHIMERA_OPENSSL=ON, cpp-httplib (built by
+# manage.py with LLAMA_OPENSSL=True) gains HTTPS support and chimera
+# links the OpenSSL .a archives STATICALLY so the released binary is
+# portable across macOS machines (no /opt/homebrew/opt/openssl@3/...
+# dylib dependency). When OFF (the default), `chimera serve` is
+# HTTP-only and the release has no OpenSSL dependency at all.
+#
+# IMPORTANT: this option must match the build-time setting passed to
+# manage.py. The two sides agree via the CHIMERA_OPENSSL environment
+# variable: set CHIMERA_OPENSSL=1 before invoking manage.py *and*
+# configure chimera with -DCHIMERA_OPENSSL=ON. Mismatch causes link
+# failure (undefined SSL/Crypto symbols if cpp-httplib was built with
+# OpenSSL but chimera doesn't link it, or vice versa).
+option(CHIMERA_OPENSSL "Enable HTTPS in `chimera serve` (statically links OpenSSL)" OFF)
+if(CHIMERA_OPENSSL)
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
+    find_package(OpenSSL REQUIRED)
+    message(STATUS "OpenSSL:                found ${OPENSSL_VERSION} (static)")
+    list(APPEND SYSTEM_LIBS OpenSSL::SSL OpenSSL::Crypto)
+else()
+    message(STATUS "OpenSSL:                disabled (HTTP-only serve)")
+endif()
 
 find_package(OpenMP QUIET)
 if(OpenMP_CXX_FOUND)

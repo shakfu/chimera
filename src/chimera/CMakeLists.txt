@@ -43,6 +43,12 @@ add_library(chimera_lib STATIC
     "${CMAKE_CURRENT_LIST_DIR}/chimera_db.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_embed.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_embed_cache.cpp"
+    # Vendored public-domain SHA-256 (Igor Pavlov, 2010). Used by
+    # chimera_embed_cache.cpp on non-Apple platforms; Apple builds use
+    # CommonCrypto instead so this TU compiles to an empty .o there but
+    # costs essentially nothing. Listed unconditionally to keep the
+    # source list and target dependencies the same across platforms.
+    "${CMAKE_CURRENT_LIST_DIR}/internal/sha256.c"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_llama.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_pin_check.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/chimera_vector_store.cpp"
