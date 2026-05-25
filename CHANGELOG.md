@@ -6,6 +6,10 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [0.2.2]
 
+### Fixed
+
+- **SD inference regression on macOS Metal after the sd.cpp master-645 bump.** The dev-branch sync to sd.cpp master-645 silently regressed every SD-touching test by 3-7×: `sd sd_xl_turbo` 10.75s → 33.91s, `sd img2img round-trip` 12.97s → 85.47s, `gen --mmproj --image (vision pipeline)` 40.65s → 223.48s (the vision test synthesizes its input image via `chimera sd` first, so most of its wall time is the SD path). Root cause was sd.cpp commit `57ff2eb` ([#1414](https://github.com/leejet/stable-diffusion.cpp/pull/1414)) introducing memory-mapped model weights. The new `enable_mmap` field defaults off upstream, but chimera's dev sync set it on by default. The Metal backend's encoder path then fails to resolve buffer IDs for mmap-backed tensors (`ggml_metal_buffer_get_id: error: tensor ' (reshaped)' buffer is nil`, emitted hundreds of times per inference) and sd.cpp falls through to per-tensor host→device copies. sd.cpp's own backend-aware check (`buffer_from_host_ptr`) correctly reports `true` on Apple Silicon's unified memory but the encoder fails anyway, so the upstream gating is necessary but not sufficient. Fixed in `src/chimera/chimera_sd.cpp` (~line 879): force `lp.enable_mmap = false` on `__APPLE__`, fall back to `!opts.no_mmap` (upstream's intended behavior, honoring the `--no-mmap` CLI flag) on Linux/CUDA/CPU builds where mmap is the perf win it was designed to be. With the fix applied, SD tests return to baseline. Full investigation log including failed bisects, source-diff dead ends, and the measurement artifacts that nearly diverted the fix is in [`docs/dev/regression-b9284-investigation.md`](docs/dev/regression-b9284-investigation.md).
+
 ### Changed
 
 - **Update llama.cpp version to b9284**
