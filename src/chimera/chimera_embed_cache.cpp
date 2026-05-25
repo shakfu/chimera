@@ -6,7 +6,22 @@
 #include "chimera_db.h"        // open_and_migrate, Connection
 
 #include "sqlite3.h"
-#include <openssl/evp.h>
+
+// SHA-256 source: CommonCrypto on Apple (system framework, no extra dep),
+// vendored public-domain impl (Igor Pavlov, 2010) on other platforms. Both
+// branches expose the same external behavior to the rest of this TU.
+// Previously this called OpenSSL's EVP_* API; that pulled the entire
+// libssl/libcrypto dynamic-link burden onto the chimera binary for one
+// SHA-256 call site. See CHIMERA_OPENSSL CMake option (CMakeLists.txt) --
+// OpenSSL is now opt-in (for HTTPS in `chimera serve` only).
+#if defined(__APPLE__)
+#  define COMMON_DIGEST_FOR_OPENSSL 0
+#  include <CommonCrypto/CommonDigest.h>
+#else
+extern "C" {
+#  include "internal/sha256.h"
+}
+#endif
 
 #include <chrono>
 #include <cstdint>
@@ -39,40 +54,35 @@ std::string hex_lower(const unsigned char * bytes, size_t n) {
 
 // One-shot SHA-256 over an in-memory buffer.
 void sha256(const void * data, size_t len, unsigned char out[32]) {
-    EVP_MD_CTX * ctx = EVP_MD_CTX_new();
-    if (!ctx) fail(ExitCode::Runtime, "EVP_MD_CTX_new failed");
-    unsigned int outlen = 0;
-    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1 ||
-        EVP_DigestUpdate(ctx, data, len) != 1 ||
-        EVP_DigestFinal_ex(ctx, out, &outlen) != 1) {
-        EVP_MD_CTX_free(ctx);
-        fail(ExitCode::Runtime, "SHA-256 digest failed");
-    }
-    EVP_MD_CTX_free(ctx);
+#if defined(__APPLE__)
+    CC_SHA256(data, static_cast<CC_LONG>(len), out);
+#else
+    sha256_t ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx, static_cast<const unsigned char *>(data), len);
+    sha256_final(&ctx, out);
+#endif
 }
 
 // Sha-256 over a sequence of (ptr, len) chunks. Used by compute_model_id
 // to fingerprint (size || head || tail) without an intermediate copy.
 void sha256_chunks(const std::vector<std::pair<const void *, size_t>> & chunks,
                    unsigned char out[32]) {
-    EVP_MD_CTX * ctx = EVP_MD_CTX_new();
-    if (!ctx) fail(ExitCode::Runtime, "EVP_MD_CTX_new failed");
-    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
-        EVP_MD_CTX_free(ctx);
-        fail(ExitCode::Runtime, "SHA-256 init failed");
-    }
+#if defined(__APPLE__)
+    CC_SHA256_CTX ctx;
+    CC_SHA256_Init(&ctx);
     for (const auto & c : chunks) {
-        if (EVP_DigestUpdate(ctx, c.first, c.second) != 1) {
-            EVP_MD_CTX_free(ctx);
-            fail(ExitCode::Runtime, "SHA-256 update failed");
-        }
+        CC_SHA256_Update(&ctx, c.first, static_cast<CC_LONG>(c.second));
     }
-    unsigned int outlen = 0;
-    if (EVP_DigestFinal_ex(ctx, out, &outlen) != 1) {
-        EVP_MD_CTX_free(ctx);
-        fail(ExitCode::Runtime, "SHA-256 final failed");
+    CC_SHA256_Final(out, &ctx);
+#else
+    sha256_t ctx;
+    sha256_init(&ctx);
+    for (const auto & c : chunks) {
+        sha256_update(&ctx, static_cast<const unsigned char *>(c.first), c.second);
     }
-    EVP_MD_CTX_free(ctx);
+    sha256_final(&ctx, out);
+#endif
 }
 
 [[noreturn]] void sqlite_throw(sqlite3 * db, const std::string & ctx) {

@@ -4,6 +4,28 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.0.1]
+
+### Changed (release portability)
+
+- **OpenSSL is now opt-in and statically linked.** Previously the release
+binary picked up homebrew's `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`
+and `libcrypto.3.dylib` as dynamic dependencies (visible via `otool -L`),
+making it non-portable across macOS machines without that exact homebrew
+layout. New CMake option `CHIMERA_OPENSSL` (default `OFF`) plus a matching
+`CHIMERA_OPENSSL` environment variable read by `scripts/manage.py` -- the two
+must agree. With the default (`OFF`), `cpp-httplib` is built without HTTPS
+support (manage.py sets `LLAMA_OPENSSL=OFF` for the llama.cpp build),
+chimera's CMake skips `find_package(OpenSSL)`, and the released binary has
+zero OpenSSL dependency. With `CHIMERA_OPENSSL=1 make`, HTTPS is enabled and
+`OPENSSL_USE_STATIC_LIBS=TRUE` is set before `find_package`, so
+libssl/libcrypto land in the binary as static archives rather than dylib
+references. `chimera serve` is HTTP-only by default; TLS via a reverse proxy
+is the recommended deployment. To remove the second OpenSSL consumer
+(`chimera_embed_cache.cpp` used `EVP_*` for SHA-256), chimera now uses
+CommonCrypto on Apple and a vendored public-domain SHA-256 (Igor Pavlov, 2010)
+ on other platforms.
+
 ## [0.2.0]
 
 ### Added

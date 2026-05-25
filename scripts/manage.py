@@ -788,7 +788,15 @@ class LlamaCppBuilder(GgmlBuilder):
             CMAKE_C_VISIBILITY_PRESET="hidden",
             CMAKE_VISIBILITY_INLINES_HIDDEN=True,
             LLAMA_CURL=False,
-            LLAMA_OPENSSL=True,
+            # OpenSSL is opt-in via CHIMERA_OPENSSL=1 in the env. When OFF
+            # (default), cpp-httplib is built without HTTPS support and
+            # chimera's release binary has no OpenSSL dynamic dependency
+            # (otherwise /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib gets
+            # baked into the install names and the binary won't run on
+            # machines without that exact homebrew layout). Must match the
+            # CHIMERA_OPENSSL CMake option on chimera's side -- mismatch
+            # causes undefined SSL/Crypto symbols at link time.
+            LLAMA_OPENSSL=getenv("CHIMERA_OPENSSL", default=False),
             # LLAMA_BUILD_SERVER=ON adds tools/server to the cmake graph so the
             # server-context STATIC library target is defined. We do NOT build
             # the llama-server *executable* below; only the static lib and the
@@ -1005,6 +1013,16 @@ class StableDiffusionCppBuilder(GgmlBuilder):
             CMAKE_VISIBILITY_INLINES_HIDDEN=True,
             CMAKE_INSTALL_LIBDIR="lib",
             SD_BUILD_EXAMPLES=examples,
+            # WebP / WebM are off by default in chimera. sd.cpp master-645
+            # vendored libwebp + libwebm as submodules (CMakeLists.txt
+            # SD_SUBMODULE_WEBP / SD_SUBMODULE_WEBM detect them and flip
+            # SD_WEBP / SD_WEBM ON), adding ~10 MB of dead code to the
+            # chimera binary -- chimera only uses PNG via stb_image. Flip
+            # off here so libstable-diffusion.a doesn't pull in the
+            # libwebp/libwebm object files at all. Re-enable from the
+            # caller (SD_WEBP=1 / SD_WEBM=1 in the env) if you need them.
+            SD_WEBP=getenv("SD_WEBP", default=False),
+            SD_WEBM=getenv("SD_WEBM", default=False),
             **backend_options,
         )
         self.cmake_build(build_dir=self.build_dir, release=True)
