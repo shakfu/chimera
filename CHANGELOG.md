@@ -6,21 +6,21 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [0.2.2]
 
-### Changed (release portability)
+### Changed
 
-- **WebP and WebM disabled in the sd.cpp build by default.** sd.cpp `master-645` vendored libwebp + libwebm as submodules; its CMake auto-detects the submodule presence and turns `SD_WEBP` / `SD_WEBM` ON, pulling 128 thirdparty translation units (~10 MB of compiled code) into `libstable-diffusion.a` and from there into the chimera binary. chimera only reads/writes PNG via stb_image -- none of the WebP/WebM code is reachable at runtime. `scripts/manage.py` now passes `SD_WEBP=OFF SD_WEBM=OFF` to sd.cpp's CMake by default, controllable via the `SD_WEBP=1` / `SD_WEBM=1` env vars if you need them. Brings the release binary back down from 41 MB to ~31 MB.
+- **Update llama.cpp version to b9284**
+
+- **Update stable-diffusion version to master-645-645e6e9**
+
+- **WebP and WebM disabled in the sd.cpp build by default.** sd.cpp `master-645` vendored libwebp + libwebm as submodules; its CMake auto-detects the submodule presence and turns `SD_WEBP` / `SD_WEBM` ON, compiling 128 thirdparty translation units (~10 MB of object code) into separate `libwebp*.a` / `libwebm*.a` archives. chimera only reads/writes PNG via stb_image so it never links those archives -- they were build-tree dead weight, not binary dead weight. `scripts/manage.py` now passes `SD_WEBP=OFF SD_WEBM=OFF` to sd.cpp's CMake by default, controllable via the `SD_WEBP=1` / `SD_WEBM=1` env vars. Effect: ~3-5 minutes off cold dependency build time, no change to chimera binary size. Listed here for transparency in case a future feature wants to enable them deliberately.
+
+- **Binary size note.** The 0.2.2 release binary is ~44 MB, up from ~31 MB on 0.2.1. Source: actual code growth in the pinned upstream libraries, not chimera-side bloat. sd.cpp grew from `master-596` to `master-645` (+49 commits adding LTX video, hidream, Qwen-image, sample-cache, additional tokenizers, MmapTensorStore, and more -- `libstable-diffusion.a` is now ~34 MB of sd.cpp code). llama.cpp grew from `b9119` to `b9284` (165 commits including the b9200 webui refactor and mtmd improvements). All reachable code (link-time dead-strip is already active), so there's no easy chimera-side reduction. Anyone preferring the smaller binary can use the new `0.2.0.1` or `0.2.1.1` portable backports, which carry the same OpenSSL-free portability fix but pin to the older, lighter upstreams.
 
 - **OpenSSL is now opt-in and statically linked.** Previously the release binary picked up homebrew's `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib` and `libcrypto.3.dylib` as dynamic dependencies (visible via `otool -L`), making it non-portable across macOS machines without that exact homebrew layout. New CMake option `CHIMERA_OPENSSL` (default `OFF`) plus a matching `CHIMERA_OPENSSL` environment variable read by `scripts/manage.py` -- the two must agree, undocumented mismatch causes undefined SSL/Crypto symbols at link. With the default (`OFF`), `cpp-httplib` is built without HTTPS support (manage.py sets `LLAMA_OPENSSL=OFF` for the llama.cpp build), chimera's CMake skips `find_package(OpenSSL)`, and the released binary has zero OpenSSL dependency. With `CHIMERA_OPENSSL=1 make` (env-var + matching `-DCHIMERA_OPENSSL=ON` on cmake), HTTPS is enabled and `OPENSSL_USE_STATIC_LIBS=TRUE` is set before `find_package`, so libssl/libcrypto land in the binary as static archives rather than dylib references. `chimera serve` is HTTP-only by default -- TLS via a reverse proxy (nginx/caddy) is the recommended deployment.
 
 ### Fixed
 
 - **SD inference regression on macOS Metal after the sd.cpp master-645 bump.** The dev-branch sync to sd.cpp master-645 silently regressed every SD-touching test by 3-7×: `sd sd_xl_turbo` 10.75s → 33.91s, `sd img2img round-trip` 12.97s → 85.47s, `gen --mmproj --image (vision pipeline)` 40.65s → 223.48s (the vision test synthesizes its input image via `chimera sd` first, so most of its wall time is the SD path). Root cause was sd.cpp commit `57ff2eb` ([#1414](https://github.com/leejet/stable-diffusion.cpp/pull/1414)) introducing memory-mapped model weights. The new `enable_mmap` field defaults off upstream, but chimera's dev sync set it on by default. The Metal backend's encoder path then fails to resolve buffer IDs for mmap-backed tensors (`ggml_metal_buffer_get_id: error: tensor ' (reshaped)' buffer is nil`, emitted hundreds of times per inference) and sd.cpp falls through to per-tensor host→device copies. sd.cpp's own backend-aware check (`buffer_from_host_ptr`) correctly reports `true` on Apple Silicon's unified memory but the encoder fails anyway, so the upstream gating is necessary but not sufficient. Fixed in `src/chimera/chimera_sd.cpp` (~line 879): force `lp.enable_mmap = false` on `__APPLE__`, fall back to `!opts.no_mmap` (upstream's intended behavior, honoring the `--no-mmap` CLI flag) on Linux/CUDA/CPU builds where mmap is the perf win it was designed to be. With the fix applied, SD tests return to baseline. Full investigation log including failed bisects, source-diff dead ends, and the measurement artifacts that nearly diverted the fix is in [`docs/dev/regression-b9284-investigation.md`](docs/dev/regression-b9284-investigation.md).
-
-### Changed
-
-- **Update llama.cpp version to b9284**
-
-- **Update stable-diffusion version to master-645-645e6e9**
 
 ### Added
 
