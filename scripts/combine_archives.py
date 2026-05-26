@@ -86,13 +86,25 @@ class Inventory:
                 whisper / "examples" / f"libcommon{e}",
             ]
         if self.with_sd:
-            tp += [
-                sd / f"libstable-diffusion{e}",
+            tp.append(sd / f"libstable-diffusion{e}")
+            # libwebp / libwebm are transitive sd.cpp deps that are only
+            # built when sd.cpp is configured with SD_WEBP / SD_WEBM. Those
+            # default OFF since chimera 0.2.2 (manage.py passes SD_WEBP=OFF
+            # SD_WEBM=OFF unless the SD_WEBP=1 / SD_WEBM=1 env vars are set),
+            # so the archives usually don't exist. Include them only when
+            # present: a default (webp/webm-OFF) build produces a
+            # libstable-diffusion.a with no webp/webm symbol references, so
+            # omitting them is correct; an SD_WEBP=ON build produces both the
+            # references and the archives, so they get bundled. This keeps
+            # the combine step decoupled from the sd build's env.
+            for _opt in (
                 sd / "thirdparty" / "libwebp" / f"libwebp{e}",
                 sd / "thirdparty" / "libwebp" / f"libsharpyuv{e}",
                 sd / "thirdparty" / "libwebp" / f"libwebpmux{e}",
                 sd / "thirdparty" / "libwebm" / f"libwebm{e}",
-            ]
+            ):
+                if _opt.is_file():
+                    tp.append(_opt)
         if self.with_linenoise:
             tp.append(linenoise / f"liblinenoise{e}")
 

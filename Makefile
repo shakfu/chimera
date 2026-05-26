@@ -1,8 +1,9 @@
-.PHONY: deps build build-with-webui build-cuda build-rocm build-sycl \
-	    build-vulkan rebuild clean reset test test-fast test-slow \
-	    test-bench test-bench-fast smoke install uninstall release-notes \
-	    bump-check test-db-migrate test-golden combine \
-	    test-external-smoke test-external-oop
+.PHONY: deps build remake build-with-webui build-cuda build-rocm \
+		build-sycl build-vulkan rebuild clean reset \
+		test test-fast test-slow test-bench test-bench-fast smoke \
+		install uninstall release-notes bump-check test-db-migrate \
+		test-golden combine test-external-smoke test-external-oop \
+		bindings test-bindings
 
 # Override with `make PYTHON=<cmd>` for
 # unusual environments (e.g. `PYTHON="uv run python"`).
@@ -18,6 +19,8 @@ DESTDIR ?=
 build: deps
 	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
+
+remake: reset build test
 
 # build-with-webui: same as `build`, but flips the experimental
 # CHIMERA_WEBUI_EMBED option ON so the chimera binary bakes upstream's
@@ -133,9 +136,11 @@ $(BUILD_DIR)/chimera:
 
 clean:
 	@rm -rf $(BUILD_DIR)
+	@rm -rf bindings/build
 
 reset: clean
 	@rm -rf thirdparty/llama.cpp thirdparty/whisper.cpp thirdparty/stable-diffusion.cpp thirdparty/linenoise
+	@rm -rf bindings/.venv
 
 # release-notes: write release-notes.md by extracting the current
 # CHIMERA_VERSION's section from CHANGELOG.md. Same script the release
@@ -205,6 +210,59 @@ test-external-oop: tests/external/build/chimera_smoke tests/external/build/chime
 tests/external/build/chimera_smoke tests/external/build/chimera_hpp_smoke: tests/external/smoke.cpp tests/external/hpp_smoke.cpp tests/external/CMakeLists.txt $(BUILD_DIR)/libchimera.a $(BUILD_DIR)/libchimera_thirdparty.a $(BUILD_DIR)/libchimera_ggml.a
 	@cmake -S tests/external -B tests/external/build
 	@cmake --build tests/external/build
+
+# bindings: build the nanobind Python extension (the `chimera` module) under
+# bindings/ against the three prebuilt archives -- same link contract as the
+# external smoke tests, but the output is a Python module rather than an
+# executable. Depends on the archives, so a from-scratch `make bindings`
+# builds chimera + combines the archives first. Output lands at
+# bindings/build/chimera.*.so; add bindings/build to PYTHONPATH to import it.
+#
+# The build needs nanobind + scikit-build-core for the Python that CMake uses.
+# When `uv` is available (the default path), this target provisions them into
+# a local venv (BINDINGS_VENV, default bindings/.venv) and points CMake at that
+# interpreter -- no system-Python pollution, works out of the box.
+#
+# The venv is pinned to $(PYTHON)'s interpreter (the project's Python, e.g.
+# system python3) so the built module matches the Python you actually use --
+# NOT uv's default managed interpreter, which `uv venv` would otherwise pick
+# (it ignores a bindings/.python-version because this recipe runs from the repo
+# root, not bindings/, so the module would silently target uv's default
+# version). Build for a different Python with `make PYTHON=python3.13 bindings`.
+#
+# Override BINDINGS_PY=/path/to/python to use your own interpreter that already
+# has nanobind installed (uv is then not used). With neither uv nor BINDINGS_PY,
+# it falls back to $(PYTHON), which must have nanobind installed.
+# See bindings/README.md.
+#
+# (Alternatively, skip this target and `uv pip install ./bindings` -- build
+# isolation handles the toolchain. See bindings/pyproject.toml.)
+BINDINGS_VENV ?= bindings/.venv
+
+bindings: $(BUILD_DIR)/libchimera.a $(BUILD_DIR)/libchimera_thirdparty.a $(BUILD_DIR)/libchimera_ggml.a
+	@if [ -n "$(BINDINGS_PY)" ]; then \
+	    py="$(BINDINGS_PY)"; \
+	elif command -v uv >/dev/null 2>&1; then \
+	    pyexe="$$($(PYTHON) -c 'import sys; print(sys.executable)')"; \
+	    echo "bindings: provisioning nanobind + scikit-build-core via uv into $(BINDINGS_VENV) (python: $$pyexe)"; \
+	    uv venv "$(BINDINGS_VENV)" --python "$$pyexe" >/dev/null; \
+	    uv pip install --python "$(BINDINGS_VENV)/bin/python" -q nanobind scikit-build-core; \
+	    py="$(abspath $(BINDINGS_VENV))/bin/python"; \
+	else \
+	    echo "bindings: uv not found; using $(PYTHON) (must have nanobind installed)"; \
+	    py="$$($(PYTHON) -c 'import sys; print(sys.executable)')"; \
+	fi; \
+	cmake -S bindings -B bindings/build -DCHIMERA_BUILD_ROOT="$(abspath $(BUILD_DIR))" -DPython_EXECUTABLE="$$py"
+	@cmake --build bindings/build
+
+# test-bindings: build the module + run the Python smoke test. Uses the
+# bindings venv interpreter when present (guaranteed ABI match), else
+# $(PYTHON). CHIMERA_SMOKE_MODEL gates the optional inference probe (the
+# import/exception probe always runs).
+test-bindings: bindings
+	@py="$(PYTHON)"; \
+	[ -x "$(BINDINGS_VENV)/bin/python" ] && py="$(BINDINGS_VENV)/bin/python"; \
+	PYTHONPATH=bindings/build $$py bindings/smoke_test.py
 
 # test-golden: HTTP response-shape regression tests against fixed
 # models. Spawns `chimera serve` on a free port, hits each route with a

@@ -1,0 +1,7 @@
+# Standalone CMake build output (`make bindings`)
+/build/
+# uv tool-venv provisioned by `make bindings`
+/.venv/
+# scikit-build-core wheel build dirs (uv/pip install)
+/dist/
+*.so

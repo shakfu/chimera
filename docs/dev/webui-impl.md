@@ -10,6 +10,14 @@ about.
 Status: experimental, branch-only. Promotion to `main` is gated on the
 acceptance criteria in § 9.
 
+> **Related consumer surface (not this doc).** This plan is about an
+> HTTP-driven sidecar UI (`chimera serve --public-path` + static JS). A
+> separate, programmatic way to drive chimera is the Python bindings
+> (`bindings/`, nanobind over `chimera.hpp`) -- documented in
+> [`docs/dev/oop-layer.md`](oop-layer.md) § "Python bindings". If a future
+> UI wants an in-process Python backend instead of HTTP, that is the layer
+> to build on; it is orthogonal to the sidecar plan below.
+
 ---
 
 ## 1. Recommendation

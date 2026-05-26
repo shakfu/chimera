@@ -1,0 +1,61 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "chimera"
+version = "0.2.3"            # keep in sync with CHIMERA_VERSION in scripts/manage.py
+description = "Python bindings for chimera's chimera.hpp OOP layer"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "see repository LICENSE" }
+
+# ---------------------------------------------------------------------------
+# uv workflow
+# ---------------------------------------------------------------------------
+# This is a LOCAL/dev install: the extension links chimera's prebuilt archives
+# in <repo>/build (libchimera*.a), which are NOT bundled, so `uv build` to a
+# redistributable wheel won't work without first building them. Build them
+# once, then install from this directory:
+#
+#   make build && python3 scripts/combine_archives.py   # produce the archives
+#
+#   # one-shot build + install into the active env (build isolation auto-
+#   # installs scikit-build-core + nanobind):
+#   uv pip install ./bindings
+#
+#   # editable dev install (recompiles on import after you edit the .cpp);
+#   # --no-build-isolation reuses the env's build tools (see [dependency-groups]):
+#   uv sync --group build
+#   uv pip install --no-build-isolation -e ./bindings
+#
+#   # archives elsewhere / drop a modality:
+#   uv pip install ./bindings -C cmake.define.CHIMERA_BUILD_ROOT=/abs/build
+#   uv pip install ./bindings -C cmake.define.CHIMERA_HAS_SD=OFF
+#
+#   # run the smoke test in the env:
+#   CHIMERA_SMOKE_MODEL=models/Llama-3.2-1B-Instruct-Q8_0.gguf \
+#       uv run python bindings/smoke_test.py
+#
+# (`make test-bindings` remains the no-uv path via a standalone CMake build.)
+
+# PEP 735 dependency group: the build toolchain, so `uv sync --group build`
+# populates an env that `uv pip install --no-build-isolation` can reuse.
+[dependency-groups]
+build = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+
+[tool.scikit-build]
+cmake.source-dir = "."
+cmake.build-type = "Release"
+wheel.install-dir = "."
+build-dir = "build/{wheel_tag}"        # stable dir so editable rebuilds are incremental
+
+# Editable installs recompile the extension on import when sources change --
+# pairs with `uv pip install --no-build-isolation -e .`.
+editable.rebuild = true
+editable.mode = "redirect"
+
+# Override the archive location or modality flags at install time, e.g.:
+#   uv pip install . -C cmake.define.CHIMERA_BUILD_ROOT=/abs/path/to/build
+# [tool.scikit-build.cmake.define]
+# CHIMERA_BUILD_ROOT = "/abs/path/to/chimera/build"

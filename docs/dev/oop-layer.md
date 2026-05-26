@@ -268,3 +268,47 @@ Those helpers moved into a new `src/chimera/chimera_llama.{h,cpp}` so
 that the OOP layer (and any other external consumer of the archive)
 can call them. The CLI shell now `#include`s `chimera_llama.h` and is
 ~1000 lines shorter.
+
+## Python bindings (nanobind)
+
+`bindings/` is a [nanobind](https://github.com/wjakob/nanobind) wrapper
+that exposes this header as a `chimera` Python module. It binds the same
+classes (`Llama`, `Embedder`, `Tokenizer`, `Server`, and modality-gated
+`SD` / `Whisper`) plus the option structs, and links the three prebuilt
+archives via the same contract as `tests/external/` (ggml whole-archived).
+
+```python
+import chimera
+llm = chimera.Llama("model.gguf")
+llm.options.n_predict = 128
+print(llm.generate("Hello", on_token=lambda piece: print(piece, end="")))
+```
+
+Build + smoke-test it:
+
+```bash
+pip install nanobind scikit-build-core
+make test-bindings        # builds bindings/build/chimera*.so + runs smoke_test.py
+# CHIMERA_SMOKE_MODEL=models/...gguf make test-bindings  # + inference probe
+```
+
+Design points specific to the binding (see `bindings/README.md` for the
+full list):
+
+- **Errors.** `chimera::fail()` throws `ChimeraError`, translated to a
+  Python `chimera.ChimeraError` -- the interpreter never sees a process
+  `exit()`.
+- **GIL.** `generate()` / `embed()` / `run()` / `transcribe()` release the
+  GIL for the compute; the streaming token callback re-acquires it per
+  token. Because the GIL is released and `generate()` mutates one shared
+  `llama_context`, two Python threads calling `generate()` on the *same*
+  object is a data race -- use one object per thread or a lock.
+- **Options are strings, not enums.** Every choice field
+  (`sample_method`, `scheduler`, `rng`, `pooling`, `rope_scaling`,
+  `split_mode`, ...) is a `std::string` in chimera's option structs; the
+  engine converts internally. So `ExitCode` is the only `nb::enum_` on the
+  Python surface, and full option coverage is just `def_rw` per field.
+- **Drift guard.** The bindings reference upstream-struct fields only
+  through `chimera.hpp`, so the field-level pin-checks (see "Upstream-drift
+  guards" above) protect the Python layer too; a generated member-pointer
+  compile check additionally verifies every bound field name.
