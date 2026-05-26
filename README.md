@@ -92,12 +92,22 @@ int main() {
 }
 ```
 
-`tests/external/` is a standalone CMake project that links the three archives the way a non-CMake consumer would and exercises both surfaces end to end — see it for the exact link recipe (`-Wl,-force_load` on macOS, `--whole-archive` group on Linux, `/WHOLEARCHIVE:` on Windows). Run with `make test-external-smoke` (uses CTest under the hood; `make test-external-oop` filters to the OOP-layer lane).
+**Python** (`bindings/`). A [nanobind](https://github.com/wjakob/nanobind) wrapper over the OOP layer exposes the same classes as a `chimera` Python module. Build with `make bindings` (auto-provisions the toolchain via `uv`) or `uv pip install ./bindings`. See [`docs/bindings.md`](docs/bindings.md). This is chimera's own in-repo binding; the separate [cyllama](https://github.com/shakfu/cyllama) project binds upstream llama.cpp / whisper.cpp / sd.cpp directly via Cython.
+
+```python
+import chimera
+llm = chimera.Llama("Qwen3-1.7B-Q4_0.gguf")
+print(llm.generate("What is the capital of France?"))
+```
+
+`tests/external/` is a standalone CMake project that links the three archives the way a non-CMake consumer would and exercises both C++ surfaces end to end — see it for the exact link recipe (`-Wl,-force_load` on macOS, `--whole-archive` group on Linux, `/WHOLEARCHIVE:` on Windows). Run with `make test-external-smoke` (uses CTest under the hood; `make test-external-oop` filters to the OOP-layer lane).
 
 Reading order for embedders:
 1. [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md) — the three-archive link contract, why whole-archiving ggml is non-optional, validation plan.
 
 2. [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) — `chimera.hpp` design (persistent-handle semantics, dirty-options policy, streaming hook, upstream-drift guards).
+
+3. [`docs/bindings.md`](docs/bindings.md) — the Python (nanobind) bindings over the OOP layer: build/install (`make bindings`, `uv pip install ./bindings`), usage, and the GIL / exceptions / string-options notes.
 
 ## Build
 
@@ -428,6 +438,7 @@ The whisper/sd silencers cannot live in `chimera_cli/chimera.cpp` because their 
 | [`docs/dev/maintenance.md`](docs/dev/maintenance.md)                       | maintainer    | Bump discipline, test discipline, opt-in fixture tests, what's still weak.                |
 | [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md)             | maintainer    | Three-archive split design (libchimera.a as a reusable artifact).                         |
 | [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md)                           | embedder      | Optional header-only C++ OOP layer (`chimera.hpp`) over libchimera's procedural api.  |
+| [`docs/bindings.md`](docs/bindings.md)                                     | embedder      | Python (nanobind) bindings over the OOP layer: build/install, usage, GIL/exceptions.      |
 | [`CHANGELOG.md`](CHANGELOG.md)                                             | everyone      | Per-release feature notes.                                                                |
 | [`TODO.md`](TODO.md)                                                       | maintainer    | Forward backlog. Out-of-scope items at the bottom prevent re-litigation.                  |
 
