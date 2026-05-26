@@ -111,7 +111,8 @@ message(STATUS "linenoise:              ${CHIMERA_LINENOISE} -> link=${CHIMERA_L
 # -----------------------------------------------------------------------------
 # CHIMERA_WEBUI_EMBED:
 #   ON   = bake upstream llama.cpp's prebuilt web UI bundle into the binary
-#          (xxd-encoded asset .hpp files included by server-http.cpp). Adds
+#          (assets embedded in a generated ui.cpp via the staged ui-embed
+#          helper; see src/chimera/CMakeLists.txt). Adds
 #          ~7 MB to the binary; routes GET / + /bundle.{js,css} when the
 #          server is up. Compiled-in UI is pinned to whichever llama.cpp
 #          version chimera vendored, so the UI lifecycle is coupled to the
@@ -128,7 +129,11 @@ if("${CHIMERA_WEBUI_EMBED}" STREQUAL "ON")
     if(NOT EXISTS "${_webui_probe}")
         message(FATAL_ERROR
             "CHIMERA_WEBUI_EMBED=ON but ${_webui_probe} not found.\n"
-            "Run: python scripts/manage.py build --llama  (or --all)")
+            "On llama.cpp b9318+ the prebuilt assets are no longer shipped in\n"
+            "the source tree; build them first, then re-stage:\n"
+            "  (cd build/llama.cpp/tools/ui && npm install && npm run build)\n"
+            "  python scripts/manage.py build --llama-cpp --sd-shared-ggml\n"
+            "See docs/dev/webui.md sections 2.1 and 10.")
     endif()
     set(CHIMERA_LINK_WEBUI ON)
 elseif("${CHIMERA_WEBUI_EMBED}" STREQUAL "AUTO")

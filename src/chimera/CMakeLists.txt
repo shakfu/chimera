@@ -166,41 +166,76 @@ if(CHIMERA_LINK_LINENOISE)
     target_compile_definitions(chimera_lib PUBLIC CHIMERA_HAS_LINENOISE)
 endif()
 
-# Optional embedded webui. When the top-level scope set CHIMERA_LINK_WEBUI,
-# xxd-encode the four prebuilt assets (index.html, bundle.js, bundle.css,
-# loading.html) into .hpp files under the chimera build dir, add them to
-# the target sources, expose the generated dir on the include path so
-# server-http.cpp can #include them, and flip the macro(s) that gate the
-# upstream route-binding block in server-http.cpp.
+# Webui asset generation (llama.cpp b9318+ model). server-http.cpp, which
+# chimera compiles itself, unconditionally `#include "ui.h"` and calls
+# llama_ui_find_asset() (the loading.html lookup is outside the
+# LLAMA_UI_HAS_ASSETS guard), so chimera must ALWAYS generate ui.h + ui.cpp
+# and link the definition — even in the default embed-OFF build, where the
+# generated definition simply returns nullptr.
 #
-# Upstream renamed `LLAMA_BUILD_WEBUI` → `LLAMA_BUILD_UI` around b9200.
-# Define both so the embed works on any pinned llama.cpp version: the
-# pre-b9200 server-http.cpp checks the old name, the post-b9200 copy
-# checks the new name, and the unused define is a harmless no-op on the
-# other side.
+# Upstream's old xxd helper + static ui.h were both deleted at b9318 in
+# favour of a host generator (tools/ui/embed.cpp, staged by manage.py as
+# src-aux/ui-embed.cpp). embed.cpp writes:
+#   - ui.h:   struct llama_ui_asset + llama_ui_find_asset() decl, plus
+#             `#define LLAMA_UI_HAS_ASSETS 1` when >=1 asset is embedded.
+#   - ui.cpp: the definition (asset table + lookup, or a nullptr stub).
+# server-http.cpp gates its GET / + /bundle.{js,css} routes on the
+# generated LLAMA_UI_HAS_ASSETS define and the runtime params.ui flag —
+# NOT on LLAMA_BUILD_WEBUI/LLAMA_BUILD_UI, which it no longer consults.
+#
+# When CHIMERA_LINK_WEBUI is ON (top-level scope decided assets are
+# present), the four prebuilt assets are passed to the generator so
+# LLAMA_UI_HAS_ASSETS is emitted and the routes compile in. When OFF, the
+# generator gets no assets and emits the stub.
+set(_ui_embed_src "${LLAMACPP_SRC_AUX}/ui-embed.cpp")
+set(_ui_cpp "${CMAKE_CURRENT_BINARY_DIR}/ui.cpp")
+set(_ui_h   "${CMAKE_CURRENT_BINARY_DIR}/ui.h")
+
+# Host helper that bakes assets into ui.cpp/ui.h. Built with the build
+# compiler — chimera does not cross-compile its own build tooling.
+add_executable(chimera_ui_embed "${_ui_embed_src}")
+target_compile_features(chimera_ui_embed PRIVATE cxx_std_17)
+
+set(_ui_embed_args "")
+set(_ui_embed_deps "")
 if(CHIMERA_LINK_WEBUI)
-    set(_webui_assets index.html bundle.js bundle.css loading.html)
     set(_webui_src "${LLAMACPP_SRC_AUX}/webui")
-    set(_webui_xxd "${LLAMACPP_SRC_AUX}/xxd.cmake")
-    foreach(_asset ${_webui_assets})
-        set(_in  "${_webui_src}/${_asset}")
-        set(_out "${CMAKE_CURRENT_BINARY_DIR}/${_asset}.hpp")
-        add_custom_command(
-            DEPENDS "${_in}" "${_webui_xxd}"
-            OUTPUT  "${_out}"
-            COMMAND "${CMAKE_COMMAND}" "-DINPUT=${_in}" "-DOUTPUT=${_out}" -P "${_webui_xxd}"
-            COMMENT "xxd webui asset: ${_asset} -> ${_asset}.hpp"
-            VERBATIM
-        )
-        set_source_files_properties("${_out}" PROPERTIES GENERATED TRUE)
-        target_sources(chimera_lib PRIVATE "${_out}")
+    foreach(_asset index.html bundle.js bundle.css loading.html)
+        list(APPEND _ui_embed_args "${_asset}" "${_webui_src}/${_asset}")
+        list(APPEND _ui_embed_deps "${_webui_src}/${_asset}")
     endforeach()
-    target_include_directories(chimera_lib PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-    target_compile_definitions(chimera_lib PRIVATE LLAMA_BUILD_WEBUI LLAMA_BUILD_UI)
-    unset(_webui_assets)
     unset(_webui_src)
-    unset(_webui_xxd)
 endif()
+
+add_custom_command(
+    OUTPUT  "${_ui_cpp}" "${_ui_h}"
+    COMMAND chimera_ui_embed "${_ui_cpp}" "${_ui_h}" ${_ui_embed_args}
+    DEPENDS chimera_ui_embed ${_ui_embed_deps}
+    COMMENT "generate webui ui.cpp/ui.h (embed assets: ${CHIMERA_LINK_WEBUI})"
+    VERBATIM
+)
+set_source_files_properties("${_ui_cpp}" "${_ui_h}" PROPERTIES GENERATED TRUE)
+target_sources(chimera_lib PRIVATE "${_ui_cpp}")
+target_include_directories(chimera_lib PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+
+# server-http.cpp #include "ui.h" must resolve before it compiles. A custom
+# target tied into chimera_lib via add_dependencies guarantees the generator
+# runs before any chimera_lib TU is compiled (target_sources alone only
+# orders the generated .cpp, not headers other TUs include).
+add_custom_target(chimera_ui_gen DEPENDS "${_ui_cpp}" "${_ui_h}")
+add_dependencies(chimera_lib chimera_ui_gen)
+
+if(CHIMERA_LINK_WEBUI)
+    # chimera-side banner gate only (see chimera_serve.cpp). server-http.cpp
+    # itself keys off the generated LLAMA_UI_HAS_ASSETS, not this define.
+    target_compile_definitions(chimera_lib PRIVATE LLAMA_BUILD_WEBUI)
+endif()
+
+unset(_ui_embed_src)
+unset(_ui_cpp)
+unset(_ui_h)
+unset(_ui_embed_args)
+unset(_ui_embed_deps)
 
 # CXX_COMPILE_OPTIONS contains -std=c++17 (or /std:c++17 on MSVC), which
 # the C compiler rejects. Gate the option list to C++ sources only so

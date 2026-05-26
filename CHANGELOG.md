@@ -4,6 +4,33 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.3]
+
+### Changed
+
+- **Update llama.cpp version to b9318** (from b9284).
+
+- **Update stable-diffusion.cpp version to master-650-1ceb5bd** (from master-645-645e6e9). The five upstream commits add new model support (LTX temporal latent upscaler, Longcat-Image / Longcat-Image-Edit) behind the existing API plus macOS rpath / Windows ROCm build fixes. `stable-diffusion.h` -- the only SD header chimera consumes -- is unchanged, so there is no public API drift to adopt; the new models work through the existing `sd` / `--enable-image` path with no chimera change. Verified via `make bump-check` (clean) and the GitHub compare API.
+
+- **WebUI embedding rewritten to track the llama.cpp b9318 restructure.** Upstream b9318 deleted `scripts/xxd.cmake` and the static `tools/ui/ui.h`, replacing the whole asset-embed mechanism with a host generator (`tools/ui/embed.cpp`) that emits `ui.cpp` + `ui.h`. Crucially, `server-http.cpp` (which chimera compiles itself) now `#include "ui.h"` and calls `llama_ui_find_asset()` *unconditionally*, gating its `GET /` + `/bundle.{js,css}` routes on the generated `LLAMA_UI_HAS_ASSETS` define plus the runtime `params.ui` flag -- it no longer consults `LLAMA_BUILD_WEBUI`/`LLAMA_BUILD_UI` at all. This broke even the default `WEBUI_EMBED=OFF` build (the old hard-coded `xxd.cmake` stage in `manage.py` raised, and the missing `ui.h` / undefined `llama_ui_find_asset` would not compile or link). chimera's adaptation:
+  - `scripts/manage.py` `_copy_headers` now stages `tools/ui/embed.cpp` as `src-aux/ui-embed.cpp` (replacing the `xxd.cmake` copy) and drops the dead `ui.h` copy.
+  - `src/chimera/CMakeLists.txt` *always* builds a `chimera_ui_embed` host helper and generates + links `ui.cpp`/`ui.h` (passing the four assets only when `CHIMERA_WEBUI_EMBED=ON`, otherwise an empty `nullptr`-returning stub), ordered before `chimera_lib` so `server-http.cpp`'s `#include "ui.h"` resolves. The old per-asset `.hpp` xxd custom-commands and the `LLAMA_BUILD_WEBUI`/`LLAMA_BUILD_UI` compile defines are gone (the define is kept only as chimera's own startup-banner gate).
+  - `make bump-check` drift table updated: `tools/ui/embed.cpp` is now a required path and the webui-layout probe recognizes the b9318+ layout (distinct from pre-b9200 and b9200..b9317), so the next rearrangement of this area fails loudly instead of crashing `make build`.
+  - Note: upstream no longer ships prebuilt webui assets in the source tree, so `CHIMERA_WEBUI_EMBED=ON` requires building them first (`npm install && npm run build` in `tools/ui/`); `make deps` then stages them. The default `OFF` build is unaffected. Full write-up in [`docs/dev/webui.md`](docs/dev/webui.md) sections 1, 2.1, and 10.
+
+### Fixed
+
+- **`chimera serve --no-webui` was silently ignored on b9318 webui-embedded builds.** Upstream's `server-http.cpp` switched to reading `params.ui`; the older `params.webui` is now only a default-initializer alias (`bool webui = ui;`), so chimera setting `params.webui` alone no longer disabled the UI. `chimera_serve.cpp` now sets both `params.ui` and `params.webui` from `opts.webui`. Verified at runtime: with the fix, `--no-webui` returns 404 on `GET /` and `/bundle.js` while `/health` stays 200.
+
+- **`make build-with-webui` failure mode + stale guidance.** On a fresh checkout at b9318 the target fails at configure (upstream no longer ships prebuilt assets, so `deps` stages none and `CHIMERA_WEBUI_EMBED=ON` trips the probe). The CMake `FATAL_ERROR` hint and the Makefile comment were corrected: they previously claimed "no Node toolchain required" (now false) and pointed at an insufficient recovery command. Both now give the exact npm-build + re-stage recipe. The target's recipe itself is unchanged and works once assets are staged.
+
+### Added
+
+- **Field-level pin-check expansion across all three engine wrappers.** Previously only llama.cpp had a meaningful compile-time contract; the audit prompted by the b9318/SD-650 bump extended the same field-level discipline to whisper and sd so a future bump that silently *retypes* a struct field chimera assigns (e.g. an `int` widening to `int64_t`, a `float` to `double`, or an enum rename) fails at a labeled line in the relevant wrapper's pin block instead of misbehaving at runtime.
+  - `src/chimera/chimera_pin_check.cpp` (llama.cpp): added function-pointer pins for the churn-prone adapter / memory / embedding APIs (`llama_adapter_lora_init`, `llama_set_adapters_lora`, `llama_set_adapter_cvec`, `llama_memory_seq_rm`, `llama_get_embeddings_ith`/`_seq`) and the `llama_{model,context}_default_params` factories, plus field-type `static_assert`s for every `llama_model_params` / `llama_context_params` / `llama_logit_bias` field the wrapper assigns.
+  - `src/chimera/chimera_whisper.cpp` (whisper.cpp): 38 field-type asserts covering every `whisper_context_params` / `whisper_full_params` field the wrapper assigns, plus the `whisper_{context,full,vad}_default_params` factory pins. Kept in this TU (not the shared pin-check) per the ggml enum-collision isolation.
+  - `src/chimera/chimera_sd.cpp` (stable-diffusion.cpp): 93 field-type asserts covering `sd_ctx_params_t`, `sd_img_gen_params_t`, and the nested `sample_params` / `pm_params` / `cache` / `hires` / `vae_tiling_params` sub-structs, plus the `sd_img_gen_params_init` factory pin -- extending the existing selective SD pins to full field-level coverage.
+
 ## [0.2.2]
 
 ### Changed

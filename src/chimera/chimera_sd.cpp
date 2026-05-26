@@ -92,6 +92,121 @@ static_assert(std::is_same_v<decltype(sd_sample_params_t::eta),              flo
               "sd_sample_params_t::eta changed type.");
 static_assert(std::is_same_v<decltype(sd_sample_params_t::shifted_timestep), int>,
               "sd_sample_params_t::shifted_timestep changed type.");
+// Remaining sd_sample_params_t fields set by build_img_gen_params().
+static_assert(std::is_same_v<decltype(sd_sample_params_t::guidance), sd_guidance_params_t>,
+              "sd_sample_params_t::guidance retyped.");
+static_assert(std::is_same_v<decltype(sd_sample_params_t::sample_method), enum sample_method_t>,
+              "sd_sample_params_t::sample_method retyped.");
+static_assert(std::is_same_v<decltype(sd_sample_params_t::scheduler), enum scheduler_t>,
+              "sd_sample_params_t::scheduler retyped.");
+static_assert(std::is_same_v<decltype(sd_sample_params_t::custom_sigmas), float *>,
+              "sd_sample_params_t::custom_sigmas retyped.");
+static_assert(std::is_same_v<decltype(sd_sample_params_t::custom_sigmas_count), int>,
+              "sd_sample_params_t::custom_sigmas_count retyped.");
+// Remaining sd_pm_params_t field.
+static_assert(std::is_same_v<decltype(sd_pm_params_t::id_images_count), int>,
+              "sd_pm_params_t::id_images_count retyped.");
+
+// ---- sd_ctx_params_t fields (load_model -> sd_ctx_params_init) --------
+//
+// Field-level mirror of the llama params pins. A field rename fails at
+// the call site; a silent retype would compile through. Pin every field
+// load_model() assigns.
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::model_path),                      const char *>, "sd_ctx_params_t::model_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::diffusion_model_path),            const char *>, "sd_ctx_params_t::diffusion_model_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::high_noise_diffusion_model_path), const char *>, "sd_ctx_params_t::high_noise_diffusion_model_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::vae_path),                        const char *>, "sd_ctx_params_t::vae_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::clip_l_path),                     const char *>, "sd_ctx_params_t::clip_l_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::clip_g_path),                     const char *>, "sd_ctx_params_t::clip_g_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::t5xxl_path),                      const char *>, "sd_ctx_params_t::t5xxl_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::llm_path),                        const char *>, "sd_ctx_params_t::llm_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::control_net_path),                const char *>, "sd_ctx_params_t::control_net_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::taesd_path),                      const char *>, "sd_ctx_params_t::taesd_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::clip_vision_path),                const char *>, "sd_ctx_params_t::clip_vision_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::llm_vision_path),                 const char *>, "sd_ctx_params_t::llm_vision_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::tensor_type_rules),               const char *>, "sd_ctx_params_t::tensor_type_rules retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::photo_maker_path),                const char *>, "sd_ctx_params_t::photo_maker_path retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::embeddings),                      const sd_embedding_t *>, "sd_ctx_params_t::embeddings retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::embedding_count),                 uint32_t>, "sd_ctx_params_t::embedding_count retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::n_threads),                       int>,   "sd_ctx_params_t::n_threads retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::max_vram),                        float>, "sd_ctx_params_t::max_vram retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::wtype),                           enum sd_type_t>,        "sd_ctx_params_t::wtype retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::rng_type),                        enum rng_type_t>,       "sd_ctx_params_t::rng_type retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::sampler_rng_type),                enum rng_type_t>,       "sd_ctx_params_t::sampler_rng_type retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::prediction),                      enum prediction_t>,     "sd_ctx_params_t::prediction retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::lora_apply_mode),                 enum lora_apply_mode_t>,"sd_ctx_params_t::lora_apply_mode retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::enable_mmap),                      bool>, "sd_ctx_params_t::enable_mmap retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::vae_decode_only),                  bool>, "sd_ctx_params_t::vae_decode_only retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::offload_params_to_cpu),            bool>, "sd_ctx_params_t::offload_params_to_cpu retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::diffusion_flash_attn),             bool>, "sd_ctx_params_t::diffusion_flash_attn retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::diffusion_conv_direct),            bool>, "sd_ctx_params_t::diffusion_conv_direct retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::vae_conv_direct),                  bool>, "sd_ctx_params_t::vae_conv_direct retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::flash_attn),                       bool>, "sd_ctx_params_t::flash_attn retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::keep_clip_on_cpu),                 bool>, "sd_ctx_params_t::keep_clip_on_cpu retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::keep_vae_on_cpu),                  bool>, "sd_ctx_params_t::keep_vae_on_cpu retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::keep_control_net_on_cpu),          bool>, "sd_ctx_params_t::keep_control_net_on_cpu retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::force_sdxl_vae_conv_scale),        bool>, "sd_ctx_params_t::force_sdxl_vae_conv_scale retyped.");
+
+// ---- sd_img_gen_params_t top-level fields (build_img_gen_params) ------
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::prompt),                const char *>, "sd_img_gen_params_t::prompt retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::negative_prompt),       const char *>, "sd_img_gen_params_t::negative_prompt retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::width),                 int>,     "sd_img_gen_params_t::width retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::height),                int>,     "sd_img_gen_params_t::height retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::clip_skip),             int>,     "sd_img_gen_params_t::clip_skip retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::batch_count),           int>,     "sd_img_gen_params_t::batch_count retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::seed),                  int64_t>, "sd_img_gen_params_t::seed retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::strength),              float>,   "sd_img_gen_params_t::strength retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::control_strength),      float>,   "sd_img_gen_params_t::control_strength retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::init_image),            sd_image_t>,    "sd_img_gen_params_t::init_image retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::mask_image),            sd_image_t>,    "sd_img_gen_params_t::mask_image retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::control_image),         sd_image_t>,    "sd_img_gen_params_t::control_image retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::ref_images),            sd_image_t *>,  "sd_img_gen_params_t::ref_images retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::ref_images_count),      int>,     "sd_img_gen_params_t::ref_images_count retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::increase_ref_index),    bool>,    "sd_img_gen_params_t::increase_ref_index retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::auto_resize_ref_image), bool>,    "sd_img_gen_params_t::auto_resize_ref_image retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::loras),                 const sd_lora_t *>, "sd_img_gen_params_t::loras retyped.");
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::lora_count),            uint32_t>, "sd_img_gen_params_t::lora_count retyped.");
+
+// ---- sd_cache_params_t fields (gp.cache overrides) --------------------
+static_assert(std::is_same_v<decltype(sd_cache_params_t::mode),                   enum sd_cache_mode_t>, "sd_cache_params_t::mode retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::reuse_threshold),        float>, "sd_cache_params_t::reuse_threshold retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::residual_diff_threshold),float>, "sd_cache_params_t::residual_diff_threshold retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::start_percent),          float>, "sd_cache_params_t::start_percent retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::end_percent),            float>, "sd_cache_params_t::end_percent retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::error_decay_rate),       float>, "sd_cache_params_t::error_decay_rate retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::use_relative_threshold), bool>,  "sd_cache_params_t::use_relative_threshold retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::reset_error_on_compute), bool>,  "sd_cache_params_t::reset_error_on_compute retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::Fn_compute_blocks),      int>,   "sd_cache_params_t::Fn_compute_blocks retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::Bn_compute_blocks),      int>,   "sd_cache_params_t::Bn_compute_blocks retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::max_warmup_steps),       int>,   "sd_cache_params_t::max_warmup_steps retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::scm_mask),               const char *>, "sd_cache_params_t::scm_mask retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::scm_policy_dynamic),     bool>,  "sd_cache_params_t::scm_policy_dynamic retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::spectrum_w),             float>, "sd_cache_params_t::spectrum_w retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::spectrum_m),             int>,   "sd_cache_params_t::spectrum_m retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::spectrum_lam),           float>, "sd_cache_params_t::spectrum_lam retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::spectrum_window_size),   int>,   "sd_cache_params_t::spectrum_window_size retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::spectrum_flex_window),   float>, "sd_cache_params_t::spectrum_flex_window retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::spectrum_warmup_steps),  int>,   "sd_cache_params_t::spectrum_warmup_steps retyped.");
+static_assert(std::is_same_v<decltype(sd_cache_params_t::spectrum_stop_percent),  float>, "sd_cache_params_t::spectrum_stop_percent retyped.");
+
+// ---- sd_hires_params_t fields (gp.hires) ------------------------------
+static_assert(std::is_same_v<decltype(sd_hires_params_t::enabled),            bool>,  "sd_hires_params_t::enabled retyped.");
+static_assert(std::is_same_v<decltype(sd_hires_params_t::upscaler),           enum sd_hires_upscaler_t>, "sd_hires_params_t::upscaler retyped.");
+static_assert(std::is_same_v<decltype(sd_hires_params_t::model_path),         const char *>, "sd_hires_params_t::model_path retyped.");
+static_assert(std::is_same_v<decltype(sd_hires_params_t::scale),              float>, "sd_hires_params_t::scale retyped.");
+static_assert(std::is_same_v<decltype(sd_hires_params_t::target_width),       int>,   "sd_hires_params_t::target_width retyped.");
+static_assert(std::is_same_v<decltype(sd_hires_params_t::target_height),      int>,   "sd_hires_params_t::target_height retyped.");
+static_assert(std::is_same_v<decltype(sd_hires_params_t::steps),              int>,   "sd_hires_params_t::steps retyped.");
+static_assert(std::is_same_v<decltype(sd_hires_params_t::denoising_strength), float>, "sd_hires_params_t::denoising_strength retyped.");
+static_assert(std::is_same_v<decltype(sd_hires_params_t::upscale_tile_size),  int>,   "sd_hires_params_t::upscale_tile_size retyped.");
+
+// ---- sd_tiling_params_t fields (gp.vae_tiling_params) -----------------
+static_assert(std::is_same_v<decltype(sd_tiling_params_t::enabled),        bool>,  "sd_tiling_params_t::enabled retyped.");
+static_assert(std::is_same_v<decltype(sd_tiling_params_t::tile_size_x),    int>,   "sd_tiling_params_t::tile_size_x retyped.");
+static_assert(std::is_same_v<decltype(sd_tiling_params_t::tile_size_y),    int>,   "sd_tiling_params_t::tile_size_y retyped.");
+static_assert(std::is_same_v<decltype(sd_tiling_params_t::rel_size_x),     float>, "sd_tiling_params_t::rel_size_x retyped.");
+static_assert(std::is_same_v<decltype(sd_tiling_params_t::rel_size_y),     float>, "sd_tiling_params_t::rel_size_y retyped.");
+static_assert(std::is_same_v<decltype(sd_tiling_params_t::target_overlap), float>, "sd_tiling_params_t::target_overlap retyped.");
 
 // Enum values chimera names by string and reaches via str_to_*. A
 // removed enumerator would be a runtime "unknown method" error today;
@@ -120,6 +235,8 @@ static_assert(static_cast<int>(PREDICTION_COUNT) > 0,
     static_cast<sd_image_t * (*)(sd_ctx_t *, const sd_img_gen_params_t *)>(&generate_image);
 [[maybe_unused]] static constexpr auto _sd_ctx_params_init_sig =
     static_cast<void (*)(sd_ctx_params_t *)>(&sd_ctx_params_init);
+[[maybe_unused]] static constexpr auto _sd_img_gen_params_init_sig =
+    static_cast<void (*)(sd_img_gen_params_t *)>(&sd_img_gen_params_init);
 [[maybe_unused]] static constexpr auto _str_to_sample_method_sig =
     static_cast<enum sample_method_t (*)(const char *)>(&str_to_sample_method);
 [[maybe_unused]] static constexpr auto _str_to_scheduler_sig =

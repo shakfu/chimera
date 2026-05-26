@@ -20,10 +20,18 @@ build: deps
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 # build-with-webui: same as `build`, but flips the experimental
-# CHIMERA_WEBUI_EMBED option ON so the chimera binary xxd-bakes
-# upstream's prebuilt web UI bundle (GET / + /bundle.{js,css}). Adds
-# ~7 MB to the binary; no Node toolchain required. See doc/dev/webui.md
-# for the seams. Pass --no-webui at runtime to suppress per-invocation.
+# CHIMERA_WEBUI_EMBED option ON so the chimera binary bakes upstream's
+# prebuilt web UI bundle into itself (GET / + /bundle.{js,css}) via the
+# generated ui.cpp. Adds ~7 MB to the binary.
+#
+# IMPORTANT (llama.cpp b9318+): upstream no longer ships prebuilt assets
+# in the source tree, so `deps` alone does NOT stage them and this target
+# will FATAL-error at configure. Produce + stage the assets first:
+#   (cd build/llama.cpp/tools/ui && npm install && npm run build)
+#   python3 scripts/manage.py build --llama-cpp --sd-shared-ggml
+# then run `make build-with-webui`. A Node toolchain is required for that
+# one-time asset build. See docs/dev/webui.md sections 2.1 and 10 for the
+# full picture. Pass --no-webui at runtime to suppress per-invocation.
 build-with-webui: deps
 	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DCHIMERA_WEBUI_EMBED=ON
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j

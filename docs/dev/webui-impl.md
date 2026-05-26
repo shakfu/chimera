@@ -349,9 +349,40 @@ Conditional on `--slot-save-path` being set.
   binary is identical to a non-webui-branch build.
 
 **If this graduates** (per § 9 acceptance), then revisit whether to
-xxd-bake the sidecar too. Not now — the build cost of "make a
+embed the sidecar too. Not now — the build cost of "make a
 sidecar embeddable" is exactly the kind of work that contributed to
 Variant B's death-by-maintenance.
+
+### 7.1. Note: upstream's embed mechanism changed at b9318
+
+This plan layers a sidecar on top of the existing Variant A embed path
+(`CHIMERA_WEBUI_EMBED`) and the `--public-path` mount. Both still apply,
+but the *mechanism* underneath Variant A was rebuilt by llama.cpp b9318
+and is worth knowing before touching anything embed-adjacent:
+
+- `scripts/xxd.cmake` and the static `tools/ui/ui.h` were deleted
+  upstream. A host generator `tools/ui/embed.cpp` now produces `ui.cpp` +
+  `ui.h`, and `server-http.cpp` gates its routes on the generated
+  `LLAMA_UI_HAS_ASSETS` define + the runtime `params.ui` flag, not on
+  `LLAMA_BUILD_WEBUI`. Full analysis: [`webui.md` § 10](webui.md).
+- chimera now *always* generates and links `ui.cpp`/`ui.h` (a nullptr
+  stub when embed is OFF, the baked assets when ON), because
+  `server-http.cpp` references `llama_ui_find_asset()` unconditionally.
+
+Implications for this sidecar plan:
+
+- The "**No xxd**" line under § 7 is now trivially true — xxd is gone
+  upstream regardless. The stronger claim still holds: this sidecar adds
+  **no CMake changes and no `CHIMERA_WEBUI_*` coupling**; it ships as
+  static files mounted via `--public-path`, independent of the generated
+  `ui.cpp`.
+- If § 9 graduation ever revisits embedding the sidecar, do *not*
+  resurrect an xxd step — reuse the same `ui-embed` generator chimera
+  already builds (extend it with the sidecar's asset names), so there is
+  one embed path, not two.
+- The `make webui-serve` recipe in § 7 is unaffected: `--public-path`
+  mounting takes precedence over the embedded `GET /` handler and does
+  not depend on the embed mechanism at all.
 
 ---
 

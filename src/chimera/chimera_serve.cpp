@@ -196,12 +196,13 @@
 //   - Built-in tool plugins (`--server-tools`). EXPERIMENTAL upstream.
 //   - MCP CORS proxy (`--webui-mcp-proxy`). EXPERIMENTAL upstream.
 //   - GCP / Vertex AI compat (`ctx_http.register_gcp_compat()`).
-//   - Web chat UI (`public/{index.html, bundle.js, bundle.css}`). Experimental:
-//     opt in at configure time with `-DCHIMERA_WEBUI_EMBED=ON` to xxd-bake
-//     upstream's prebuilt bundle (~7 MB) into the chimera binary. When
-//     enabled, GET / serves index.html and GET /bundle.{js,css} serve the
-//     assets; the runtime route-binding lives in upstream's server-http.cpp
-//     gated by the LLAMA_BUILD_WEBUI compile define + params.webui (chimera
+//   - Web chat UI (`index.html, bundle.js, bundle.css`). Experimental:
+//     opt in at configure time with `-DCHIMERA_WEBUI_EMBED=ON` to bake
+//     upstream's prebuilt bundle (~7 MB) into the chimera binary via the
+//     generated ui.cpp (see src/chimera/CMakeLists.txt). When enabled,
+//     GET / serves index.html and GET /bundle.{js,css} serve the assets;
+//     the runtime route-binding lives in upstream's server-http.cpp gated
+//     by the generated LLAMA_UI_HAS_ASSETS define + params.ui (chimera
 //     defaults the latter true; pass `--no-webui` to disable per-run).
 //   - Child-server / parent-process sleeping notification.
 //   - SSL / TLS (no `--ssl-cert-file` / `--ssl-key-file`). Run behind a
@@ -428,8 +429,15 @@ common_params build_common_params(const ServeOptions & opts) {
     // Embedded webui. Only meaningful when the build was configured
     // with CHIMERA_WEBUI_EMBED=1 (see scripts/manage.py); the actual
     // route binding happens inside server_http_context::init based on
-    // this field. In a webui-less build the routes don't exist either
+    // these fields. In a webui-less build the routes don't exist either
     // way, so the flag is a harmless pass-through.
+    //
+    // Around b9318 server-http.cpp switched to reading params.ui; the
+    // older params.webui is now only a default-initializer alias
+    // (`bool webui = ui;`), so setting webui alone no longer disables the
+    // UI. Set both: ui for the current consumer, webui for forward-compat
+    // if anything still reads it.
+    params.ui    = opts.webui;
     params.webui = opts.webui;
 
     // External static UI directory. server_http_context::init mounts

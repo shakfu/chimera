@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "chimera.h"
@@ -38,6 +39,106 @@ void WhisperContextDeleter::operator()(whisper_context * ctx) const {
 // doc/dev/maintenance.md and src/chimera/chimera_pin_check.cpp for the
 // cross-cutting llama.cpp version.
 namespace {
+
+// ---- whisper_context_params / whisper_full_params fields --------------
+//
+// transcribe()/load build a whisper_context_params (from
+// whisper_context_default_params()) and a whisper_full_params (from
+// whisper_full_default_params()) and assign these fields by name. A
+// field *rename* fails at the call site; a silent field *retype* would
+// compile through an implicit conversion and quietly change behaviour.
+// Pin the types of every field the wrapper assigns. (Field-level mirror
+// of the llama_{model,context}_params pins in chimera_pin_check.cpp.)
+
+// whisper_context_params
+static_assert(std::is_same_v<decltype(whisper_context_params::use_gpu),    bool>,
+              "whisper_context_params::use_gpu retyped.");
+static_assert(std::is_same_v<decltype(whisper_context_params::flash_attn), bool>,
+              "whisper_context_params::flash_attn retyped.");
+static_assert(std::is_same_v<decltype(whisper_context_params::gpu_device), int>,
+              "whisper_context_params::gpu_device retyped.");
+
+// whisper_full_params - integer fields
+static_assert(std::is_same_v<decltype(whisper_full_params::n_threads),   int>,
+              "whisper_full_params::n_threads retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::offset_ms),   int>,
+              "whisper_full_params::offset_ms retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::duration_ms), int>,
+              "whisper_full_params::duration_ms retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::max_len),     int>,
+              "whisper_full_params::max_len retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::max_tokens),  int>,
+              "whisper_full_params::max_tokens retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::audio_ctx),   int>,
+              "whisper_full_params::audio_ctx retyped.");
+
+// whisper_full_params - bool fields
+static_assert(std::is_same_v<decltype(whisper_full_params::translate),            bool>,
+              "whisper_full_params::translate retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::no_context),           bool>,
+              "whisper_full_params::no_context retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::no_timestamps),        bool>,
+              "whisper_full_params::no_timestamps retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::token_timestamps),     bool>,
+              "whisper_full_params::token_timestamps retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::print_progress),       bool>,
+              "whisper_full_params::print_progress retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::print_realtime),       bool>,
+              "whisper_full_params::print_realtime retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::print_timestamps),     bool>,
+              "whisper_full_params::print_timestamps retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::detect_language),      bool>,
+              "whisper_full_params::detect_language retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::carry_initial_prompt), bool>,
+              "whisper_full_params::carry_initial_prompt retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::split_on_word),        bool>,
+              "whisper_full_params::split_on_word retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::tdrz_enable),          bool>,
+              "whisper_full_params::tdrz_enable retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::suppress_nst),         bool>,
+              "whisper_full_params::suppress_nst retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::vad),                  bool>,
+              "whisper_full_params::vad retyped.");
+
+// whisper_full_params - float fields
+static_assert(std::is_same_v<decltype(whisper_full_params::temperature),     float>,
+              "whisper_full_params::temperature retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::temperature_inc), float>,
+              "whisper_full_params::temperature_inc retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::entropy_thold),   float>,
+              "whisper_full_params::entropy_thold retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::logprob_thold),   float>,
+              "whisper_full_params::logprob_thold retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::no_speech_thold), float>,
+              "whisper_full_params::no_speech_thold retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::grammar_penalty), float>,
+              "whisper_full_params::grammar_penalty retyped.");
+
+// whisper_full_params - string / pointer / grammar / callback / vad fields
+static_assert(std::is_same_v<decltype(whisper_full_params::language),       const char *>,
+              "whisper_full_params::language retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::initial_prompt), const char *>,
+              "whisper_full_params::initial_prompt retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::suppress_regex), const char *>,
+              "whisper_full_params::suppress_regex retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::vad_model_path), const char *>,
+              "whisper_full_params::vad_model_path retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::grammar_rules),
+                             const whisper_grammar_element **>,
+              "whisper_full_params::grammar_rules retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::n_grammar_rules), size_t>,
+              "whisper_full_params::n_grammar_rules retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::i_start_rule),    size_t>,
+              "whisper_full_params::i_start_rule retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::new_segment_callback),
+                             whisper_new_segment_callback>,
+              "whisper_full_params::new_segment_callback retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::new_segment_callback_user_data),
+                             void *>,
+              "whisper_full_params::new_segment_callback_user_data retyped.");
+static_assert(std::is_same_v<decltype(whisper_full_params::vad_params), whisper_vad_params>,
+              "whisper_full_params::vad_params retyped.");
+
 [[maybe_unused]] void chimera_whisper_pin_check() {
     [[maybe_unused]] whisper_token (*p_token_beg)(struct whisper_context *) =
         &whisper_token_beg;
@@ -64,6 +165,16 @@ namespace {
     [[maybe_unused]] int (*p_whisper_full)(
         struct whisper_context *, struct whisper_full_params,
         const float *, int) = &whisper_full;
+
+    // Default-params factories the wrapper starts from before assigning
+    // the fields pinned above. Pins the return type; the field-type
+    // static_asserts above pin the fields actually assigned.
+    [[maybe_unused]] struct whisper_context_params (*p_whisper_context_default_params)(void) =
+        &whisper_context_default_params;
+    [[maybe_unused]] struct whisper_full_params (*p_whisper_full_default_params)(
+        enum whisper_sampling_strategy) = &whisper_full_default_params;
+    [[maybe_unused]] struct whisper_vad_params (*p_whisper_vad_default_params)(void) =
+        &whisper_vad_default_params;
 }
 }  // namespace
 

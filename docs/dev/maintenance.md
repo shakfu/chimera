@@ -143,11 +143,12 @@ has been the most stable of the three deps; add a third comparison to
 
 **Build-system drift probe.** After the header diff, the script
 HEAD-probes a handful of named non-header paths (`tools/server/server-http.cpp`,
-`scripts/xxd.cmake`, both webui asset layouts) and reports which
+`tools/ui/embed.cpp`, and the three webui asset layouts) and reports which
 layout the target ref uses. Catches drift in non-header files that
 header diffs miss — exactly the failure mode that bit the b9119 →
 b9264 bump (the webui asset directory disappeared without any header
-change). A missing required path fails bump-check with a clear
+change) and again at b9318 (`scripts/xxd.cmake` + `tools/ui/ui.h` removed
+in favour of the `tools/ui/embed.cpp` generator). A missing required path fails bump-check with a clear
 `BUILD-SYSTEM ERROR` instead of surfacing as an opaque `make build`
 failure later.
 

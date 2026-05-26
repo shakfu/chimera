@@ -33,20 +33,32 @@ server-http: `manage.py` copies `server-http.cpp` into
 `thirdparty/llama.cpp/src-aux/`, and `src/chimera/CMakeLists.txt`
 compiles it as part of the `chimera` target (see
 `src/chimera/CMakeLists.txt` line ~52). To get the webui we extend the
-same trick:
+same trick. **The mechanism changed at b9318** — see § 2.1 for the
+history. Current (b9318+) flow:
 
-1. Stage the four prebuilt assets + `xxd.cmake` into `src-aux/webui/`.
-2. When the user configures with `-DCHIMERA_WEBUI_EMBED=ON`, the chimera
-   CMake runs `xxd.cmake` against each asset to produce `<asset>.hpp`
-   files in the chimera build dir.
-3. Those `.hpp` paths are added to the chimera target's source list, the
-   build dir is added to the include path, and `LLAMA_BUILD_WEBUI` is
-   defined on the chimera target so the `#ifdef`s in our local copy of
-   `server-http.cpp` activate.
+1. Stage the four prebuilt assets into `src-aux/webui/` and the upstream
+   host helper `tools/ui/embed.cpp` as `src-aux/ui-embed.cpp`.
+2. The chimera CMake **always** builds the helper and runs it to generate
+   `ui.cpp` + `ui.h` in the chimera build dir. With
+   `-DCHIMERA_WEBUI_EMBED=ON` the four assets are passed to the helper, so
+   the generated `ui.h` emits `#define LLAMA_UI_HAS_ASSETS 1` and `ui.cpp`
+   carries the embedded byte arrays. With it OFF (default), the helper
+   gets no assets and emits an empty stub (`llama_ui_find_asset` returns
+   `nullptr`, no `LLAMA_UI_HAS_ASSETS`).
+3. `ui.cpp` is added to the chimera target's source list and the build
+   dir is added to the include path so `server-http.cpp`'s `#include
+   "ui.h"` resolves. **Generation is unconditional** because
+   `server-http.cpp` references `llama_ui_find_asset()` unconditionally
+   (the `loading.html` lookup sits outside the `LLAMA_UI_HAS_ASSETS`
+   guard), so the symbol must always link.
 
 The route binding then happens automatically inside
 `server_http_context::init(params)`, which `chimera_serve.cpp` was
-already calling.
+already calling. Upstream now gates the GET / + bundle routes on the
+generated `LLAMA_UI_HAS_ASSETS` define and the runtime `params.ui` flag,
+**not** on `LLAMA_BUILD_WEBUI`/`LLAMA_BUILD_UI`. chimera still defines
+`LLAMA_BUILD_WEBUI` when embedding, but only as the gate for its own
+startup-banner line in `chimera_serve.cpp`.
 
 ---
 
@@ -88,15 +100,27 @@ binary when the option flips them in. This decouples the staging step
 from the binary flip so toggling on a previously-built tree is a
 one-line `cmake` reconfigure + rebuild, not a full `make deps` cycle.
 
-### 2.1 Post-b9200 pins: assets are no longer prebuilt upstream
+### 2.1 Upstream asset-mechanism history (why this is fiddly)
 
-Around llama.cpp b9200, upstream removed the prebuilt assets at
-`tools/server/public/` and replaced them with a Vite project at
-`tools/ui/`. The macro that gates the route-binding block in
-`server-http.cpp` was also renamed (`LLAMA_BUILD_WEBUI` →
-`LLAMA_BUILD_UI`). chimera's CMake now defines **both** macros when
-`CHIMERA_LINK_WEBUI` is on, so the same chimera source works against
-either upstream generation.
+The webui plumbing has been rebuilt twice upstream:
+
+- **pre-b9200:** prebuilt assets shipped in `tools/server/public/`;
+  `scripts/xxd.cmake` baked them into `<asset>.hpp` files that
+  `server-http.cpp` `#include`d behind `LLAMA_BUILD_WEBUI`.
+- **b9200..b9317:** the webui became a Vite project at `tools/ui/` with a
+  static `tools/ui/ui.h`; assets were still xxd-baked, and the gating
+  macro was renamed `LLAMA_BUILD_WEBUI` → `LLAMA_BUILD_UI`. No prebuilt
+  assets ship in the tree — you must run `npm install && npm run build`
+  inside `tools/ui/` to produce `tools/ui/dist/`.
+- **b9318+ (current):** `scripts/xxd.cmake` and the static `tools/ui/ui.h`
+  were **both deleted**. A host generator `tools/ui/embed.cpp` now
+  produces `ui.cpp` + `ui.h`, and `server-http.cpp` gates on the
+  generated `LLAMA_UI_HAS_ASSETS` define + runtime `params.ui` instead of
+  any build macro. chimera adopts this generator directly (see § 1).
+
+Assets are still not prebuilt in the source tree on the current pin, so
+enabling embed requires building them first (`npm install && npm run
+build` in `tools/ui/`), after which `make deps` stages them.
 
 What didn't survive the rename: the staged-asset path. Upstream no
 longer ships built `bundle.js` / `bundle.css` / `index.html` in the
@@ -155,11 +179,11 @@ user-facing material. See § 6.4 for the only viable size-reduction path
 (serve the assets gzip-compressed and skip storing the uncompressed
 copy in the binary).
 
-**No Node toolchain at build time.** The bundles ship pre-built in
-`build/llama.cpp/tools/server/public/`, and `xxd.cmake` is pure CMake.
-Rebuilding the JS bundle (e.g. to ship a chimera-customized UI) would
-require Node + the upstream `webui/` Vite project — out of scope for the
-current experiment.
+**Node toolchain required to produce assets (b9318+).** Upstream no
+longer ships prebuilt bundles in the source tree, so producing them
+requires Node + the upstream Vite project (`npm install && npm run build`
+in `build/llama.cpp/tools/ui/`). Once built, `make deps` stages them and
+the C++ `ui-embed` helper bakes them in — no `xxd(1)` dependency.
 
 ---
 
@@ -167,17 +191,17 @@ current experiment.
 
 | Path | Purpose |
 |------|---------|
-| `build/llama.cpp/tools/server/public/{index,bundle.{js,css},loading}.html` | Upstream-shipped prebuilt assets. |
-| `build/llama.cpp/scripts/xxd.cmake` | Pure-CMake byte-array generator (no `xxd(1)` dependency). |
-| `scripts/manage.py` :: `LlamaCppBuilder._copy_headers` | Stages assets + `xxd.cmake` into `src-aux/webui/` and `src-aux/xxd.cmake`. |
+| `build/llama.cpp/tools/ui/dist/{index,bundle.{js,css},loading}.html` | Operator-built prebuilt assets (`npm run build` in `tools/ui/`). |
+| `build/llama.cpp/tools/ui/embed.cpp` | Upstream host helper that bakes assets into `ui.cpp`/`ui.h` (replaces `xxd.cmake`). |
+| `scripts/manage.py` :: `LlamaCppBuilder._copy_headers` | Stages assets into `src-aux/webui/` and `embed.cpp` as `src-aux/ui-embed.cpp`. |
 | `thirdparty/llama.cpp/src-aux/webui/` | Where the staged assets land (gitignored). |
-| `thirdparty/llama.cpp/src-aux/xxd.cmake` | Staged copy of the helper. |
+| `thirdparty/llama.cpp/src-aux/ui-embed.cpp` | Staged copy of the embed helper. |
 | `CMakeLists.txt` (top-level) | Defines `CHIMERA_WEBUI_EMBED` option; resolves AUTO; exports `CHIMERA_LINK_WEBUI`. |
-| `src/chimera/CMakeLists.txt` | When `CHIMERA_LINK_WEBUI` is ON: runs xxd, adds `.hpp` to sources, sets include dir, defines `LLAMA_BUILD_WEBUI`. |
-| `src/chimera/chimera_serve.cpp` | Sets `params.webui = opts.webui`. The actual route binding is in our locally-compiled `server-http.cpp`. |
+| `src/chimera/CMakeLists.txt` | Always builds `chimera_ui_embed` + generates `ui.cpp`/`ui.h`; passes assets only when `CHIMERA_LINK_WEBUI` is ON; defines `LLAMA_BUILD_WEBUI` (banner gate) when ON. |
+| `src/chimera/chimera_serve.cpp` | Sets `params.ui = params.webui = opts.webui`. The actual route binding is in our locally-compiled `server-http.cpp`. |
 | `src/chimera/chimera.h` :: `ServeOptions::webui` | Default true; flipped by `--no-webui`. |
 | `src/chimera_cli/chimera.cpp` | `--no-webui` CLI flag declaration. |
-| `build/<chimera-build>/src/chimera/<asset>.hpp` | Generated at build time; one `unsigned char[]` + length per asset. |
+| `build/<chimera-build>/src/chimera/ui.{cpp,h}` | Generated at build time; `ui.cpp` holds the asset table (or a nullptr stub), `ui.h` the decl + `LLAMA_UI_HAS_ASSETS` when assets present. |
 
 ---
 
@@ -186,8 +210,8 @@ current experiment.
 After building with `-DCHIMERA_WEBUI_EMBED=ON`:
 
 ```
-ls build/src/chimera/*.hpp
-# expect: bundle.css.hpp  bundle.js.hpp  index.html.hpp  loading.html.hpp
+grep -c LLAMA_UI_HAS_ASSETS build/src/chimera/ui.h
+# expect: 1  (an OFF build has 0 — the stub omits the define)
 
 ls -la build/chimera
 # expect: ~7 MB larger than an OFF build (~6 MB after `strip`)
@@ -224,13 +248,20 @@ The startup banner should also include a `webui:` line. If
 These are the things that aren't obvious from the code, ordered by how
 likely they are to bite a future maintainer.
 
-### 5.1. `LLAMA_BUILD_WEBUI` is a chimera-side flag now, not a llama.cpp flag
+### 5.1. `LLAMA_BUILD_WEBUI`/`LLAMA_BUILD_UI` are chimera-side flags, not llama.cpp flags
 
 `scripts/manage.py` keeps `LLAMA_BUILD_WEBUI=False` in the llama.cpp
 build. Resist the urge to flip it. Even ON, it would only bake the
 assets into the `llama-server` executable, which chimera doesn't ship —
 and would not affect `libserver-context.a`. The chimera-side wiring is
 the only thing that matters.
+
+Note (b9318+): upstream's `server-http.cpp` no longer reads
+`LLAMA_BUILD_WEBUI`/`LLAMA_BUILD_UI` at all — it gates the routes on the
+generated `LLAMA_UI_HAS_ASSETS` define (emitted by `ui-embed` when assets
+are present) plus the runtime `params.ui` flag. chimera still defines
+`LLAMA_BUILD_WEBUI` on its target when embedding, but only to gate its own
+startup-banner line. Don't expect that define to switch the routes on.
 
 If a future llama.cpp bump moves the route-binding block out of
 `server-http.cpp` and into `libserver-context.a`, this whole scheme
@@ -371,13 +402,13 @@ definition only knows about upstream's routes.
 
 ### 5.7. cmake configure cache vs. asset regeneration
 
-`add_custom_command(OUTPUT <asset>.hpp DEPENDS <asset> ...)` is what
-triggers re-xxd when the asset content changes. If `make deps` re-stages
-the assets (e.g. after a `LLAMACPP_VERSION` bump), the `.hpp` files
-should regenerate on the next chimera build automatically. They have not
-been observed to go stale, but if you see the bundle.js in the binary
-not matching the bundle.js on disk after a llama.cpp bump, suspect this
-mechanism and `rm -rf build/src/chimera/*.hpp` to force.
+`add_custom_command(OUTPUT ui.cpp ui.h DEPENDS chimera_ui_embed <assets> ...)`
+is what triggers regeneration when an asset (or the embed helper) changes.
+If `make deps` re-stages the assets (e.g. after a `LLAMACPP_VERSION`
+bump), `ui.cpp`/`ui.h` should regenerate on the next chimera build
+automatically. If you see the bundle.js in the binary not matching the
+bundle.js on disk after a llama.cpp bump, suspect this mechanism and
+`rm -f build/src/chimera/ui.cpp build/src/chimera/ui.h` to force.
 
 ### 5.8. Asset size and download timing
 
@@ -613,8 +644,7 @@ decisions:
    from ~6 MB stripped to ~2 MB *and* the over-the-wire payload by
    the same factor. Requires:
    - A small CMake step to gzip each asset before invoking
-     `xxd.cmake` (or replace `xxd.cmake` with a variant that gzips
-     inline).
+     `ui-embed` (or a variant of the helper that gzips inline).
    - A chimera-side patch to `server-http.cpp`'s webui handlers to set
      `Content-Encoding: gzip` on the response. Browsers handle this
      transparently; no UI change.
@@ -647,11 +677,12 @@ Until that lands, the manual verification recipe in § 4 is what we have.
 - `tools/server/server-http.cpp` in the vendored llama.cpp tree — the
   authoritative source for the route binding, the COEP/COOP headers,
   and the api-key middleware ordering.
-- `tools/server/CMakeLists.txt` in the vendored llama.cpp tree — shows
-  how upstream itself invokes `xxd.cmake` for the same assets. Our
-  chimera-side CMake mirrors that block.
-- `tools/server/webui/` in the vendored llama.cpp tree — the Svelte
-  source the bundles are built from.
+- `tools/ui/CMakeLists.txt` + `tools/ui/embed.cpp` + `scripts/ui-assets.cmake`
+  in the vendored llama.cpp tree (b9318+) — show how upstream builds the
+  `llama-ui` static lib and generates `ui.cpp`/`ui.h`. Our chimera-side
+  CMake reuses `embed.cpp` directly.
+- `tools/ui/` in the vendored llama.cpp tree — the Vite/Svelte source the
+  bundles are built from.
 - [`docs/serve.md`](../serve.md) — user-facing notes (the `--no-webui`
   flag and the build-time opt-in mention).
 - [`docs/dev/server.md`](server.md) — the broader `chimera serve`
@@ -660,3 +691,101 @@ Until that lands, the manual verification recipe in § 4 is what we have.
 - Git history at the commit that removed `webui/` — the only place the
   prototyped chimera-specific UI source survives. Useful starting point
   if Variant C ever materializes per § 6.4.
+
+---
+
+## 10. The b9318 upstream restructure (changelog + integration record)
+
+llama.cpp b9318 rebuilt the webui asset-embedding mechanism wholesale.
+The vendored API headers were unchanged (a naive header-diff bump looked
+safe), but three load-bearing build-system files were deleted or moved.
+This section is the canonical record of what changed and how chimera
+adopted it; § 1 and § 2.1 are the quick-reference versions.
+
+### 10.1. What changed upstream (b9284 -> b9318)
+
+1. **The asset baker was replaced.** `scripts/xxd.cmake` (a pure-CMake
+   byte-array generator) was *removed*. In its place, `tools/ui/embed.cpp`
+   is a small host C++ program that bakes asset files into a generated
+   `ui.cpp` (hex byte arrays) and `ui.h` (a struct + lookup declaration).
+   Upstream drives it through a new `llama-ui` STATIC-lib target and
+   `scripts/ui-assets.cmake`, which can also fetch prebuilt assets from a
+   HuggingFace bucket or run the Vite/npm build.
+
+2. **`ui.h` is now generated, not checked in.** The static
+   `tools/ui/ui.h` was *removed*. The generated header always declares:
+
+   ```c
+   struct llama_ui_asset {
+       const char *          name;
+       const unsigned char * data;
+       size_t                size;
+   };
+   const llama_ui_asset * llama_ui_find_asset(const char * name);
+   ```
+
+   and emits `#define LLAMA_UI_HAS_ASSETS 1` only when at least one asset
+   is baked in.
+
+3. **Route gating moved from a build macro to data + a runtime flag.**
+   `server-http.cpp` now `#include "ui.h"` and calls `llama_ui_find_asset()`
+   *unconditionally* (the `loading.html` lookup sits outside any guard),
+   gates the `GET /` + `/bundle.{js,css}` routes on the generated
+   `LLAMA_UI_HAS_ASSETS` define plus the runtime `params.ui` flag, and
+   *no longer consults* `LLAMA_BUILD_WEBUI`/`LLAMA_BUILD_UI` at all (those
+   are now upstream-build-only knobs; `webui` is a deprecated alias of
+   `ui`, initialized once as `bool webui = ui;`).
+
+The net effect: any consumer that compiles `server-http.cpp` must always
+provide a `ui.h` and link a definition of `llama_ui_find_asset`, even when
+shipping no UI. chimera compiles `server-http.cpp` itself (it is not part
+of `libserver-context.a`), so this is chimera's problem to solve.
+
+### 10.2. How chimera integrates it
+
+The adaptation mirrors upstream's generator rather than fighting it:
+
+- **Staging** (`scripts/manage.py :: _copy_headers`): stage
+  `tools/ui/embed.cpp` -> `src-aux/ui-embed.cpp` (replacing the old
+  `xxd.cmake` copy); drop the dead `tools/ui/ui.h` copy; keep staging the
+  four raw assets into `src-aux/webui/` when present (probed from
+  `tools/ui/dist/`, produced by `npm run build`).
+- **Build** (`src/chimera/CMakeLists.txt`): *always* build a
+  `chimera_ui_embed` host helper and run it to generate `ui.cpp` + `ui.h`
+  into the chimera build dir; add `ui.cpp` to the target and the dir to
+  the include path so `server-http.cpp`'s `#include "ui.h"` resolves; a
+  custom target ordered before `chimera_lib` guarantees the header exists
+  before any TU compiles. With `CHIMERA_WEBUI_EMBED=ON` the four assets
+  are passed to the helper (-> `LLAMA_UI_HAS_ASSETS`, routes compile in);
+  with it OFF (default) the helper gets nothing and emits a stub whose
+  `llama_ui_find_asset` returns `nullptr`. `LLAMA_BUILD_WEBUI` is still
+  defined on the target when embedding, but *only* to gate chimera's
+  startup-banner line (see § 5.1).
+- **Runtime fix** (`src/chimera/chimera_serve.cpp`): chimera previously
+  set only `params.webui`. Since b9318's `server-http.cpp` reads
+  `params.ui`, chimera now sets *both* from `opts.webui`, so `--no-webui`
+  actually disables the UI. Without this, `--no-webui` is silently a
+  no-op on a webui-embedded build.
+- **Drift detection** (`make bump-check`): the build-system probe table
+  now marks `tools/ui/embed.cpp` as *required* and recognizes the b9318+
+  layout (distinct from pre-b9200 and b9200..b9317), so the next upstream
+  rearrangement of this area fails loudly with a clear message instead of
+  an opaque `make build` crash.
+
+### 10.3. Why this design
+
+The OFF and ON paths run the *same* generator — the stub is just
+"embed.cpp with zero assets" — collapsing the old conditional xxd
+machinery (per-asset `.hpp` custom-commands + the dual
+`LLAMA_BUILD_WEBUI`/`LLAMA_BUILD_UI` defines) into a single code path that
+tracks upstream's actual mechanism and minimizes future drift.
+
+### 10.4. Verification performed at adoption
+
+- embed-OFF: stub links, 44 MB binary, `make test` green (56 pass / 0
+  fail / 6 skip).
+- embed-ON: assets baked (`ui.cpp` ~28 MB of hex, binary ~50 MB);
+  `GET /` -> 200 `text/html` ~6.9 KB with COEP/COOP headers,
+  `/bundle.js` -> 200 ~5.3 MB, `/bundle.css` -> 200 ~511 KB.
+- `--no-webui` on the embed-ON binary: `GET /` and `/bundle.js` -> 404,
+  `/health` -> 200 (confirms the § 10.2 `params.ui` fix).

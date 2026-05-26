@@ -141,6 +141,73 @@ static_assert(std::is_same_v<decltype(common_params::kv_unified),    bool>,
               "common_params::kv_unified changed type "
               "(chimera serve sets this true on --parallel<0 auto path).");
 
+// ---- llama_model_params / llama_context_params fields -----------------
+//
+// load_llama_model() and new_llama_context() in chimera_llama.cpp start
+// from llama_{model,context}_default_params() and then assign these
+// fields by name. A field *rename* fails at the call site; a silent
+// field *retype* (e.g. int32_t -> uint32_t, float -> double) would
+// compile through an implicit conversion and quietly change behaviour.
+// Pin the types so that drift fails here with a pointed message. The
+// matching default-params factory functions are pinned by signature in
+// chimera_pin_check_signatures() below.
+
+// llama_model_params (load_llama_model)
+static_assert(std::is_same_v<decltype(llama_model_params::n_gpu_layers), int32_t>,
+              "llama_model_params::n_gpu_layers retyped.");
+static_assert(std::is_same_v<decltype(llama_model_params::main_gpu),     int32_t>,
+              "llama_model_params::main_gpu retyped.");
+static_assert(std::is_same_v<decltype(llama_model_params::split_mode),   enum llama_split_mode>,
+              "llama_model_params::split_mode retyped.");
+static_assert(std::is_same_v<decltype(llama_model_params::use_mmap),     bool>,
+              "llama_model_params::use_mmap retyped.");
+static_assert(std::is_same_v<decltype(llama_model_params::use_mlock),    bool>,
+              "llama_model_params::use_mlock retyped.");
+
+// llama_context_params (new_llama_context)
+static_assert(std::is_same_v<decltype(llama_context_params::n_ctx),            uint32_t>,
+              "llama_context_params::n_ctx retyped (chimera assigns via max<uint32_t>).");
+static_assert(std::is_same_v<decltype(llama_context_params::n_batch),          uint32_t>,
+              "llama_context_params::n_batch retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::n_ubatch),         uint32_t>,
+              "llama_context_params::n_ubatch retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::n_threads),        int32_t>,
+              "llama_context_params::n_threads retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::n_threads_batch),  int32_t>,
+              "llama_context_params::n_threads_batch retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::yarn_orig_ctx),    uint32_t>,
+              "llama_context_params::yarn_orig_ctx retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::rope_freq_base),   float>,
+              "llama_context_params::rope_freq_base retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::rope_freq_scale),  float>,
+              "llama_context_params::rope_freq_scale retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::yarn_ext_factor),  float>,
+              "llama_context_params::yarn_ext_factor retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::yarn_attn_factor), float>,
+              "llama_context_params::yarn_attn_factor retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::yarn_beta_fast),   float>,
+              "llama_context_params::yarn_beta_fast retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::yarn_beta_slow),   float>,
+              "llama_context_params::yarn_beta_slow retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::rope_scaling_type), enum llama_rope_scaling_type>,
+              "llama_context_params::rope_scaling_type retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::flash_attn_type),   enum llama_flash_attn_type>,
+              "llama_context_params::flash_attn_type retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::type_k),            enum ggml_type>,
+              "llama_context_params::type_k retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::type_v),            enum ggml_type>,
+              "llama_context_params::type_v retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::no_perf),           bool>,
+              "llama_context_params::no_perf retyped.");
+static_assert(std::is_same_v<decltype(llama_context_params::swa_full),          bool>,
+              "llama_context_params::swa_full retyped.");
+
+// llama_logit_bias (parse_logit_bias, --logit-bias; chimera assigns both fields)
+static_assert(std::is_same_v<decltype(llama_logit_bias::token), llama_token>,
+              "llama_logit_bias::token retyped.");
+static_assert(std::is_same_v<decltype(llama_logit_bias::bias),  float>,
+              "llama_logit_bias::bias retyped.");
+
 // ---- llama pooling enum -----------------------------------------------
 //
 // chimera_embed::parse_pooling and bring_up_secondary in
@@ -210,6 +277,40 @@ void chimera_pin_check_signatures() {
         llama_token *, int32_t) = &llama_batch_get_one;
     [[maybe_unused]] bool (*p_llama_vocab_is_eog)(
         const struct llama_vocab *, llama_token) = &llama_vocab_is_eog;
+
+    // ---- adapter / memory / embedding APIs (churn-prone) ------------
+    //
+    // These subsystems have been renamed historically (the kv_self_* ->
+    // memory_* migration; periodic adapter-API reshuffles). They are
+    // called from chimera_llama.cpp (LoRA + control-vector apply,
+    // sample_loop's KV reset) and chimera_embed.cpp (embedding readout).
+    // Pin the exact prototypes so a future rename fails here with a
+    // pointed message instead of deep in those TUs.
+    [[maybe_unused]] struct llama_adapter_lora * (*p_llama_adapter_lora_init)(
+        struct llama_model *, const char *) = &llama_adapter_lora_init;
+    [[maybe_unused]] int32_t (*p_llama_set_adapters_lora)(
+        struct llama_context *, struct llama_adapter_lora **, size_t, float *)
+        = &llama_set_adapters_lora;
+    [[maybe_unused]] int32_t (*p_llama_set_adapter_cvec)(
+        struct llama_context *, const float *, size_t, int32_t, int32_t, int32_t)
+        = &llama_set_adapter_cvec;
+    [[maybe_unused]] bool (*p_llama_memory_seq_rm)(
+        llama_memory_t, llama_seq_id, llama_pos, llama_pos) = &llama_memory_seq_rm;
+    [[maybe_unused]] float * (*p_llama_get_embeddings_ith)(
+        struct llama_context *, int32_t) = &llama_get_embeddings_ith;
+    [[maybe_unused]] float * (*p_llama_get_embeddings_seq)(
+        struct llama_context *, llama_seq_id) = &llama_get_embeddings_seq;
+
+    // ---- default-params factories -----------------------------------
+    //
+    // load_llama_model / new_llama_context start from these and mutate
+    // the returned struct field-by-field. This pins the return type;
+    // the per-field type asserts at namespace scope (above) pin the
+    // fields chimera actually assigns.
+    [[maybe_unused]] struct llama_model_params (*p_llama_model_default_params)(void)
+        = &llama_model_default_params;
+    [[maybe_unused]] struct llama_context_params (*p_llama_context_default_params)(void)
+        = &llama_context_default_params;
 
     // Whisper / SD signature pins live in their per-TU isolated
     // files (see file-top comment). Add new ones there.

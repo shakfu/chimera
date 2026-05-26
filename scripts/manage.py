@@ -93,10 +93,10 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.2.2"
-LLAMACPP_VERSION = "b9284"
+CHIMERA_VERSION = "0.2.3"
+LLAMACPP_VERSION = "b9318"
 WHISPERCPP_VERSION = "v1.8.4"
-SDCPP_VERSION = "master-645-645e6e9"
+SDCPP_VERSION = "master-650-1ceb5bd" # from: master-645-645e6e9
 # linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
 # commit in CHANGELOG for traceability.
 LINENOISE_VERSION = "master"
@@ -716,13 +716,13 @@ class LlamaCppBuilder(GgmlBuilder):
         self.glob_copy(
             self.src_dir / "tools" / "server", self.include, patterns=["server-*.h"]
         )
-        # ui.h — server-http.cpp #includes "ui.h" unconditionally on b9200+,
-        # gating only the actual extern usages behind LLAMA_BUILD_UI. Without
-        # LLAMA_BUILD_UI the header is effectively empty, but it still needs
-        # to resolve. Pre-b9200 pins didn't have this file; tolerate that.
-        ui_h = self.src_dir / "tools" / "ui" / "ui.h"
-        if ui_h.is_file():
-            self.copy(ui_h, self.include / "ui.h")
+        # ui.h is no longer a static source file. Around b9318 upstream
+        # deleted the checked-in `tools/ui/ui.h` and replaced it with a
+        # host generator (`tools/ui/embed.cpp`) that emits ui.cpp + ui.h
+        # at build time. server-http.cpp still `#include "ui.h"` and now
+        # calls `llama_ui_find_asset()` unconditionally, so chimera
+        # generates both itself from the staged embed.cpp (see below and
+        # src/chimera/CMakeLists.txt). Nothing to copy here.
         # cpp-httplib (single-header). server-http.cpp includes it as
         # `<cpp-httplib/httplib.h>`, so the header goes under a subdir of
         # the same name, not at the include root.
@@ -749,26 +749,33 @@ class LlamaCppBuilder(GgmlBuilder):
         # `make deps`. Idempotent: the marker check at the top short-circuits
         # if the file was already patched in this staging cycle.
         self._patch_server_http_payload_cap(src_aux / "server-http.cpp")
-        # Webui assets + xxd helper. server-http.cpp #includes
-        # "index.html.hpp" / "bundle.{js,css}.hpp" / "loading.html.hpp"
-        # when compiled with LLAMA_BUILD_WEBUI (pre-b9200) or
-        # LLAMA_BUILD_UI (post-b9200) defined. These .hpp files are
-        # xxd-baked from the raw assets at chimera build time when the
-        # top-level CHIMERA_WEBUI_EMBED option is ON; staging the raw
-        # assets and the xxd helper here means the option flip doesn't
-        # require re-running the llama.cpp builder.
+        # Webui assets + embed helper. At chimera build time the four
+        # prebuilt assets (index.html, bundle.{js,css}, loading.html) are
+        # baked into a generated ui.cpp by the host helper staged just
+        # below, but only when the top-level CHIMERA_WEBUI_EMBED option is
+        # ON. Staging the raw assets and the helper here means the option
+        # flip doesn't require re-running the llama.cpp builder.
         #
-        # The upstream layout changed around b9200:
+        # The upstream asset mechanism changed twice:
         #   - pre-b9200: prebuilt assets shipped in
-        #     `tools/server/public/{index.html, bundle.{js,css},
-        #     loading.html}` — chimera just copied them.
-        #   - post-b9200: webui is a Vite project at `tools/ui/`. No
-        #     prebuilt assets in the source tree; running
-        #     `npm install && npm run build` inside `tools/ui/` produces
-        #     them under `build/tools/ui/dist/` (relative to upstream's
-        #     source root). The output filenames match the pre-b9200
-        #     names (the Vite plugin in tools/ui/scripts/ normalizes
-        #     bundle.<hash>.js → bundle.js etc.).
+        #     `tools/server/public/`; assets were xxd-baked into .hpp files
+        #     #included by server-http.cpp behind LLAMA_BUILD_WEBUI.
+        #   - b9200..b9317: webui is a Vite project at `tools/ui/` with a
+        #     static `tools/ui/ui.h`; assets still xxd-baked.
+        #   - b9318+: `scripts/xxd.cmake` and the static `tools/ui/ui.h`
+        #     are both gone. A host helper `tools/ui/embed.cpp` now
+        #     generates ui.cpp + ui.h (ui.h carries the struct +
+        #     `llama_ui_find_asset` decl, plus LLAMA_UI_HAS_ASSETS when any
+        #     asset is embedded). server-http.cpp keys off LLAMA_UI_HAS_ASSETS
+        #     and the runtime params.ui flag, NOT a build define. chimera
+        #     stages embed.cpp and drives it from its own CMake.
+        #
+        # Either way, no prebuilt assets live in the source tree on the
+        # current pin; `npm install && npm run build` inside `tools/ui/`
+        # produces them under `tools/ui/dist/` (and upstream's own
+        # LLAMA_BUILD_UI build writes `build/tools/ui/dist/`). The output
+        # filenames match the pre-b9200 names (the Vite plugin normalizes
+        # bundle.<hash>.js -> bundle.js etc.).
         #
         # Probe both layouts. The first directory that contains all four
         # expected files wins. If none has them, log and skip — the
@@ -813,7 +820,13 @@ class LlamaCppBuilder(GgmlBuilder):
                 f"`cd {self.src_dir / 'tools' / 'ui'} && npm install && npm run build`, "
                 "then re-run this builder. See docs/dev/webui.md."
             )
-        self.copy(self.src_dir / "scripts" / "xxd.cmake", src_aux / "xxd.cmake")
+        # Host asset-embed helper (b9318+). Generates ui.cpp/ui.h from the
+        # staged assets at chimera build time. Replaces the removed
+        # scripts/xxd.cmake. Staged unconditionally so CHIMERA_WEBUI_EMBED
+        # can flip on without re-running this builder; chimera also uses it
+        # to generate the empty stub ui.cpp/ui.h that server-http.cpp needs
+        # to link in the default (embed-OFF) build.
+        self.copy(self.src_dir / "tools" / "ui" / "embed.cpp", src_aux / "ui-embed.cpp")
 
     def build(self) -> None:
         if not self.src_dir.exists():
@@ -857,12 +870,12 @@ class LlamaCppBuilder(GgmlBuilder):
             # vendored cpp-httplib are needed to power `chimera serve`. The
             # webui route binding lives in server-http.cpp, which chimera
             # compiles itself (it's not part of libserver-context.a). So
-            # LLAMA_BUILD_WEBUI here stays OFF — the asset .hpp files and
-            # the LLAMA_BUILD_WEBUI compile define are produced on the chimera
-            # side instead, gated by the top-level CHIMERA_WEBUI_EMBED CMake
-            # option. _copy_headers() unconditionally stages the prebuilt
-            # public/* assets and xxd.cmake into src-aux/ so the option can
-            # flip them on without re-running this builder.
+            # LLAMA_BUILD_WEBUI/LLAMA_BUILD_UI here stays OFF -- chimera
+            # generates ui.cpp/ui.h on its own side via the staged
+            # ui-embed.cpp helper, gated by the top-level CHIMERA_WEBUI_EMBED
+            # CMake option. _copy_headers() unconditionally stages the
+            # prebuilt assets and ui-embed.cpp into src-aux/ so the option
+            # can flip them on without re-running this builder.
             LLAMA_BUILD_SERVER=True,
             LLAMA_BUILD_WEBUI=False,
             LLAMA_BUILD_TESTS=False,
@@ -1745,10 +1758,12 @@ class Application(ShellCmd, metaclass=MetaCommander):
                 # header-diff covers it.
                 "probes": [
                     ("tools/server/server-http.cpp", "required", "vendored as src-aux + compiled into chimera"),
-                    ("scripts/xxd.cmake",            "required", "asset xxd helper for CHIMERA_WEBUI_EMBED=ON"),
-                    ("tools/server/public/index.html", "info", "pre-b9200 webui asset (old layout)"),
-                    ("tools/ui/ui.h",                  "info", "post-b9200 ui header (new layout, server-http.cpp #includes this)"),
-                    ("tools/ui/dist/index.html",       "info", "post-b9200 prebuilt webui asset (upstream-built; absent unless `npm run build` was run in tools/ui/)"),
+                    ("tools/ui/embed.cpp",           "required", "b9318+ host asset-embed helper; chimera stages + drives it (replaces scripts/xxd.cmake)"),
+                    ("scripts/ui-assets.cmake",      "info",     "b9318+ asset provisioning (npm/HF); chimera does not consume it"),
+                    ("scripts/xxd.cmake",            "info",     "pre-b9318 asset baker; removed upstream, chimera no longer needs it"),
+                    ("tools/server/public/index.html", "info",   "pre-b9200 webui asset (oldest layout)"),
+                    ("tools/ui/ui.h",                  "info",   "b9200..b9317 static ui header (removed at b9318; chimera now generates it)"),
+                    ("tools/ui/dist/index.html",       "info",   "operator-built prebuilt webui asset (absent unless `npm run build` was run in tools/ui/)"),
                 ],
             })
         if not args.skip_sd:
@@ -1901,6 +1916,10 @@ class Application(ShellCmd, metaclass=MetaCommander):
             #     webui moved to `tools/ui/` as a Vite project (no prebuilt
             #     assets in the tree). chimera's `_copy_headers` raised an
             #     IOError because the old path was hard-coded.
+            #   - at b9318, `scripts/xxd.cmake` and the static `tools/ui/ui.h`
+            #     were both deleted in favour of a host generator
+            #     `tools/ui/embed.cpp`. `_copy_headers` raised again on the
+            #     hard-coded xxd.cmake copy. Hence embed.cpp is now "required".
             #
             # SD currently has no probes — its surface is small and the
             # header-diff covers it. Add entries to comp["probes"] above
@@ -1910,7 +1929,7 @@ class Application(ShellCmd, metaclass=MetaCommander):
                 continue
 
             print(f"=== {comp['name']}: build-system drift ===")
-            webui_layout: dict[str, bool] = {"old": False, "new_header": False, "new_assets": False}
+            webui_layout: dict[str, bool] = {"old": False, "mid_header": False, "embed": False, "assets": False}
             comp_missing: list[str] = []
             for path, severity, desc in comp["probes"]:
                 exists = upstream_path_exists(comp["repo"], comp["ref"], path)
@@ -1922,24 +1941,31 @@ class Application(ShellCmd, metaclass=MetaCommander):
                 if path == "tools/server/public/index.html":
                     webui_layout["old"] = exists
                 elif path == "tools/ui/ui.h":
-                    webui_layout["new_header"] = exists
+                    webui_layout["mid_header"] = exists
+                elif path == "tools/ui/embed.cpp":
+                    webui_layout["embed"] = exists
                 elif path == "tools/ui/dist/index.html":
-                    webui_layout["new_assets"] = exists
+                    webui_layout["assets"] = exists
 
             print()
-            if webui_layout["old"]:
+            if webui_layout["embed"]:
+                print("  webui layout: b9318+ (host tools/ui/embed.cpp generates ui.cpp/ui.h)")
+                if webui_layout["assets"]:
+                    print("  → CHIMERA_WEBUI_EMBED=ON works (operator-built assets present in tools/ui/dist/).")
+                else:
+                    print("  → CHIMERA_WEBUI_EMBED=ON needs assets first: run")
+                    print("    `npm install && npm run build` inside tools/ui/, then re-stage.")
+                    print("    CHIMERA_WEBUI_EMBED=OFF (default) is unaffected — chimera generates an empty stub.")
+            elif webui_layout["mid_header"]:
+                print("  webui layout: b9200..b9317 (static tools/ui/ui.h, xxd-baked assets)")
+                print("  → chimera's b9318+ embed path does NOT match this ref. Pin b9318 or newer,")
+                print("    or restore the pre-b9318 xxd staging path before bumping.")
+            elif webui_layout["old"]:
                 print("  webui layout: PRE-b9200 (prebuilt assets in tools/server/public/)")
-                print("  → CHIMERA_WEBUI_EMBED=ON works as before.")
-            elif webui_layout["new_header"] and webui_layout["new_assets"]:
-                print("  webui layout: POST-b9200 (Vite project in tools/ui/) WITH prebuilt assets in tools/ui/dist/")
-                print("  → CHIMERA_WEBUI_EMBED=ON should work if manage.py probes tools/ui/dist/.")
-            elif webui_layout["new_header"]:
-                print("  webui layout: POST-b9200 (Vite project in tools/ui/) WITHOUT prebuilt assets")
-                print("  → CHIMERA_WEBUI_EMBED=ON is unavailable on this ref unless the operator runs")
-                print("    `npm install && npm run build` inside tools/ui/ before staging.")
+                print("  → chimera's b9318+ embed path does NOT match this ref.")
             else:
-                print(f"  webui layout: NEITHER old nor new — unexpected for {comp['repo']}.")
-                print("  → CHIMERA_WEBUI_EMBED=ON will not work; investigate upstream layout changes.")
+                print(f"  webui layout: UNRECOGNIZED — unexpected for {comp['repo']}.")
+                print("  → investigate upstream layout changes before bumping.")
             print()
 
             if comp_missing:
