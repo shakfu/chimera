@@ -23,10 +23,21 @@ pip install nanobind scikit-build-core
 
 ## Build
 
-> This is a **local/dev install**: the extension links the prebuilt archives in
-> `<repo>/build` (not bundled), so build them first (`make build &&
-> python3 scripts/combine_archives.py`) and install from the repo. `uv build`
-> to a redistributable wheel won't work without bundling the archives.
+> This is a **local/host build**: the extension statically links the prebuilt
+> archives in `<repo>/build`, so build them first (`make build &&
+> python3 scripts/combine_archives.py`). The archives are *not* bundled into
+> the sdist, but they *are* linked into the `.so`, so the resulting wheel is
+> self-contained at runtime -- it just inherits the archives' host-tuned ggml
+> (`GGML_NATIVE`, single backend) and so runs only on this machine (or a
+> bit-identical one). Cross-machine / PyPI portability is a non-goal of the
+> archive layer (see `docs/dev/combine_archives.md` S1); the sibling
+> [inferna](https://github.com/shakfu/inferna) project owns the portable-wheel
+> story.
+>
+> To produce a `.whl`: `make wheel` (writes `bindings/dist/`). It runs
+> `uv build --wheel`, which builds straight from the source tree. A *plain*
+> `uv build` does **not** work: it builds the wheel from an extracted sdist
+> where the archives + repo headers (both outside `bindings/`) are absent.
 
 ### uv (recommended)
 

@@ -13,12 +13,20 @@ license = { text = "see repository LICENSE" }
 # ---------------------------------------------------------------------------
 # uv workflow
 # ---------------------------------------------------------------------------
-# This is a LOCAL/dev install: the extension links chimera's prebuilt archives
-# in <repo>/build (libchimera*.a), which are NOT bundled, so `uv build` to a
-# redistributable wheel won't work without first building them. Build them
-# once, then install from this directory:
+# This is a LOCAL/host build: the extension statically links chimera's prebuilt
+# archives in <repo>/build (libchimera*.a). They are linked INTO the .so (so the
+# wheel is self-contained at runtime) but are not bundled in the sdist and carry
+# a host-tuned ggml (GGML_NATIVE, single backend) -- the wheel is not portable
+# across machines. Build the archives once, then build/install from here:
 #
 #   make build && python3 scripts/combine_archives.py   # produce the archives
+#
+#   # build an installable wheel into bindings/dist/ (host-optimized):
+#   make wheel                  # == uv build --wheel ./bindings (see note below)
+#
+#   # NOTE: a plain `uv build` fails -- it builds the wheel from an extracted
+#   # sdist, where the archives + repo headers (outside bindings/) are absent.
+#   # Use `uv build --wheel` (builds from the source tree in place) or `make wheel`.
 #
 #   # one-shot build + install into the active env (build isolation auto-
 #   # installs scikit-build-core + nanobind):

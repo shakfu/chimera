@@ -3,7 +3,7 @@
 		test test-fast test-slow test-bench test-bench-fast smoke \
 		install uninstall release-notes bump-check test-db-migrate \
 		test-golden combine test-external-smoke test-external-oop \
-		bindings test-bindings
+		bindings test-bindings wheel
 
 # Override with `make PYTHON=<cmd>` for
 # unusual environments (e.g. `PYTHON="uv run python"`).
@@ -263,6 +263,39 @@ test-bindings: bindings
 	@py="$(PYTHON)"; \
 	[ -x "$(BINDINGS_VENV)/bin/python" ] && py="$(BINDINGS_VENV)/bin/python"; \
 	PYTHONPATH=bindings/build $$py bindings/smoke_test.py
+
+# wheel: build an installable .whl for the chimera Python bindings via
+# uv + scikit-build-core. Output lands in bindings/dist/.
+#
+# IMPORTANT -- this is a LOCAL, host-optimized wheel, not a portable one.
+# The extension statically links the three prebuilt archives, so the wheel
+# is self-contained at RUNTIME (no repo / no archives needed to import it),
+# but it inherits the archives' host-tuned ggml build (GGML_NATIVE, single
+# backend). It runs only on this machine (or one bit-identical for the
+# relevant ISA / GPU toolkit). Cross-machine redistribution is an explicit
+# non-goal of the archive layer -- see docs/dev/combine_archives.md S1.
+#
+# Uses `uv build --wheel` (builds the wheel straight from the source tree),
+# NOT a plain `uv build`. A plain `uv build` makes an sdist first and builds
+# the wheel from the *extracted* sdist, where the archives + repo headers
+# (which live outside bindings/) are absent, so its CMake configure fails.
+# The --wheel path keeps the real repo paths intact; CHIMERA_BUILD_ROOT is
+# passed explicitly so it resolves regardless of cwd. Build isolation
+# auto-provisions scikit-build-core + nanobind.
+#
+# Build for a specific interpreter with `make PYTHON=python3.13 wheel`;
+# change the output dir with `make WHEEL_OUT=dist wheel`.
+WHEEL_OUT ?= bindings/dist
+
+wheel: $(BUILD_DIR)/libchimera.a $(BUILD_DIR)/libchimera_thirdparty.a $(BUILD_DIR)/libchimera_ggml.a
+	@command -v uv >/dev/null 2>&1 || { \
+	    echo "wheel: uv is required (https://docs.astral.sh/uv/); or use 'uv pip install ./bindings'"; \
+	    exit 1; }
+	@pyexe="$$($(PYTHON) -c 'import sys; print(sys.executable)')"; \
+	echo "wheel: building host-optimized wheel for $$pyexe -> $(WHEEL_OUT)/"; \
+	uv build --wheel ./bindings --python "$$pyexe" -o "$(WHEEL_OUT)" \
+	    -C cmake.define.CHIMERA_BUILD_ROOT="$(abspath $(BUILD_DIR))"
+	@echo "wheel: done (host-optimized; not for cross-machine redistribution)"
 
 # test-golden: HTTP response-shape regression tests against fixed
 # models. Spawns `chimera serve` on a free port, hits each route with a
