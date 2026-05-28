@@ -2,7 +2,7 @@
 
 A single statically-linked C++ executable that bundles [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), [SQLite](https://sqlite.org), and [sqlite-vec](https://github.com/asg017/sqlite-vec) into an inference multitool. The same binary handles text generation, interactive chat with persistent history, speech-to-text, text-to-image, a personal RAG / vector store, and an OpenAI-compatible HTTP server exposing all three inference capabilities at once — all sharing a single ggml backend set and one SQLite database.
 
-If you want the same capabilities from Python instead of a native binary, see [**cyllama**](https://github.com/shakfu/cyllama) — chimera's sibling project, which exposes llama.cpp / whisper.cpp / stable-diffusion.cpp as Cython bindings with a high-level Python API.
+If you want the same capabilities from Python instead of a native binary, see [**cyllama**](https://github.com/shakfu/cyllama) or [**inferna**](https://github.com/shakfu/inferna) — chimera's sibling projects that expose llama.cpp, whisper.cpp, and stable-diffusion.cpp as cython and nanobind bindings respectively.
 
 There's also a showcase / demo desktop app which uses chimera (forked llama.cpp webui in a Tauri shell, with chimera-specific features like a persisted-chat browser and a sidecar-status bar), see [**chimera-desktop**](https://github.com/shakfu/chimera-desktop).
 
