@@ -3,7 +3,7 @@
 		test test-fast test-slow test-bench test-bench-fast smoke \
 		install uninstall release-notes bump-check test-db-migrate \
 		test-golden combine test-external-smoke test-external-oop \
-		bindings test-bindings wheel
+		bindings test-bindings test-bindings-pytest wheel clean-bindings
 
 # Override with `make PYTHON=<cmd>` for
 # unusual environments (e.g. `PYTHON="uv run python"`).
@@ -244,8 +244,12 @@ bindings: $(BUILD_DIR)/libchimera.a $(BUILD_DIR)/libchimera_thirdparty.a $(BUILD
 	    py="$(BINDINGS_PY)"; \
 	elif command -v uv >/dev/null 2>&1; then \
 	    pyexe="$$($(PYTHON) -c 'import sys; print(sys.executable)')"; \
-	    echo "bindings: provisioning nanobind + scikit-build-core via uv into $(BINDINGS_VENV) (python: $$pyexe)"; \
-	    uv venv "$(BINDINGS_VENV)" --python "$$pyexe" >/dev/null; \
+	    if [ -d "$(BINDINGS_VENV)" ]; then \
+	        echo "bindings: reusing $(BINDINGS_VENV) (python: $$pyexe)"; \
+	    else \
+	        echo "bindings: provisioning nanobind + scikit-build-core via uv into $(BINDINGS_VENV) (python: $$pyexe)"; \
+	        uv venv "$(BINDINGS_VENV)" --python "$$pyexe" >/dev/null; \
+	    fi; \
 	    uv pip install --python "$(BINDINGS_VENV)/bin/python" -q nanobind scikit-build-core; \
 	    py="$(abspath $(BINDINGS_VENV))/bin/python"; \
 	else \
@@ -263,6 +267,29 @@ test-bindings: bindings
 	@py="$(PYTHON)"; \
 	[ -x "$(BINDINGS_VENV)/bin/python" ] && py="$(BINDINGS_VENV)/bin/python"; \
 	PYTHONPATH=bindings/build $$py bindings/smoke_test.py
+
+# test-bindings-pytest: build the module + run the pytest suite under
+# bindings/tests. Uses the bindings venv interpreter when present (guaranteed
+# ABI match with the freshly-built .so), else $(PYTHON); installs pytest into
+# that venv via uv if missing. Model-dependent tests SKIP when their model file
+# is absent -- override paths with CHIMERA_TEST_* env vars (see conftest.py).
+# Pass extra pytest args via PYTEST_ARGS, e.g. `make test-bindings-pytest
+# PYTEST_ARGS="-k tokenizer -v"`.
+test-bindings-pytest: bindings
+	@py="$(PYTHON)"; \
+	if [ -x "$(BINDINGS_VENV)/bin/python" ]; then \
+	    py="$(BINDINGS_VENV)/bin/python"; \
+	    if ! "$$py" -c 'import pytest' >/dev/null 2>&1; then \
+	        if command -v uv >/dev/null 2>&1; then \
+	            echo "test-bindings-pytest: installing pytest into $(BINDINGS_VENV)"; \
+	            uv pip install --python "$$py" -q pytest; \
+	        else \
+	            echo "test-bindings-pytest: pytest missing from $(BINDINGS_VENV) and uv not found"; \
+	            exit 1; \
+	        fi; \
+	    fi; \
+	fi; \
+	PYTHONPATH=bindings/build $$py -m pytest bindings/tests $(PYTEST_ARGS)
 
 # wheel: build an installable .whl for the chimera Python bindings via
 # uv + scikit-build-core. Output lands in bindings/dist/.
@@ -296,6 +323,17 @@ wheel: $(BUILD_DIR)/libchimera.a $(BUILD_DIR)/libchimera_thirdparty.a $(BUILD_DI
 	uv build --wheel ./bindings --python "$$pyexe" -o "$(WHEEL_OUT)" \
 	    -C cmake.define.CHIMERA_BUILD_ROOT="$(abspath $(BUILD_DIR))"
 	@echo "wheel: done (host-optimized; not for cross-machine redistribution)"
+
+# clean-bindings: remove everything the bindings targets generate -- the
+# compiled module + CMake tree (bindings/build), the provisioned venv
+# (bindings/.venv), the wheel output ($(WHEEL_OUT)), and the pytest/python
+# caches. The next `make bindings` re-provisions from scratch. The top-level
+# `clean`/`reset` already cover build/ and the venv; this is the bindings-only
+# scoped equivalent.
+clean-bindings:
+	@rm -rf bindings/build bindings/.venv $(WHEEL_OUT) \
+	    bindings/.pytest_cache bindings/tests/__pycache__
+	@echo "clean-bindings: removed bindings build/, .venv/, $(WHEEL_OUT)/, caches"
 
 # test-golden: HTTP response-shape regression tests against fixed
 # models. Spawns `chimera serve` on a free port, hits each route with a

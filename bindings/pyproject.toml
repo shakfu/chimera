@@ -51,6 +51,17 @@ license = { text = "see repository LICENSE" }
 # populates an env that `uv pip install --no-build-isolation` can reuse.
 [dependency-groups]
 build = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+dev = [
+    "pytest>=8.3.5",
+]
+
+[tool.pytest.ini_options]
+# Tests live in tests/. Model-dependent tests SKIP when their model file is
+# absent (resolved from CHIMERA_TEST_* env vars or the repo's models/ dir);
+# see tests/conftest.py. The extension must be built first (`make bindings`
+# or an editable install) -- conftest adds bindings/build to sys.path.
+testpaths = ["tests"]
+addopts = "-ra"
 
 [tool.scikit-build]
 cmake.source-dir = "."

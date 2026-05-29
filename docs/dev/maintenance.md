@@ -7,6 +7,62 @@ breakage. This doc surveys where breakage actually lands, what we
 already do to contain it, and the highest-leverage things still
 missing.
 
+## Source layout
+
+```
+CMakeLists.txt                  Top-level: defines LIB_*, SYSTEM_LIBS, etc.,
+                                then add_subdirectory(src/chimera).
+Makefile                        deps + cmake wrapper.
+scripts/manage.py               Third-party fetch/build driver.
+thirdparty/
+  CLI11.hpp                     Single-header CLI parser.
+  rang.hpp                      Single-header ANSI color.
+  llama.cpp/, whisper.cpp/,
+  stable-diffusion.cpp/,
+  linenoise/, sqlite/,
+  sqlite-vec/                   Populated by scripts/manage.py.
+src/chimera/                    libchimera.a (chimera_lib target).
+  chimera.h                     Option structs + cross-TU declarations
+  chimera.hpp                   Optional header-only OOP layer over the
+                                procedural API (chimera::Llama, etc.).
+                                Not compiled into the archive; see
+                                docs/dev/oop-layer.md.
+  chimera_llama.{h,cpp}         llama.cpp glue: model + context loaders,
+                                generation, sampler, LoRA, command_prompt /
+                                command_embed / command_tokenize.
+  chimera_embed.{h,cpp}         Embedder helper (CLI embed + RAG ingest)
+  chimera_embed_cache.{h,cpp}   Persistent embedding cache (sqlite-backed)
+  chimera_whisper.{h,cpp}       whisper transcription + ASR HTTP handler
+  chimera_sd.{h,cpp}            stable-diffusion + image HTTP handlers
+  chimera_serve.cpp             OpenAI-compatible HTTP server (LLM, audio,
+                                image, RAG, chat persistence). Split across
+                                chimera_serve_{audio,images,rag,
+                                chat_persist,chats_read}.cpp.
+  chimera_db.{h,cpp}            SQLite connection, XDG paths, migrations
+  chimera_chat_store.{h,cpp}    CRUD over chats + messages + messages_fts
+  chimera_vector_store.{h,cpp}  CRUD over collections + documents + vec0
+  llama_build_info_shim.cpp     stubs the symbols libllama-common.a expects
+  stb_impl.cpp                  stb_image_write implementation
+  CMakeLists.txt                chimera_lib target (consumes parent vars)
+src/chimera_cli/                chimera executable (links libchimera.a).
+  chimera.cpp                   main(), arg parsing, color, spinner,
+                                linenoise REPL, command_chat (the only
+                                command_* that stays out of the library
+                                because it owns terminal I/O).
+  CMakeLists.txt                chimera target.
+docs/
+  serve.md, cheatsheet.md       User-facing prose + one-page reference.
+  dev/server.md, dev/sqlite.md, Internal notes: what's bound, schema model,
+  dev/maintenance.md,           phased plans, web UI experimental wiring,
+  dev/webui.md                  things to watch for.
+```
+
+The internal split is mostly about keeping native dependency headers
+isolated: llama.cpp, whisper.cpp, and stable-diffusion.cpp expose
+overlapping ggml symbols and cannot all be included in one translation
+unit. Maintainer-facing details also live in `docs/dev/server.md`,
+`docs/dev/sqlite.md`, `docs/dev/webui.md`, and `docs/dev/oop-layer.md`.
+
 ## Where breakage actually lands
 
 Five categories, in roughly decreasing order of how much they hurt:

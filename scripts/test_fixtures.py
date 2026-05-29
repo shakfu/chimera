@@ -38,17 +38,26 @@ from pathlib import Path
 # (label, [(env_var, expected_kind), ...]) where expected_kind is "file" or "dir".
 # Order matches the columns in docs/dev/maintenance.md's fixture table.
 FIXTURES = [
-    ("LoRA", [
-        ("CHIMERA_TEST_LORA", "file"),
-    ]),
-    ("ControlNet", [
-        ("CHIMERA_TEST_CONTROLNET", "file"),
-        ("CHIMERA_TEST_CONTROL_IMAGE", "file"),
-    ]),
-    ("PhotoMaker", [
-        ("CHIMERA_TEST_PHOTOMAKER", "file"),
-        ("CHIMERA_TEST_PM_ID_DIR", "dir"),
-    ]),
+    (
+        "LoRA",
+        [
+            ("CHIMERA_TEST_LORA", "file"),
+        ],
+    ),
+    (
+        "ControlNet",
+        [
+            ("CHIMERA_TEST_CONTROLNET", "file"),
+            ("CHIMERA_TEST_CONTROL_IMAGE", "file"),
+        ],
+    ),
+    (
+        "PhotoMaker",
+        [
+            ("CHIMERA_TEST_PHOTOMAKER", "file"),
+            ("CHIMERA_TEST_PM_ID_DIR", "dir"),
+        ],
+    ),
 ]
 
 # The same regex the deleted CI workflow used. Matches both SKIP placeholders
@@ -110,7 +119,9 @@ def main(argv: list[str]) -> int:
             print(f"  [!] {label:<11} PARTIAL config; need ALL of: {', '.join(names)}")
             any_partial = True
         elif status == "invalid":
-            print(f"  [!] {label:<11} env set but path(s) missing on disk: {', '.join(names)}")
+            print(
+                f"  [!] {label:<11} env set but path(s) missing on disk: {', '.join(names)}"
+            )
             any_invalid = True
         else:
             print(f"  [-] {label:<11} skipped (set {', '.join(names)} to enable)")
@@ -134,8 +145,10 @@ def main(argv: list[str]) -> int:
     repo_root = Path(__file__).resolve().parent.parent
     test_py = repo_root / "scripts" / "test.py"
     cmd = [
-        sys.executable, str(test_py),
-        "--filter", FILTER,
+        sys.executable,
+        str(test_py),
+        "--filter",
+        FILTER,
         *args.passthrough,
     ]
 

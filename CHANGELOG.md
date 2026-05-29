@@ -4,6 +4,16 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Added
+
+- **pytest suite for the Python bindings (`bindings/tests/`).** Adds `conftest.py` plus `test_module.py` (11 no-model tests: module import, every core class exported, `ExitCode` members, `ChimeraError` is an `Exception`, all option structs default-construct, `Server` constructs without blocking, option read/write round-trips incl. dict/list fields, the `reference_internal` live-handle semantics, and bad-path load translating to `ChimeraError`) and `test_inference.py` (model-gated end-to-end tests for the tokenize round-trip, Llama one-shot + streaming-callback, mutable-options-between-calls, embedder dimension stability + `embed_many`, and the optional SD / Whisper modalities). `conftest.py` makes `import chimera` work from the uninstalled standalone build (`bindings/build`) -- and defends against a stale scikit-build editable hook that intercepts the import -- and resolves model paths from `CHIMERA_TEST_*` env overrides, falling back to the repo's `models/` dir; a missing model SKIPs rather than FAILs. `pytest` is a `dev` dependency group in `bindings/pyproject.toml`, which also gains a `[tool.pytest.ini_options]` block (`testpaths = ["tests"]`). Documented in a new "pytest suite" section of [`bindings/README.md`](bindings/README.md).
+- **`make test-bindings-pytest` target.** Builds the module (via `bindings`) then runs the pytest suite under the bindings venv interpreter (installing `pytest` into it via `uv` if absent), so the ABI matches the freshly-built `.so`. Extra args via `PYTEST_ARGS`.
+- **`make clean-bindings` target.** Bindings-scoped clean: removes `bindings/build`, `bindings/.venv`, the wheel output (`$(WHEEL_OUT)`), and the pytest/python caches. Complements the top-level `clean`/`reset`.
+
+### Fixed
+
+- **`make bindings` no longer prints a spurious `uv venv` failure on re-runs.** The recipe unconditionally ran `uv venv`, which errors when the venv already exists (the failure was non-fatal but noisy and misleading). It now creates the venv only when missing and the provisioning echo reports `reusing` vs `provisioning` accordingly.
+
 ## [0.2.3]
 
 ### Changed

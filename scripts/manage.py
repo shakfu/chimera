@@ -96,7 +96,7 @@ PY_VER_MINOR = sys.version_info.minor
 CHIMERA_VERSION = "0.2.3"
 LLAMACPP_VERSION = "b9318"
 WHISPERCPP_VERSION = "v1.8.4"
-SDCPP_VERSION = "master-650-1ceb5bd" # from: master-645-645e6e9
+SDCPP_VERSION = "master-650-1ceb5bd"  # from: master-645-645e6e9
 # linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
 # commit in CHANGELOG for traceability.
 LINENOISE_VERSION = "master"
@@ -790,18 +790,26 @@ class LlamaCppBuilder(GgmlBuilder):
             (self.src_dir / "tools" / "server" / "public", "pre-b9200 layout"),
             # Post-b9200 layout, upstream-built (LLAMA_BUILD_UI=ON in
             # upstream's CMake invokes npm build and writes here).
-            (self.src_dir / "build" / "tools" / "ui" / "dist", "post-b9200 layout, upstream-built"),
+            (
+                self.src_dir / "build" / "tools" / "ui" / "dist",
+                "post-b9200 layout, upstream-built",
+            ),
             # Post-b9200 layout, operator-built (operator ran
             # `npm run build` in tools/ui/ manually). The Vite plugin's
             # OUTPUT_DIR is `../../build/tools/ui/dist` relative to
             # `tools/ui/`, so the operator-built path collapses to the
             # same as upstream-built; this entry kept for symmetry and
             # in case future Vite configs write elsewhere.
-            (self.src_dir / "tools" / "ui" / "dist", "post-b9200 layout, operator-built (in-tree)"),
+            (
+                self.src_dir / "tools" / "ui" / "dist",
+                "post-b9200 layout, operator-built (in-tree)",
+            ),
         ]
         chosen = None
         for candidate, label in candidate_dirs:
-            if candidate.is_dir() and all((candidate / a).is_file() for a in webui_assets):
+            if candidate.is_dir() and all(
+                (candidate / a).is_file() for a in webui_assets
+            ):
                 chosen = (candidate, label)
                 break
         if chosen is not None:
@@ -814,7 +822,9 @@ class LlamaCppBuilder(GgmlBuilder):
                 "is unavailable on this pin. Checked:"
             )
             for candidate, label in candidate_dirs:
-                self.log.info(f"  - {candidate} ({label}): {'exists but incomplete' if candidate.is_dir() else 'absent'}")
+                self.log.info(
+                    f"  - {candidate} ({label}): {'exists but incomplete' if candidate.is_dir() else 'absent'}"
+                )
             self.log.info(
                 "  To enable embed on a post-b9200 pin: run "
                 f"`cd {self.src_dir / 'tools' / 'ui'} && npm install && npm run build`, "
@@ -1627,8 +1637,7 @@ class Application(ShellCmd, metaclass=MetaCommander):
             cwd=cwd,
         )
         self.log.info(
-            "chimera build complete: "
-            f"{(cwd / args.build_dir / 'chimera').as_posix()}"
+            f"chimera build complete: {(cwd / args.build_dir / 'chimera').as_posix()}"
         )
 
     # ------------------------------------------------------------------------
@@ -1700,10 +1709,14 @@ class Application(ShellCmd, metaclass=MetaCommander):
         "Accepts either a tag/SHA or the build-string format "
         "'master-<count>-<sha>'; the trailing SHA is extracted automatically.",
     )
-    @option("--skip-llama", action="store_true",
-            help="skip llama.cpp comparison (SD only)")
-    @option("--skip-sd",    action="store_true",
-            help="skip stable-diffusion.cpp comparison (llama only)")
+    @option(
+        "--skip-llama", action="store_true", help="skip llama.cpp comparison (SD only)"
+    )
+    @option(
+        "--skip-sd",
+        action="store_true",
+        help="skip stable-diffusion.cpp comparison (llama only)",
+    )
     @option(
         "--show-diff-lines",
         type=int,
@@ -1729,58 +1742,96 @@ class Application(ShellCmd, metaclass=MetaCommander):
         # one-line additions; new repos a couple more lines.
         comparisons: list[dict] = []
         if not args.skip_llama:
-            comparisons.append({
-                "name":          "llama.cpp",
-                "repo":          "ggml-org/llama.cpp",
-                "ref":           normalize_ref(args.llama_version),
-                "ref_display":   args.llama_version,
-                "vendored_dir":  self.project.cwd / "thirdparty" / "llama.cpp" / "include",
-                # All vendored upstream-internal headers chimera links
-                # against or compiles against. The server-* pair were
-                # the only entries historically; widening to common.h /
-                # arg.h / chat.h / mtmd.h / llama.h surfaces drift in
-                # the larger public + common surface chimera also pokes
-                # (common_params fields, llama_tokenize signature, mtmd
-                # helper protos, etc.) without any extra plumbing.
-                "files":         [
-                    "include/llama.h",
-                    "common/common.h",
-                    "common/arg.h",
-                    "common/chat.h",
-                    "tools/mtmd/mtmd.h",
-                    "tools/server/server-context.h",
-                    "tools/server/server-http.h",
-                ],
-                # Build-system path probes (non-headers chimera depends
-                # on). See the build-system drift discussion at the end
-                # of this function. Only llama.cpp has webui layout
-                # drama today; SD's surface is small enough that the
-                # header-diff covers it.
-                "probes": [
-                    ("tools/server/server-http.cpp", "required", "vendored as src-aux + compiled into chimera"),
-                    ("tools/ui/embed.cpp",           "required", "b9318+ host asset-embed helper; chimera stages + drives it (replaces scripts/xxd.cmake)"),
-                    ("scripts/ui-assets.cmake",      "info",     "b9318+ asset provisioning (npm/HF); chimera does not consume it"),
-                    ("scripts/xxd.cmake",            "info",     "pre-b9318 asset baker; removed upstream, chimera no longer needs it"),
-                    ("tools/server/public/index.html", "info",   "pre-b9200 webui asset (oldest layout)"),
-                    ("tools/ui/ui.h",                  "info",   "b9200..b9317 static ui header (removed at b9318; chimera now generates it)"),
-                    ("tools/ui/dist/index.html",       "info",   "operator-built prebuilt webui asset (absent unless `npm run build` was run in tools/ui/)"),
-                ],
-            })
+            comparisons.append(
+                {
+                    "name": "llama.cpp",
+                    "repo": "ggml-org/llama.cpp",
+                    "ref": normalize_ref(args.llama_version),
+                    "ref_display": args.llama_version,
+                    "vendored_dir": self.project.cwd
+                    / "thirdparty"
+                    / "llama.cpp"
+                    / "include",
+                    # All vendored upstream-internal headers chimera links
+                    # against or compiles against. The server-* pair were
+                    # the only entries historically; widening to common.h /
+                    # arg.h / chat.h / mtmd.h / llama.h surfaces drift in
+                    # the larger public + common surface chimera also pokes
+                    # (common_params fields, llama_tokenize signature, mtmd
+                    # helper protos, etc.) without any extra plumbing.
+                    "files": [
+                        "include/llama.h",
+                        "common/common.h",
+                        "common/arg.h",
+                        "common/chat.h",
+                        "tools/mtmd/mtmd.h",
+                        "tools/server/server-context.h",
+                        "tools/server/server-http.h",
+                    ],
+                    # Build-system path probes (non-headers chimera depends
+                    # on). See the build-system drift discussion at the end
+                    # of this function. Only llama.cpp has webui layout
+                    # drama today; SD's surface is small enough that the
+                    # header-diff covers it.
+                    "probes": [
+                        (
+                            "tools/server/server-http.cpp",
+                            "required",
+                            "vendored as src-aux + compiled into chimera",
+                        ),
+                        (
+                            "tools/ui/embed.cpp",
+                            "required",
+                            "b9318+ host asset-embed helper; chimera stages + drives it (replaces scripts/xxd.cmake)",
+                        ),
+                        (
+                            "scripts/ui-assets.cmake",
+                            "info",
+                            "b9318+ asset provisioning (npm/HF); chimera does not consume it",
+                        ),
+                        (
+                            "scripts/xxd.cmake",
+                            "info",
+                            "pre-b9318 asset baker; removed upstream, chimera no longer needs it",
+                        ),
+                        (
+                            "tools/server/public/index.html",
+                            "info",
+                            "pre-b9200 webui asset (oldest layout)",
+                        ),
+                        (
+                            "tools/ui/ui.h",
+                            "info",
+                            "b9200..b9317 static ui header (removed at b9318; chimera now generates it)",
+                        ),
+                        (
+                            "tools/ui/dist/index.html",
+                            "info",
+                            "operator-built prebuilt webui asset (absent unless `npm run build` was run in tools/ui/)",
+                        ),
+                    ],
+                }
+            )
         if not args.skip_sd:
-            comparisons.append({
-                "name":          "stable-diffusion.cpp",
-                "repo":          "leejet/stable-diffusion.cpp",
-                "ref":           normalize_ref(args.sd_version),
-                "ref_display":   args.sd_version,
-                "vendored_dir":  self.project.cwd / "thirdparty" / "stable-diffusion.cpp" / "include",
-                # SD's main C API header. Upstream puts it under `include/`
-                # (not at the repo root like the llama-server-internal
-                # headers); chimera flattens that on copy, so the vendored
-                # filename is just `stable-diffusion.h` while the upstream
-                # path is `include/stable-diffusion.h`.
-                "files":         ["include/stable-diffusion.h"],
-                "probes":        [],
-            })
+            comparisons.append(
+                {
+                    "name": "stable-diffusion.cpp",
+                    "repo": "leejet/stable-diffusion.cpp",
+                    "ref": normalize_ref(args.sd_version),
+                    "ref_display": args.sd_version,
+                    "vendored_dir": self.project.cwd
+                    / "thirdparty"
+                    / "stable-diffusion.cpp"
+                    / "include",
+                    # SD's main C API header. Upstream puts it under `include/`
+                    # (not at the repo root like the llama-server-internal
+                    # headers); chimera flattens that on copy, so the vendored
+                    # filename is just `stable-diffusion.h` while the upstream
+                    # path is `include/stable-diffusion.h`.
+                    "files": ["include/stable-diffusion.h"],
+                    "probes": [],
+                }
+            )
 
         # Cheap "interesting symbol" extractor: catches struct/class/enum
         # declarations, handler_t members (the upstream split that broke
@@ -1820,8 +1871,9 @@ class Application(ShellCmd, metaclass=MetaCommander):
         def upstream_path_exists(repo: str, ref: str, path: str) -> bool:
             url = f"https://raw.githubusercontent.com/{repo}/{ref}/{path}"
             try:
-                req = Request(url, method="HEAD",
-                              headers={"User-Agent": "chimera-bump-check"})
+                req = Request(
+                    url, method="HEAD", headers={"User-Agent": "chimera-bump-check"}
+                )
                 with urlopen(req, timeout=30) as resp:
                     return resp.status == 200
             except HTTPError:
@@ -1838,7 +1890,9 @@ class Application(ShellCmd, metaclass=MetaCommander):
         any_missing_required = False  # build-system-drift error across all
 
         for comp in comparisons:
-            print(f"========== {comp['name']} @ {comp['ref_display']} (= {comp['repo']}@{comp['ref']}) ==========")
+            print(
+                f"========== {comp['name']} @ {comp['ref_display']} (= {comp['repo']}@{comp['ref']}) =========="
+            )
             print()
 
             vendored_dir = comp["vendored_dir"]
@@ -1929,7 +1983,12 @@ class Application(ShellCmd, metaclass=MetaCommander):
                 continue
 
             print(f"=== {comp['name']}: build-system drift ===")
-            webui_layout: dict[str, bool] = {"old": False, "mid_header": False, "embed": False, "assets": False}
+            webui_layout: dict[str, bool] = {
+                "old": False,
+                "mid_header": False,
+                "embed": False,
+                "assets": False,
+            }
             comp_missing: list[str] = []
             for path, severity, desc in comp["probes"]:
                 exists = upstream_path_exists(comp["repo"], comp["ref"], path)
@@ -1949,19 +2008,33 @@ class Application(ShellCmd, metaclass=MetaCommander):
 
             print()
             if webui_layout["embed"]:
-                print("  webui layout: b9318+ (host tools/ui/embed.cpp generates ui.cpp/ui.h)")
+                print(
+                    "  webui layout: b9318+ (host tools/ui/embed.cpp generates ui.cpp/ui.h)"
+                )
                 if webui_layout["assets"]:
-                    print("  → CHIMERA_WEBUI_EMBED=ON works (operator-built assets present in tools/ui/dist/).")
+                    print(
+                        "  → CHIMERA_WEBUI_EMBED=ON works (operator-built assets present in tools/ui/dist/)."
+                    )
                 else:
                     print("  → CHIMERA_WEBUI_EMBED=ON needs assets first: run")
-                    print("    `npm install && npm run build` inside tools/ui/, then re-stage.")
-                    print("    CHIMERA_WEBUI_EMBED=OFF (default) is unaffected — chimera generates an empty stub.")
+                    print(
+                        "    `npm install && npm run build` inside tools/ui/, then re-stage."
+                    )
+                    print(
+                        "    CHIMERA_WEBUI_EMBED=OFF (default) is unaffected — chimera generates an empty stub."
+                    )
             elif webui_layout["mid_header"]:
-                print("  webui layout: b9200..b9317 (static tools/ui/ui.h, xxd-baked assets)")
-                print("  → chimera's b9318+ embed path does NOT match this ref. Pin b9318 or newer,")
+                print(
+                    "  webui layout: b9200..b9317 (static tools/ui/ui.h, xxd-baked assets)"
+                )
+                print(
+                    "  → chimera's b9318+ embed path does NOT match this ref. Pin b9318 or newer,"
+                )
                 print("    or restore the pre-b9318 xxd staging path before bumping.")
             elif webui_layout["old"]:
-                print("  webui layout: PRE-b9200 (prebuilt assets in tools/server/public/)")
+                print(
+                    "  webui layout: PRE-b9200 (prebuilt assets in tools/server/public/)"
+                )
                 print("  → chimera's b9318+ embed path does NOT match this ref.")
             else:
                 print(f"  webui layout: UNRECOGNIZED — unexpected for {comp['repo']}.")
@@ -1970,11 +2043,15 @@ class Application(ShellCmd, metaclass=MetaCommander):
 
             if comp_missing:
                 any_missing_required = True
-                print(f"BUILD-SYSTEM ERROR ({comp['name']}): {len(comp_missing)} required path(s) "
-                      f"missing on {comp['repo']}@{comp['ref']}:")
+                print(
+                    f"BUILD-SYSTEM ERROR ({comp['name']}): {len(comp_missing)} required path(s) "
+                    f"missing on {comp['repo']}@{comp['ref']}:"
+                )
                 for p in comp_missing:
                     print(f"  - {p}")
-                print("  manage.py will fail when staging this ref. Update _copy_headers before bumping.")
+                print(
+                    "  manage.py will fail when staging this ref. Update _copy_headers before bumping."
+                )
                 print()
 
         if any_missing_required:

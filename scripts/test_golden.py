@@ -198,8 +198,9 @@ def case_apply_template(port: int) -> Any:
 
 def case_embeddings(port: int) -> Any:
     # Backend-dependent floats; shape + dim + non-empty are what matter.
-    r = http_json("POST", port, "/v1/embeddings",
-                  {"model": "bge", "input": "fixed input"})
+    r = http_json(
+        "POST", port, "/v1/embeddings", {"model": "bge", "input": "fixed input"}
+    )
     return {
         "object": r["object"],
         "model_present": "model" in r,
@@ -257,15 +258,15 @@ def case_completions(port: int) -> Any:
 
 
 CASES: list[tuple[str, Callable[[int], Any]]] = [
-    ("health",            case_health),
-    ("models",            case_models),
-    ("props_shape",       case_props),
-    ("tokenize",          case_tokenize),
-    ("detokenize",        case_detokenize),
-    ("apply_template",    case_apply_template),
-    ("embeddings",        case_embeddings),
-    ("chat_completions",  case_chat_completions),
-    ("completions",       case_completions),
+    ("health", case_health),
+    ("models", case_models),
+    ("props_shape", case_props),
+    ("tokenize", case_tokenize),
+    ("detokenize", case_detokenize),
+    ("apply_template", case_apply_template),
+    ("embeddings", case_embeddings),
+    ("chat_completions", case_chat_completions),
+    ("completions", case_completions),
 ]
 
 
@@ -313,12 +314,18 @@ def main() -> int:
     # portable across dev machines and CI.
     proc = subprocess.Popen(
         [
-            str(chimera), "serve",
-            "-m", str(LLM_PATH),
-            "--enable-embeddings", str(EMBED_PATH),
-            "--gpu-layers", "0",
-            "--parallel", "1",
-            "--port", str(port),
+            str(chimera),
+            "serve",
+            "-m",
+            str(LLM_PATH),
+            "--enable-embeddings",
+            str(EMBED_PATH),
+            "--gpu-layers",
+            "0",
+            "--parallel",
+            "1",
+            "--port",
+            str(port),
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -329,17 +336,23 @@ def main() -> int:
         for name, fn in CASES:
             try:
                 got = fn(port)
-            except (urllib.error.URLError, urllib.error.HTTPError,
-                    KeyError, ValueError) as e:
+            except (
+                urllib.error.URLError,
+                urllib.error.HTTPError,
+                KeyError,
+                ValueError,
+            ) as e:
                 print(f"  FAIL   {name} (exception: {type(e).__name__}: {e})")
                 all_pass = False
                 continue
             all_pass = compare_or_write(name, got) and all_pass
         if not all_pass:
-            print("\ngolden: at least one route mismatched. Audit the diff;",
-                  "if the new shape is correct, re-run with",
-                  "`UPDATE_GOLDEN=1 make test-golden` to refresh.",
-                  file=sys.stderr)
+            print(
+                "\ngolden: at least one route mismatched. Audit the diff;",
+                "if the new shape is correct, re-run with",
+                "`UPDATE_GOLDEN=1 make test-golden` to refresh.",
+                file=sys.stderr,
+            )
             return 1
         print("\ngolden: all routes match.")
         return 0

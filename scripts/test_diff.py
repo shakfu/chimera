@@ -37,20 +37,28 @@ from typing import Optional
 # stops a 0.02s -> 0.04s test from spamming the regression list while
 # still catching genuine multi-second slowdowns.
 REGRESSION_ABS_S = 0.5
-REGRESSION_REL   = 0.20
+REGRESSION_REL = 0.20
 
 
 # ----------------------------------------------------------------------------
 # ANSI helpers — duplicated from test.py rather than imported so this script
 # remains standalone-runnable from anywhere.
 
+
 def _ansi(code: str, s: str) -> str:
     return f"\033[{code}m{s}\033[0m" if _color_enabled else s
 
 
-def _red(s: str) -> str:   return _ansi("31", s)
-def _green(s: str) -> str: return _ansi("32", s)
-def _gray(s: str) -> str:  return _ansi("90", s)
+def _red(s: str) -> str:
+    return _ansi("31", s)
+
+
+def _green(s: str) -> str:
+    return _ansi("32", s)
+
+
+def _gray(s: str) -> str:
+    return _ansi("90", s)
 
 
 _color_enabled = False
@@ -58,11 +66,12 @@ _color_enabled = False
 
 # ----------------------------------------------------------------------------
 
+
 @dataclass
 class Row:
-    name:        str
-    baseline_s:  Optional[float]
-    current_s:   Optional[float]
+    name: str
+    baseline_s: Optional[float]
+    current_s: Optional[float]
 
     @property
     def delta_s(self) -> Optional[float]:
@@ -79,12 +88,22 @@ class Row:
     @property
     def is_regression(self) -> bool:
         d, r = self.delta_s, self.delta_rel
-        return d is not None and r is not None and d > REGRESSION_ABS_S and r > REGRESSION_REL
+        return (
+            d is not None
+            and r is not None
+            and d > REGRESSION_ABS_S
+            and r > REGRESSION_REL
+        )
 
     @property
     def is_speedup(self) -> bool:
         d, r = self.delta_s, self.delta_rel
-        return d is not None and r is not None and d < -REGRESSION_ABS_S and r < -REGRESSION_REL
+        return (
+            d is not None
+            and r is not None
+            and d < -REGRESSION_ABS_S
+            and r < -REGRESSION_REL
+        )
 
 
 def load_run(path: Path) -> tuple[dict, dict]:
@@ -120,34 +139,52 @@ def fmt_delta(row: Row) -> str:
     text = f"{sign}{d:6.2f}s"
     if row.delta_rel is not None:
         text += f" ({sign}{row.delta_rel * 100:.0f}%)"
-    if row.is_regression: return _red(text)
-    if row.is_speedup:    return _green(text)
+    if row.is_regression:
+        return _red(text)
+    if row.is_speedup:
+        return _green(text)
     return text
 
 
 def main(argv: list) -> int:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[1],
-                                formatter_class=argparse.RawDescriptionHelpFormatter,
-                                epilog="\n".join(__doc__.splitlines()[3:]))
+    p = argparse.ArgumentParser(
+        description=__doc__.splitlines()[1],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="\n".join(__doc__.splitlines()[3:]),
+    )
     p.add_argument("baseline", type=Path, help="Path to the baseline timings JSON.")
-    p.add_argument("current",  type=Path, help="Path to the current timings JSON.")
-    p.add_argument("--by-rel",  action="store_true",
-                   help="Sort rows by relative delta (largest %% first) instead "
-                        "of absolute wall-clock delta.")
-    p.add_argument("--by-name", action="store_true",
-                   help="Sort rows alphabetically by test name (stable order "
-                        "for diff-comparing two `test_diff.py` runs).")
-    p.add_argument("--only", choices=("regressions", "speedups", "changed", "all"),
-                   default="all",
-                   help="Filter rows. 'changed' includes both regressions and "
-                        "speedups; 'all' includes neutral rows too (default).")
-    p.add_argument("--no-color", action="store_true",
-                   help="Disable ANSI color output. Forced off if stdout isn't a TTY.")
+    p.add_argument("current", type=Path, help="Path to the current timings JSON.")
+    p.add_argument(
+        "--by-rel",
+        action="store_true",
+        help="Sort rows by relative delta (largest %% first) instead "
+        "of absolute wall-clock delta.",
+    )
+    p.add_argument(
+        "--by-name",
+        action="store_true",
+        help="Sort rows alphabetically by test name (stable order "
+        "for diff-comparing two `test_diff.py` runs).",
+    )
+    p.add_argument(
+        "--only",
+        choices=("regressions", "speedups", "changed", "all"),
+        default="all",
+        help="Filter rows. 'changed' includes both regressions and "
+        "speedups; 'all' includes neutral rows too (default).",
+    )
+    p.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI color output. Forced off if stdout isn't a TTY.",
+    )
     args = p.parse_args(argv)
 
     global _color_enabled
     _color_enabled = (
-        not args.no_color and sys.stdout.isatty() and not __import__("os").environ.get("NO_COLOR")
+        not args.no_color
+        and sys.stdout.isatty()
+        and not __import__("os").environ.get("NO_COLOR")
     )
 
     try:
@@ -163,14 +200,17 @@ def main(argv: list) -> int:
     if args.by_name:
         rows.sort(key=lambda r: r.name)
     elif args.by_rel:
-        rows.sort(key=lambda r: (r.delta_rel if r.delta_rel is not None else 0),
-                  reverse=True)
+        rows.sort(
+            key=lambda r: (r.delta_rel if r.delta_rel is not None else 0), reverse=True
+        )
     else:
         # Default: largest absolute delta first. None deltas (only in one
         # side) sink to the bottom — those are reported in a separate
         # section below.
-        rows.sort(key=lambda r: (r.delta_s if r.delta_s is not None else float("-inf")),
-                  reverse=True)
+        rows.sort(
+            key=lambda r: (r.delta_s if r.delta_s is not None else float("-inf")),
+            reverse=True,
+        )
 
     # Filter
     if args.only == "regressions":
@@ -184,8 +224,13 @@ def main(argv: list) -> int:
 
     def meta_line(label: str, m: dict) -> str:
         parts = [label]
-        for key in ("chimera_version", "llamacpp_version", "whispercpp_version",
-                    "sdcpp_version", "generated_at"):
+        for key in (
+            "chimera_version",
+            "llamacpp_version",
+            "whispercpp_version",
+            "sdcpp_version",
+            "generated_at",
+        ):
             if m.get(key):
                 parts.append(f"{key.replace('_version', '')}={m[key]}")
         return "  " + " · ".join(parts)
@@ -195,15 +240,27 @@ def main(argv: list) -> int:
     print(meta_line("current ", curr_meta))
     print()
 
-    in_both = sum(1 for r in rows if r.baseline_s is not None and r.current_s is not None)
+    in_both = sum(
+        1 for r in rows if r.baseline_s is not None and r.current_s is not None
+    )
     n_regressions = sum(1 for r in rows if r.is_regression)
-    n_speedups    = sum(1 for r in rows if r.is_speedup)
-    only_base = [r.name for r in build_rows(base, curr) if r.baseline_s is not None and r.current_s is None]
-    only_curr = [r.name for r in build_rows(base, curr) if r.baseline_s is None and r.current_s is not None]
+    n_speedups = sum(1 for r in rows if r.is_speedup)
+    only_base = [
+        r.name
+        for r in build_rows(base, curr)
+        if r.baseline_s is not None and r.current_s is None
+    ]
+    only_curr = [
+        r.name
+        for r in build_rows(base, curr)
+        if r.baseline_s is None and r.current_s is not None
+    ]
 
-    print(f"  {in_both} test(s) in both runs · "
-          f"{_red(f'regressions={n_regressions}')} · "
-          f"{_green(f'speedups={n_speedups}')}")
+    print(
+        f"  {in_both} test(s) in both runs · "
+        f"{_red(f'regressions={n_regressions}')} · "
+        f"{_green(f'speedups={n_speedups}')}"
+    )
     if only_base:
         print(f"  only in baseline ({len(only_base)}): {', '.join(only_base)}")
     if only_curr:
@@ -221,8 +278,10 @@ def main(argv: list) -> int:
     print(header)
     print("  " + "-" * (len(header) - 2))
     for r in rows:
-        print(f"  {fmt_seconds(r.baseline_s):>9}  {fmt_seconds(r.current_s):>9}  "
-              f"{fmt_delta(r):>20}  {r.name:<{width}}")
+        print(
+            f"  {fmt_seconds(r.baseline_s):>9}  {fmt_seconds(r.current_s):>9}  "
+            f"{fmt_delta(r):>20}  {r.name:<{width}}"
+        )
 
     return 1 if n_regressions > 0 else 0
 

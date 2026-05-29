@@ -99,6 +99,29 @@ srv.run()                                # blocks until SIGINT
 probe (no model needed) plus an optional inference probe gated on
 `CHIMERA_SMOKE_MODEL`.
 
+## pytest suite
+
+`tests/` holds a pytest suite that supersedes the standalone smoke test for
+finer-grained coverage: `test_module.py` (no model needed -- import, class
+export, option round-trips, exception translation) and `test_inference.py`
+(model-gated end-to-end tests for tokenize, generate + streaming callback,
+embeddings, and the optional SD / Whisper modalities).
+
+```bash
+make test-bindings-pytest                 # build the module + run the suite
+make test-bindings-pytest PYTEST_ARGS="-k tokenizer -v"
+
+# or directly against a built module:
+PYTHONPATH=bindings/build pytest bindings/tests
+```
+
+Model-dependent tests SKIP (never FAIL) when their model is absent. Each
+resolves a path from a `CHIMERA_TEST_*` env override, else the repo's
+`models/` directory; `conftest.py` documents the variables
+(`CHIMERA_TEST_LLAMA_MODEL`, `CHIMERA_TEST_EMBED_MODEL`, `CHIMERA_TEST_SD_MODEL`,
+`CHIMERA_TEST_WHISPER_MODEL`, `CHIMERA_TEST_WHISPER_WAV`). `pytest` is the `dev`
+dependency group in `pyproject.toml` (`uv sync --group dev`).
+
 ## Known limits / TODO (this is a scaffold)
 
 - **Option coverage is complete** for `LlamaOptions`, `EmbedOptions`,

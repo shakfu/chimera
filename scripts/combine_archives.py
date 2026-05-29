@@ -274,11 +274,19 @@ def main() -> int:
     is_windows = platform.system() == "Windows"
     is_macos = platform.system() == "Darwin"
 
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--build-root", type=Path, default=DEFAULT_BUILD_ROOT)
-    ap.add_argument("--output-dir", type=Path, default=None,
-                    help="dir to write the two archives (default: build/)")
-    ap.add_argument("--platform", choices=("auto", "macos", "linux", "windows"), default="auto")
+    ap.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="dir to write the two archives (default: build/)",
+    )
+    ap.add_argument(
+        "--platform", choices=("auto", "macos", "linux", "windows"), default="auto"
+    )
     ap.add_argument("--no-whisper", action="store_true")
     ap.add_argument("--no-sd", action="store_true")
     ap.add_argument("--no-linenoise", action="store_true")
@@ -289,8 +297,9 @@ def main() -> int:
     ap.add_argument("--hip", action="store_true")
     ap.add_argument("--sycl", action="store_true")
     ap.add_argument("--opencl", action="store_true")
-    ap.add_argument("--list", action="store_true",
-                    help="print the resolved archive groups and exit")
+    ap.add_argument(
+        "--list", action="store_true", help="print the resolved archive groups and exit"
+    )
     args = ap.parse_args()
 
     target = args.platform
@@ -349,7 +358,9 @@ def main() -> int:
     if target == "macos":
         print(f"  {chimera_a} {tp_out} -Wl,-force_load,{ggml_out}")
     elif target == "linux":
-        print(f"  {chimera_a} {tp_out} -Wl,--whole-archive {ggml_out} -Wl,--no-whole-archive")
+        print(
+            f"  {chimera_a} {tp_out} -Wl,--whole-archive {ggml_out} -Wl,--no-whole-archive"
+        )
     else:
         print(f"  {chimera_a.name} {tp_out.name} /WHOLEARCHIVE:{ggml_out.name}")
     return 0
