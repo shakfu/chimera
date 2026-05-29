@@ -16,11 +16,11 @@ chimera targets CLI-first users who run more than one ggml-backed modality (text
 
 - You distribute a single static binary across machines and don't want a Python or Node runtime on the target host.
 
-- You build against multiple ggml backends (CPU, CUDA, ROCm, SYCL, Vulkan, Metal) from the same source tree, and want to verify the linked backend with `chimera info` rather than runtime probing.
-
 - You're building on top of the HTTP server and need text, audio, image, embeddings, RAG, and chat-history routes in one origin.
 
 - You're a C++ embedder who wants to drive llama.cpp / whisper.cpp / sd.cpp from your own process without reimplementing the load-and-run scaffolding. Linking `libchimera.a` (and optionally `#include "chimera.hpp"` for the persistent-handle OOP layer) gives you the same model lifecycle, sampler wiring, and HTTP-server code paths the `chimera` binary uses.
+
+- You build against multiple ggml backends (CPU, CUDA, ROCm, SYCL, Vulkan, Metal) from the same source tree, and want to verify the linked backend with `chimera info` rather than runtime probing.
 
 chimera is not a GUI application. The optional embedded web UI (`make build-with-webui`) bakes in upstream llama.cpp's chat UI for the `/` endpoint, but there is no model browser, launcher, or settings panel. Users who want a packaged desktop experience built specifically around chimera should look at [chimera-desktop](https://github.com/shakfu/chimera-desktop) (above); other point-and-click options that work against chimera's OpenAI-compatible api include Ollama, LM Studio, and Jan.
 
