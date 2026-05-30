@@ -6,14 +6,25 @@ It bundles [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](htt
 
 The same build also produces **`libchimera.a`**, a redistributable static library for embedding chimera's engines and HTTP server inside another C++ process. See [As a library](#as-a-library) and [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) for the embedder-facing API.
 
-The repository does not ship model weights. Put compatible GGUF, Whisper, or Stable Diffusion model files under `models/` or pass explicit paths with each command.
-
 ## Quick start
 
-```bash
-make build
-./build/chimera info
-./build/chimera gen -m models/model.gguf -p "Tell me one useful thing about local inference."
+Download dependencies and build the executable and library.
+
+```sh
+make build # or just make
+```
+
+Optionally, install the built executable
+
+```sh
+make install
+```
+
+Use it
+
+```sh
+chimera info
+chimera gen -m models/model.gguf -p "Tell me one useful thing about local inference."
 ```
 
 Use `--help` on any subcommand to see its options. For copy-pasteable examples, see [`docs/cheatsheet.md`](docs/cheatsheet.md).
@@ -132,7 +143,7 @@ make build-sycl      # Intel oneAPI / SYCL
 make build-vulkan    # Vulkan (cross-platform)
 ```
 
-The backend toolkit (CUDA Toolkit, ROCm, oneAPI, or Vulkan SDK) must already be installed on the host. Override architectures with `CMAKE_CUDA_ARCHITECTURES` (e.g. `89` for Ada/RTX 40xx) or `CMAKE_HIP_ARCHITECTURES` (e.g. `gfx1100` for RDNA3) to avoid the slow default fat-build. CUDA perf knobs (`GGML_CUDA_FORCE_MMQ`, `GGML_CUDA_FORCE_CUBLAS`, `GGML_CUDA_FA_ALL_QUANTS`) and the ROCm `GGML_HIP_ROCWMMA_FATTN` flash-attention switch are picked up from the env. Verify with `./build/chimera info`, which prints the linked backends.
+The backend toolkit (CUDA Toolkit, ROCm, oneAPI, or Vulkan SDK) must already be installed on the host. Override architectures with `CMAKE_CUDA_ARCHITECTURES` (e.g. `89` for Ada/RTX 40xx) or `CMAKE_HIP_ARCHITECTURES` (e.g. `gfx1100` for RDNA3) to avoid the slow default fat-build. CUDA perf knobs (`GGML_CUDA_FORCE_MMQ`, `GGML_CUDA_FORCE_CUBLAS`, `GGML_CUDA_FA_ALL_QUANTS`) and the ROCm `GGML_HIP_ROCWMMA_FATTN` flash-attention switch are picked up from the env. Verify with `chimera info`, which prints the linked backends.
 
 On Windows (or any host without GNU make), drive the same build directly from `manage.py` — it runs the deps build and the cmake configure + build in one step:
 
@@ -151,16 +162,16 @@ If you'd rather drive the two stages by hand (mixing backends, or staging a deps
 ## Usage
 
 ```bash
-./build/chimera gen -m models/Qwen3-4B-Q8_0.gguf -p "Why did..."
-./build/chimera chat -m models/Qwen3-4B-Q8_0.gguf
-./build/chimera tokenize -m models/Qwen3-4B-Q8_0.gguf -p "hello world" --pieces
-./build/chimera embed -m models/bge-small-en-v1.5-q8_0.gguf -p "a quick brown fox"
-./build/chimera whisper -m models/ggml-base.en.bin -i audio.wav
-./build/chimera sd -m models/sd-v1-5.gguf -p "a cat" -o out.png
-./build/chimera serve -m models/Qwen3-4B-Q8_0.gguf            # OpenAI-compatible HTTP server
-./build/chimera index create -n notes -e models/bge-small-en-v1.5-q8_0.gguf
-./build/chimera search -n notes -q "how does X work" -k 5
-./build/chimera db status
+chimera gen -m models/Qwen3-4B-Q8_0.gguf -p "Why did..."
+chimera chat -m models/Qwen3-4B-Q8_0.gguf
+chimera tokenize -m models/Qwen3-4B-Q8_0.gguf -p "hello world" --pieces
+chimera embed -m models/bge-small-en-v1.5-q8_0.gguf -p "a quick brown fox"
+chimera whisper -m models/ggml-base.en.bin -i audio.wav
+chimera sd -m models/sd-v1-5.gguf -p "a cat" -o out.png
+chimera serve -m models/Qwen3-4B-Q8_0.gguf            # OpenAI-compatible HTTP server
+chimera index create -n notes -e models/bge-small-en-v1.5-q8_0.gguf
+chimera search -n notes -q "how does X work" -k 5
+chimera db status
 ```
 
 `gen` and `tokenize`/`embed` accept `-f <file>` instead of `-p` (use `-f -` for stdin); `chat` accepts `--system-prompt-file <file>`.
@@ -223,7 +234,7 @@ The DB location defaults to `$CHIMERA_DB` then to the platform XDG path (`~/Libr
 `gen` accepts one or more `--image` paths when paired with a vision projector (`--mmproj`). The image is encoded by the projector, threaded into the prompt at the default media marker, and the resulting chunks are evaluated into the llama context via `mtmd_helper_eval_chunks`.
 
 ```bash
-./build/chimera gen \
+chimera gen \
   -m models/gemma-4-E4B-it-Q4_K_M.gguf \
   --mmproj models/mmproj-gemma-4-E4B-it-BF16.gguf \
   --image photo.png \
@@ -248,12 +259,12 @@ Notes:
 
 ```bash
 # img2img: re-render an input image guided by a new prompt
-./build/chimera sd -m models/sd-v1-5.gguf \
+chimera sd -m models/sd-v1-5.gguf \
   --init-image input.png --strength 0.6 \
   -p "the same scene but at night" -W 512 -H 512 -s 20 -o out.png
 
 # inpaint: only repaint regions where the mask is non-zero
-./build/chimera sd -m models/sd-v1-5.gguf \
+chimera sd -m models/sd-v1-5.gguf \
   --init-image input.png --mask-image mask.png \
   -p "a hat on the person's head" -W 512 -H 512 -s 20 -o out.png
 ```
