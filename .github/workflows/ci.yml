@@ -79,6 +79,36 @@ jobs:
       - name: smoke
         run: make smoke
 
+      # Combined-archive link contract: builds the three redistributable
+      # archives (libchimera{,_thirdparty,_ggml}.a) and links tests/external
+      # the way a non-CMake consumer does, exercising ggml backend
+      # registration + symbol resolution. This is the seam that `make smoke`
+      # (executable-only) does NOT cover -- the 0.2.3 libwebp/libwebm combine
+      # regression shipped silently for exactly this reason. No model files
+      # needed (the inference probe is gated behind CHIMERA_SMOKE_MODEL).
+      - name: combined-archive link contract
+        run: make test-external-smoke
+
+      # Schema migration ladder: v1 -> latest on a temp DB, asserting the
+      # upgrade advances user_version and preserves pre-existing rows. Guards
+      # every existing user's DB against a bad migration on version bumps.
+      - name: db migration ladder
+        run: make test-db-migrate
+
+      # Python bindings: provision the build toolchain via uv, build the
+      # nanobind module against the same three archives, and run the no-model
+      # pytest suite (module import, exported classes, option round-trips,
+      # live-handle semantics, bad-path error translation). Model-gated tests
+      # SKIP without model files. Non-Windows: the `make bindings` recipe uses
+      # the POSIX `bin/python` venv layout (uv on Windows emits Scripts/).
+      - name: install uv
+        if: runner.os != 'Windows'
+        uses: astral-sh/setup-uv@v6
+
+      - name: python bindings
+        if: runner.os != 'Windows'
+        run: make test-bindings-pytest
+
       - name: stage artifact
         run: |
           mkdir -p dist
