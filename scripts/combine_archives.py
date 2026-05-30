@@ -121,7 +121,20 @@ class Inventory:
         if self.with_metal:
             gg.append(g / "ggml-metal" / f"libggml-metal{e}")
         if self.with_blas:
-            gg.append(g / "ggml-blas" / f"libggml-blas{e}")
+            # ggml-blas is the BLAS backend, produced only when the ggml
+            # build enabled BLAS: Accelerate on macOS Metal builds, or
+            # OpenBLAS / MKL etc. via GGML_BLAS on Linux/Windows. A default
+            # CPU build (the norm on Linux/Windows) does NOT build it, and
+            # the resulting libggml-cpu carries no BLAS symbol references,
+            # so omitting it is correct. Include-if-present -- same
+            # reasoning as libwebp/libwebm above -- keeps combine decoupled
+            # from the build's BLAS config and platform. (Previously this
+            # was unconditionally required when with_blas, which is the
+            # macOS-dev default, so a default Linux/Windows build failed the
+            # combine step with "Missing archives: .../libggml-blas.a".)
+            _blas = g / "ggml-blas" / f"libggml-blas{e}"
+            if _blas.is_file():
+                gg.append(_blas)
         if self.with_cuda:
             gg.append(g / "ggml-cuda" / f"libggml-cuda{e}")
         if self.with_vulkan:
