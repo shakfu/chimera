@@ -1,0 +1,168 @@
+name: ci-gpu
+
+# Compile-only GPU backend coverage + downloadable test binaries.
+#
+# GitHub-hosted runners have no NVIDIA/AMD GPU, so this workflow validates
+# that the CUDA and Vulkan backends BUILD and LINK -- the per-backend
+# combine/link contract and the ggml-<backend> archive actually landing in
+# the binary -- NOT that kernels run. Runtime backend registration (cuInit
+# / vkCreateInstance finding a device) is out of scope here; that needs a
+# real GPU runner. After the link assertion it strips and uploads the
+# binary as an artifact so users can download and try a GPU build without
+# building it themselves (it still requires a matching GPU + driver to do
+# anything beyond CPU fallback at runtime).
+#
+# Manual trigger only for now (workflow_dispatch). Promote to a nightly
+# `schedule:` once it has proven stable across a few runs and the per-run
+# cost is understood. See TODO.md "CI matrix for Vulkan + CUDA on Linux
+# x86_64".
+#
+# Conventions adopted from the sibling cyllama build-gpu-wheels.yml:
+#   - GGML_NATIVE=OFF        : reproducible, not tuned to the runner CPU
+#   - CMAKE_CUDA_ARCHITECTURES=75 : single arch keeps the nvcc compile cheap
+#   - ccache                 : cache compiled objects across runs (the big
+#                              lever on nvcc cost). Forwarded into the deps
+#                              build by scripts/manage.py.
+#   - --no-sd-examples       : skip sd-cli/sd-server (chimera does not link
+#                              them) via the Makefile DEPS_EXTRA passthrough
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # --- CUDA -----------------------------------------------------------
+  # Runs inside the official CUDA devel image so nvcc + cudart + cublas
+  # are present without toolkit-install fragility. The image is minimal
+  # (no cmake/git/python), so we apt-install the host toolchain first.
+  # CUDA 12.4 matches the sibling cyllama's validated choice against the
+  # same upstream ggml/llama lineage. Note: a containerized job cannot run
+  # the host-path "free disk space" trick (those paths are outside the
+  # container mount namespace); ccache keeps the recompile cheap instead.
+  build-cuda:
+    name: build (cuda, linux x86_64)
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    env:
+      GGML_NATIVE: "0"
+      CMAKE_CUDA_ARCHITECTURES: "75"   # forwarded to deps by manage.py
+      CUDAARCHS: "75"                  # read by chimera's own configure
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CMAKE_CUDA_COMPILER_LAUNCHER: ccache
+    steps:
+      - name: install host toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake git ca-certificates python3 python3-venv zip
+
+      - uses: actions/checkout@v6
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-cuda
+          evict-old-files: 7d
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-cuda-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+
+      - name: build (cuda)
+        run: make build-cuda DEPS_EXTRA=--no-sd-examples
+
+      # Compile-time proof the CUDA backend archive linked into the
+      # binary. If GGML_CUDA silently dropped, the registration symbol is
+      # absent and this fails -- which is the whole point of a GPU-less
+      # build leg. MUST run before the strip step below (strip discards it).
+      - name: assert cuda backend linked
+        run: |
+          test -x build/chimera
+          if ! nm build/chimera | grep -q ggml_backend_cuda_reg; then
+            echo "FAIL: ggml_backend_cuda_reg not found in binary -- CUDA backend did not link" >&2
+            exit 1
+          fi
+          echo "OK: CUDA backend registration symbol present"
+
+      - name: strip + stage artifact
+        run: |
+          strip build/chimera
+          mkdir -p dist
+          cp build/chimera dist/chimera-linux-x86_64-cuda
+          (cd dist && sha256sum chimera-linux-x86_64-cuda > chimera-linux-x86_64-cuda.sha256)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-linux-x86_64-cuda
+          path: dist/chimera-linux-x86_64-cuda*
+          if-no-files-found: error
+
+  # --- Vulkan ---------------------------------------------------------
+  # No GPU needed to compile: ggml-vulkan needs the Vulkan headers
+  # (libvulkan-dev) and the glslc shader compiler at build time. Plain
+  # ubuntu-latest already has cmake/git/python. If the apt glslc proves
+  # too old / missing on a future runner image, the robust fallback is to
+  # build shaderc/glslc from source (see cyllama build-gpu-wheels.yml).
+  build-vulkan:
+    name: build (vulkan, linux x86_64)
+    runs-on: ubuntu-latest
+    env:
+      GGML_NATIVE: "0"
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h
+
+      - name: install vulkan build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev glslc glslang-tools zip
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-vulkan
+          evict-old-files: 7d
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-vulkan-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+
+      - name: build (vulkan)
+        run: make build-vulkan DEPS_EXTRA=--no-sd-examples
+
+      - name: assert vulkan backend linked
+        run: |
+          test -x build/chimera
+          if ! nm build/chimera | grep -q ggml_backend_vk_reg; then
+            echo "FAIL: ggml_backend_vk_reg not found in binary -- Vulkan backend did not link" >&2
+            exit 1
+          fi
+          echo "OK: Vulkan backend registration symbol present"
+
+      - name: strip + stage artifact
+        run: |
+          strip build/chimera
+          mkdir -p dist
+          cp build/chimera dist/chimera-linux-x86_64-vulkan
+          (cd dist && sha256sum chimera-linux-x86_64-vulkan > chimera-linux-x86_64-vulkan.sha256)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-linux-x86_64-vulkan
+          path: dist/chimera-linux-x86_64-vulkan*
+          if-no-files-found: error

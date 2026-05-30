@@ -3,7 +3,13 @@
 
 ## Validation
 
-- [ ] CI matrix for Vulkan + CUDA on Linux x86_64 (currently CPU only).
+- [~] CI matrix for Vulkan + CUDA on Linux x86_64. Compile-only legs
+      exist in `.github/workflows/ci-gpu.yml` (workflow_dispatch-only):
+      they build each backend and assert its ggml registration symbol
+      linked, but do not execute kernels. Remaining: (a) promote to a
+      nightly `schedule:` once stable, (b) real runtime coverage needs a
+      self-hosted / paid GPU runner (catches silent runtime backend
+      non-registration, which compile-only is blind to).
 - [ ] Validate non-Metal macOS backends (Vulkan, CPU-only).
 - [ ] Promote the Windows MSVC leg out of `experimental: true` once it
       passes consistently across a release or two.

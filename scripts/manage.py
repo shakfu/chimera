@@ -631,6 +631,23 @@ class LlamaCppBuilder(GgmlBuilder):
             options["GGML_NATIVE"] = "ON" if ggml_native == "1" else "OFF"
             self.log.info(f"  GGML_NATIVE={options['GGML_NATIVE']}")
 
+        # Forward compiler launchers (e.g. ccache) when set in the
+        # environment. CMake does not read these from the env on its own,
+        # so without this passthrough a CI ccache wrapper is silently
+        # ignored on the deps build -- where the heavy ggml-<backend>
+        # (notably nvcc) compile lives. Harmless when unset or when a
+        # language (CUDA/HIP) is not enabled: an unused cache var.
+        for launcher_var in (
+            "CMAKE_C_COMPILER_LAUNCHER",
+            "CMAKE_CXX_COMPILER_LAUNCHER",
+            "CMAKE_CUDA_COMPILER_LAUNCHER",
+            "CMAKE_HIP_COMPILER_LAUNCHER",
+        ):
+            launcher = os.environ.get(launcher_var)
+            if launcher:
+                options[launcher_var] = launcher
+                self.log.info(f"  {launcher_var}={launcher}")
+
         return options
 
     def copy_backend_libs(self) -> None:

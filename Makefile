@@ -16,8 +16,20 @@ BUILD_DIR ?= build
 PREFIX ?= /usr/local
 DESTDIR ?=
 
+# When a CMAKE_<LANG>_COMPILER_LAUNCHER is set in the environment (e.g. CI
+# exporting ccache), forward it to chimera's own configure as -D flags.
+# CMake does not read these from the environment, so without this the
+# launcher only applies to the deps build (manage.py forwards it there);
+# this covers chimera's own TUs too. Expands to nothing when unset, so a
+# normal `make build` is unchanged. (Env vars are visible as make vars.)
+CMAKE_LAUNCHER_FLAGS := \
+	$(if $(CMAKE_C_COMPILER_LAUNCHER),-DCMAKE_C_COMPILER_LAUNCHER=$(CMAKE_C_COMPILER_LAUNCHER)) \
+	$(if $(CMAKE_CXX_COMPILER_LAUNCHER),-DCMAKE_CXX_COMPILER_LAUNCHER=$(CMAKE_CXX_COMPILER_LAUNCHER)) \
+	$(if $(CMAKE_CUDA_COMPILER_LAUNCHER),-DCMAKE_CUDA_COMPILER_LAUNCHER=$(CMAKE_CUDA_COMPILER_LAUNCHER)) \
+	$(if $(CMAKE_HIP_COMPILER_LAUNCHER),-DCMAKE_HIP_COMPILER_LAUNCHER=$(CMAKE_HIP_COMPILER_LAUNCHER))
+
 build: deps
-	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release $(CMAKE_LAUNCHER_FLAGS)
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 remake: reset build test
@@ -36,7 +48,7 @@ remake: reset build test
 # one-time asset build. See docs/dev/webui.md sections 2.1 and 10 for the
 # full picture. Pass --no-webui at runtime to suppress per-invocation.
 build-with-webui: deps
-	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DCHIMERA_WEBUI_EMBED=ON
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DCHIMERA_WEBUI_EMBED=ON $(CMAKE_LAUNCHER_FLAGS)
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 # GPU-backend build targets. Each one builds the third-party deps with the
@@ -60,29 +72,34 @@ build-with-webui: deps
 # Verify the resulting binary picked up the backend with `./build/chimera info`.
 build-cuda:
 	@GGML_CUDA=1 $(MAKE) deps
-	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON $(CMAKE_LAUNCHER_FLAGS)
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 build-rocm:
 	@GGML_HIP=1 $(MAKE) deps
-	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON $(CMAKE_LAUNCHER_FLAGS)
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 build-sycl:
 	@GGML_SYCL=1 $(MAKE) deps
-	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_SYCL=ON
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_SYCL=ON $(CMAKE_LAUNCHER_FLAGS)
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 build-vulkan:
 	@GGML_VULKAN=1 $(MAKE) deps
-	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON
+	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON $(CMAKE_LAUNCHER_FLAGS)
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 rebuild:
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
+# DEPS_EXTRA: extra flags forwarded verbatim to manage.py's deps build.
+# Used by CI to inject e.g. --no-sd-examples (skips sd-cli/sd-server, which
+# chimera does not link) to cut GPU build time. Empty by default; command-
+# line overrides propagate into the nested `$(MAKE) deps` of build-cuda etc.
+DEPS_EXTRA ?=
 deps:
-	@SD_USE_VENDORED_GGML=0 $(PYTHON) scripts/manage.py build --all --deps-only --sd-shared-ggml
+	@SD_USE_VENDORED_GGML=0 $(PYTHON) scripts/manage.py build --all --deps-only --sd-shared-ggml $(DEPS_EXTRA)
 
 test:
 	@$(PYTHON) scripts/test.py
