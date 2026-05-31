@@ -28,6 +28,21 @@ name: ci-gpu
 
 on:
   workflow_dispatch:
+    inputs:
+      # Run a single leg instead of the full matrix while iterating on a new
+      # backend -- e.g. dispatch with `vulkan-windows` to avoid paying for the
+      # slow CUDA-Linux nvcc compile on every attempt. Each build job gates on
+      # this; `all` (the default) runs everything. The `collect` job is
+      # ungated and bundles whatever artifacts the selected legs produced.
+      legs:
+        description: 'Which build leg(s) to run'
+        type: choice
+        default: all
+        options:
+          - all
+          - cuda-linux
+          - vulkan-linux
+          - vulkan-windows
 
 defaults:
   run:
@@ -44,6 +59,7 @@ jobs:
   # container mount namespace); ccache keeps the recompile cheap instead.
   build-cuda:
     name: build (cuda, linux x86_64)
+    if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'cuda-linux' }}
     runs-on: ubuntu-latest
     container: nvidia/cuda:12.4.1-devel-ubuntu22.04
     env:
@@ -129,6 +145,7 @@ jobs:
   # than the portability gain warranted for a manual-only compile-check leg.
   build-vulkan:
     name: build (vulkan, linux x86_64)
+    if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'vulkan-linux' }}
     runs-on: ubuntu-latest
     env:
       GGML_NATIVE: "0"
@@ -217,6 +234,109 @@ jobs:
           path: dist/chimera-linux-x86_64-vulkan*
           if-no-files-found: error
 
+  # --- Vulkan (Windows) -----------------------------------------------
+  # Same compile-only contract as the Linux Vulkan leg, on MSVC. windows-latest
+  # ships VS2022 + git-bash + make + chocolatey, but NOT the Vulkan SDK, so we
+  # `choco install vulkan-sdk` to get the loader import lib (vulkan-1.lib),
+  # headers, glslc.exe (the shader compiler ggml-vulkan's vulkan-shaders-gen
+  # needs), and the SPIRV-Headers CMake config that b9318's
+  # find_package(SPIRV-Headers CONFIG REQUIRED) wants -- all bundled in the
+  # one SDK, so there is no jammy-style glslc gap here.
+  #
+  # Two MSVC-specific departures from the Linux leg: (1) the backend-linked
+  # assertion uses `dumpbin /DEPENDENTS` to confirm the exe IMPORTS
+  # vulkan-1.dll -- a release .exe has no embedded symbol table to `nm`, so we
+  # check the DLL import (the Windows analog of Linux DT_NEEDED); (2) no strip
+  # (not shipped on the Windows runner; the .exe carries no debug info, the PDB
+  # is a separate file we never copy).
+  build-vulkan-windows:
+    name: build (vulkan, windows x86_64)
+    if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'vulkan-windows' }}
+    runs-on: windows-latest
+    env:
+      GGML_NATIVE: "0"
+    steps:
+      - uses: actions/checkout@v6
+
+      # Puts cl.exe + dumpbin.exe on PATH and sets the MSVC env CMake's
+      # default "Visual Studio 17 2022" generator picks up.
+      - name: setup msvc
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: install vulkan sdk
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          # choco drops the SDK under C:\VulkanSDK\<version> and sets a
+          # MACHINE-level VULKAN_SDK env var -- which is NOT visible to later
+          # steps in this running job. Locate the newest install ourselves and
+          # publish VULKAN_SDK (so CMake's FindVulkan resolves the loader +
+          # glslc) plus CMAKE_PREFIX_PATH (so the deps configure's
+          # find_package(SPIRV-Headers CONFIG REQUIRED) resolves the SDK's
+          # bundled config) into the job env. glslc's dir also goes on PATH for
+          # vulkan-shaders-gen.
+          sdk=$(ls -d /c/VulkanSDK/* 2>/dev/null | sort -V | tail -n1)
+          if [ -z "$sdk" ]; then
+            echo "::error::Vulkan SDK not found under C:\\VulkanSDK after choco install" >&2
+            ls -la /c/VulkanSDK 2>&1 || true
+            exit 1
+          fi
+          sdk_win=$(cygpath -w "$sdk")
+          {
+            echo "VULKAN_SDK=$sdk_win"
+            echo "CMAKE_PREFIX_PATH=$sdk_win${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
+          } >> "$GITHUB_ENV"
+          echo "$sdk/Bin" >> "$GITHUB_PATH"
+          echo "located Vulkan SDK: $sdk_win"
+          "$sdk/Bin/glslc.exe" --version || true
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-vulkan-windows-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+
+      # Same Makefile target + DEPS_EXTRA passthrough as the Linux leg; make
+      # is available in the runner's git-bash (the CPU `ci.yml` Windows leg
+      # already drives `make build` this way). The target's
+      # `cmake --build --config Release` handles MSVC's multi-config layout,
+      # emitting build/Release/chimera.exe.
+      - name: build (vulkan)
+        run: make build-vulkan DEPS_EXTRA=--no-sd-examples
+
+      - name: assert vulkan backend linked
+        run: |
+          exe=build/Release/chimera.exe
+          if [ ! -f "$exe" ]; then
+            echo "FAIL: $exe not found" >&2
+            ls -la build build/Release 2>&1 || true
+            exit 1
+          fi
+          # `//DEPENDENTS` (not `/DEPENDENTS`): git-bash's msys path-mangling
+          # would otherwise rewrite a leading-slash arg into a Windows path.
+          # The doubled slash collapses back to `/DEPENDENTS` for dumpbin.
+          dumpbin //DEPENDENTS "$exe" > /tmp/deps.txt
+          cat /tmp/deps.txt
+          if ! grep -qi 'vulkan-1.dll' /tmp/deps.txt; then
+            echo "FAIL: vulkan-1.dll not among imports -- Vulkan backend did not link" >&2
+            exit 1
+          fi
+          echo "OK: vulkan-1.dll import present (Vulkan backend linked)"
+
+      - name: stage artifact
+        run: |
+          mkdir -p dist
+          cp build/Release/chimera.exe dist/chimera-windows-x86_64-vulkan.exe
+          (cd dist && \
+            (sha256sum chimera-windows-x86_64-vulkan.exe 2>/dev/null \
+              || shasum -a 256 chimera-windows-x86_64-vulkan.exe) \
+            > chimera-windows-x86_64-vulkan.exe.sha256)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-windows-x86_64-vulkan
+          path: dist/chimera-windows-x86_64-vulkan.exe*
+          if-no-files-found: error
+
   # --- Collect --------------------------------------------------------
   # Roll the CUDA + Vulkan artifacts (each a stripped binary + its .sha256)
   # into one downloadable bundle so both GPU builds come down in a single
@@ -229,7 +349,7 @@ jobs:
   # nothing to collect.
   collect:
     name: collect artifacts
-    needs: [build-cuda, build-vulkan]
+    needs: [build-cuda, build-vulkan, build-vulkan-windows]
     if: always()
     runs-on: ubuntu-latest
     steps:
