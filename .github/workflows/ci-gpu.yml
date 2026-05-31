@@ -456,16 +456,21 @@ jobs:
   # bound the (CUDA-like, compiled-once-per-engine) hipcc compile; gfx1030
   # (RDNA2) is arbitrary for a compile check -- change it to target other GPUs.
   #
-  # NOTE: the rocm/dev image tag is pinned but was not verifiable locally --
-  # bump it if the image pull fails or the ROCm version mismatches the vendored
-  # llama.cpp. Expect a CUDA-like cold build (ggml-hip compiled per engine);
-  # warm thirdparty cache amortizes reruns. Container builds cannot use the
-  # host-path free-disk trick, so watch for out-of-space on the large image.
+  # NOTE on the ROCm version: must be >= 6.3. ggml's vendors/hip.h does
+  # `typedef __hip_fp8_e4m3 __nv_fp8_e4m3;` whenever HIP_VERSION >= 6.2.0, but
+  # the OCP-format `__hip_fp8_e4m3` type wasn't actually added to <hip/hip_fp8.h>
+  # until ROCm 6.3 (6.2.x ships only the FNUZ variant), so a 6.2.x image fails
+  # to compile ggml-hip with "unknown type name '__hip_fp8_e4m3'". 6.4.4 is a
+  # verified Docker Hub tag with the type; the type is software-defined for all
+  # archs, so gfx1030 stays valid (matches upstream llama.cpp's ROCm CI, which
+  # builds gfx1030). Expect a CUDA-like cold build (ggml-hip compiled per
+  # engine); warm thirdparty cache amortizes reruns. Container builds cannot
+  # use the host-path free-disk trick, so watch for out-of-space.
   build-rocm:
     name: build (rocm, linux x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'rocm-linux' }}
     runs-on: ubuntu-latest
-    container: rocm/dev-ubuntu-22.04:6.2.4
+    container: rocm/dev-ubuntu-22.04:6.4.4
     env:
       GGML_NATIVE: "0"
       CMAKE_HIP_ARCHITECTURES: "gfx1030"   # forwarded to deps by manage.py
@@ -544,18 +549,20 @@ jobs:
   # GPU on hosted runners, so this asserts the SYCL backend LINKED, not that it
   # runs.
   #
-  # NOTE: the oneapi-basekit tag is verified to exist on Docker Hub (the tags
-  # carry a `-N` build suffix -- `2025.1.0-0-...`, not `2025.1.0-...`). A 2025
-  # oneAPI is chosen over 2024.x for a newer icpx matching the recent vendored
-  # llama.cpp (b9318); bump it if icpx/MKL still mismatch. The whole-binary
-  # icpx compile is the main risk: chimera's own glue must build under icpx
-  # (upstream llama.cpp's SYCL path already does). Same cold-build / disk
-  # caveats as the ROCm leg.
+  # NOTE on the oneAPI version: must be NEW -- ggml b9318's sycl_hw.cpp lists
+  # recent Intel GPU arch enums (intel_gpu_bmg_g31 / Battlemage, intel_gpu_wcl
+  # / Wildcat Lake) that only exist in recent SYCL headers; oneAPI 2025.1.0
+  # lacks them and fails with "no member named 'intel_gpu_wcl'". Pinned to the
+  # newest oneapi-basekit tag (2025.3.2-0-devel-ubuntu22.04, verified on Docker
+  # Hub; the tags carry a `-N` build suffix). If a future ggml bump references
+  # an even newer arch enum, bump this again. The whole-binary icpx compile is
+  # the other risk: chimera's own glue must build under icpx (upstream
+  # llama.cpp's SYCL path already does). Same cold-build / disk caveats as ROCm.
   build-sycl:
     name: build (sycl, linux x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'sycl-linux' }}
     runs-on: ubuntu-latest
-    container: intel/oneapi-basekit:2025.1.0-0-devel-ubuntu22.04
+    container: intel/oneapi-basekit:2025.3.2-0-devel-ubuntu22.04
     env:
       GGML_NATIVE: "0"
     steps:
