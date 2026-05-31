@@ -43,6 +43,7 @@ on:
           - cuda-linux
           - vulkan-linux
           - vulkan-windows
+          - cuda-windows
 
 defaults:
   run:
@@ -337,6 +338,102 @@ jobs:
           path: dist/chimera-windows-x86_64-vulkan.exe*
           if-no-files-found: error
 
+  # --- CUDA (Windows) -------------------------------------------------
+  # Same compile-only contract as the Linux CUDA leg, on MSVC + nvcc.
+  # windows-latest has no CUDA toolkit, so Jimver/cuda-toolkit installs nvcc +
+  # cudart + cublas (+ the Visual Studio integration the VS generator needs to
+  # compile .cu via MSBuild). CUDA 12.4.1 matches the Linux container's
+  # version, and CMAKE_CUDA_ARCHITECTURES=75 pins a single arch to bound the
+  # (slow) nvcc compile -- exactly the leg the `legs: cuda-windows` selector
+  # exists to run in isolation.
+  #
+  # Heads-up for the first run: (1) the Jimver action ref below is pinned but
+  # was not verifiable locally -- bump it if the install step 404s; (2) the
+  # CUDA toolkit + build is large and the Windows runner has limited disk, so
+  # watch for an out-of-space failure (no host-path free-disk trick exists on
+  # Windows); (3) no ccache here -- it barely helps MSVC+nvcc, so the cold
+  # build is the real cost and the thirdparty cache amortizes reruns.
+  build-cuda-windows:
+    name: build (cuda, windows x86_64)
+    if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'cuda-windows' }}
+    runs-on: windows-latest
+    env:
+      GGML_NATIVE: "0"
+      CMAKE_CUDA_ARCHITECTURES: "75"   # forwarded to deps by manage.py
+      CUDAARCHS: "75"                  # read by chimera's own configure
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: setup msvc
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Installs nvcc/cudart/cublas and sets CUDA_PATH + adds the toolkit bin
+      # to PATH, which CMake's enable_language(CUDA) / FindCUDAToolkit pick up.
+      # visual_studio_integration is required for the default "Visual Studio
+      # 17 2022" generator to compile .cu files; thrust + cuda_profiler_api
+      # cover headers ggml-cuda includes. NOTE: pin verified-by-bump only.
+      - name: install cuda toolkit
+        uses: Jimver/cuda-toolkit@v0.2.19
+        id: cuda-toolkit
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration", "cuda_profiler_api"]'
+
+      - name: cuda info
+        run: |
+          echo "CUDA_PATH=$CUDA_PATH"
+          nvcc --version
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-cuda-windows-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+
+      - name: build (cuda)
+        run: make build-cuda DEPS_EXTRA=--no-sd-examples
+
+      - name: assert cuda backend linked
+        run: |
+          exe=build/Release/chimera.exe
+          if [ ! -f "$exe" ]; then
+            echo "FAIL: $exe not found" >&2
+            ls -la build build/Release 2>&1 || true
+            exit 1
+          fi
+          # See the Vulkan-Windows leg: `//DEPENDENTS` dodges git-bash msys
+          # path-mangling. A release .exe has no symbol table to `nm`, so we
+          # assert the CUDA runtime imports instead -- if ggml-cuda linked, the
+          # exe imports the dynamic CUDA runtime + cuBLAS DLLs. Grep the
+          # major-versioned stem (cudart64_ / cublas64_) to stay robust to the
+          # exact minor in the DLL name.
+          dumpbin //DEPENDENTS "$exe" > /tmp/deps.txt
+          cat /tmp/deps.txt
+          missing=
+          grep -qi 'cudart64_' /tmp/deps.txt || missing="$missing cudart"
+          grep -qi 'cublas64_' /tmp/deps.txt || missing="$missing cublas"
+          if [ -n "$missing" ]; then
+            echo "FAIL: CUDA runtime import(s) absent:$missing -- CUDA backend did not link" >&2
+            exit 1
+          fi
+          echo "OK: cudart64_/cublas64_ imports present (CUDA backend linked)"
+
+      - name: stage artifact
+        run: |
+          mkdir -p dist
+          cp build/Release/chimera.exe dist/chimera-windows-x86_64-cuda.exe
+          (cd dist && \
+            (sha256sum chimera-windows-x86_64-cuda.exe 2>/dev/null \
+              || shasum -a 256 chimera-windows-x86_64-cuda.exe) \
+            > chimera-windows-x86_64-cuda.exe.sha256)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-windows-x86_64-cuda
+          path: dist/chimera-windows-x86_64-cuda.exe*
+          if-no-files-found: error
+
   # --- Collect --------------------------------------------------------
   # Roll the CUDA + Vulkan artifacts (each a stripped binary + its .sha256)
   # into one downloadable bundle so both GPU builds come down in a single
@@ -349,7 +446,7 @@ jobs:
   # nothing to collect.
   collect:
     name: collect artifacts
-    needs: [build-cuda, build-vulkan, build-vulkan-windows]
+    needs: [build-cuda, build-vulkan, build-vulkan-windows, build-cuda-windows]
     if: always()
     runs-on: ubuntu-latest
     steps:
