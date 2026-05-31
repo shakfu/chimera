@@ -13,6 +13,15 @@
 - [ ] Validate non-Metal macOS backends (Vulkan, CPU-only).
 - [ ] Promote the Windows MSVC leg out of `experimental: true` once it
       passes consistently across a release or two.
+- [ ] `combine_archives.py` Windows path support. The combined static-lib
+      output (`libchimera*.a`/`.lib`) has never built on Windows: the
+      inventory looks for `build/llama.cpp/build/src/libllama.lib` but MSVC
+      emits `.../src/Release/llama.lib` (no `lib` prefix, extra per-config
+      `Release/` subdir). collect() needs to insert the config subdir and
+      drop the `lib` prefix on the `windows` target. Until then the CI
+      `combined-archive link contract` + `python bindings` legs are gated
+      to Linux + macOS. Needs an MSVC box to validate (untestable from
+      a Unix host).
 
 ## Build / packaging
 

@@ -234,12 +234,49 @@ def combine_linux(inputs: list[Path], output: Path) -> None:
         for i, archive in enumerate(inputs):
             sub = tmp_path / f"{i:02d}_{archive.stem}"
             sub.mkdir()
-            # `ar x` extracts into cwd; run with cwd=sub for isolation.
-            run([ar, "x", str(archive.resolve())], cwd=sub)
-            objs = sorted(sub.glob("*.o"))
+            ar_path = str(archive.resolve())
+            # A single archive can contain MULTIPLE members with the same
+            # basename -- e.g. ggml-cpu compiles both `quants.c` and
+            # `arch/x86/quants.c` (and the two `repack.cpp`), each stored in
+            # libggml-cpu.a as a member named `quants.c.o` / `repack.cpp.o`.
+            # A plain `ar x` extracts them in sequence to the same filename,
+            # so the later silently overwrites the earlier and its symbols
+            # (quantize_row_*, ggml_backend_cpu_repack_*) vanish from the
+            # combined archive -- producing undefined-reference link failures
+            # downstream. This bites on Linux x86 / Windows but not macOS,
+            # which merges via `libtool -static` (combine_macos) and keeps
+            # all members. Extract each instance by index (`ar xN <k>`) and
+            # rename it before the next same-named member clobbers it.
+            members = subprocess.run(
+                [ar, "t", ar_path], capture_output=True, text=True, check=True
+            ).stdout.splitlines()
+            seen: dict[str, int] = {}
+            objs: list[Path] = []
+            for raw in members:
+                name = raw.strip()
+                # Only object members are bundled; skip the archive symbol
+                # table (`__.SYMDEF`, `/`, etc.) and any non-.o entries.
+                if not name.endswith(".o"):
+                    continue
+                k = seen.get(name, 0) + 1
+                seen[name] = k
+                # `ar xN <count>` extracts the count-th member of that name.
+                run([ar, "xN", str(k), ar_path, name], cwd=sub)
+                extracted = sub / name
+                if not extracted.is_file():
+                    print(
+                        f"warning: could not extract instance {k} of "
+                        f"{name} from {archive}",
+                        file=sys.stderr,
+                    )
+                    continue
+                uniq = sub / f"{k:03d}_{name}"
+                extracted.rename(uniq)
+                if uniq.suffix == ".o":
+                    objs.append(uniq)
             if not objs:
                 print(f"warning: no .o members in {archive}", file=sys.stderr)
-            all_objs.extend(objs)
+            all_objs.extend(sorted(objs))
         # Rename to globally-unique basenames so a single `ar crs` is
         # safe even if two archives shipped identically-named .o files.
         flattened: list[Path] = []
