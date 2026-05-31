@@ -347,12 +347,24 @@ jobs:
   # (slow) nvcc compile -- exactly the leg the `legs: cuda-windows` selector
   # exists to run in isolation.
   #
+  # Built with the Ninja generator (CMAKE_GENERATOR below), NOT the default
+  # "Visual Studio 17 2022" generator. The VS generator + CUDA's MSBuild
+  # integration serializes nvcc across ggml-cuda's hundreds of kernel
+  # template-instance .cu files; Ninja parallelizes them across the runner's
+  # cores, cutting the cold build from ~75 min toward ~20. Single-config Ninja
+  # ignores the `--config Release` cmake_build() passes and upstream
+  # ggml/llama only auto-default Release on NOT-MSVC, so scripts/manage.py's
+  # cmake_config injects CMAKE_BUILD_TYPE=Release when CMAKE_GENERATOR names a
+  # single-config generator -- without that, this leg would ship unoptimized.
+  #
   # Heads-up for the first run: (1) the Jimver action ref below is pinned but
   # was not verifiable locally -- bump it if the install step 404s; (2) the
   # CUDA toolkit + build is large and the Windows runner has limited disk, so
   # watch for an out-of-space failure (no host-path free-disk trick exists on
   # Windows); (3) no ccache here -- it barely helps MSVC+nvcc, so the cold
-  # build is the real cost and the thirdparty cache amortizes reruns.
+  # build is the real cost and the thirdparty cache amortizes reruns (when the
+  # cache survives -- Actions evicts after 7 days idle, so a rarely-run leg
+  # often pays the cold cost, which is why the Ninja speedup matters).
   build-cuda-windows:
     name: build (cuda, windows x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'cuda-windows' }}
@@ -361,6 +373,7 @@ jobs:
       GGML_NATIVE: "0"
       CMAKE_CUDA_ARCHITECTURES: "75"   # forwarded to deps by manage.py
       CUDAARCHS: "75"                  # read by chimera's own configure
+      CMAKE_GENERATOR: "Ninja"         # parallel nvcc; see header comment
     steps:
       - uses: actions/checkout@v6
 
@@ -380,10 +393,15 @@ jobs:
           method: 'network'
           sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration", "cuda_profiler_api"]'
 
-      - name: cuda info
+      - name: toolchain info
         run: |
           echo "CUDA_PATH=$CUDA_PATH"
           nvcc --version
+          # Ninja ships with the VS C++ CMake component and is on PATH after
+          # the msvc-dev-cmd step. If absent, CMAKE_GENERATOR=Ninja fails the
+          # configure with a clear "CMAKE_MAKE_PROGRAM not found" -- surface it
+          # here first.
+          ninja --version
 
       - name: cache thirdparty
         uses: actions/cache@v5
@@ -396,9 +414,13 @@ jobs:
 
       - name: assert cuda backend linked
         run: |
-          exe=build/Release/chimera.exe
+          # Ninja (single-config) emits build/chimera.exe; the VS generator
+          # would emit build/Release/chimera.exe. Probe both so this stays
+          # generator-agnostic.
+          exe=build/chimera.exe
+          [ -f "$exe" ] || exe=build/Release/chimera.exe
           if [ ! -f "$exe" ]; then
-            echo "FAIL: $exe not found" >&2
+            echo "FAIL: chimera.exe not found under build/ or build/Release/" >&2
             ls -la build build/Release 2>&1 || true
             exit 1
           fi
@@ -422,7 +444,9 @@ jobs:
       - name: stage artifact
         run: |
           mkdir -p dist
-          cp build/Release/chimera.exe dist/chimera-windows-x86_64-cuda.exe
+          exe=build/chimera.exe
+          [ -f "$exe" ] || exe=build/Release/chimera.exe
+          cp "$exe" dist/chimera-windows-x86_64-cuda.exe
           (cd dist && \
             (sha256sum chimera-windows-x86_64-cuda.exe 2>/dev/null \
               || shasum -a 256 chimera-windows-x86_64-cuda.exe) \
