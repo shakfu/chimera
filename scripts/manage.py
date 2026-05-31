@@ -561,6 +561,18 @@ class GgmlBuilder(Builder):
         if cuda_compiler:
             options["CMAKE_CUDA_COMPILER"] = cuda_compiler
             self.log.info(f"  CUDA compiler: {cuda_compiler}")
+        # b9318+ defaults GGML_CUDA_NCCL=ON. When NCCL dev headers are present
+        # (as in the nvidia/cuda devel image) this bakes nccl* calls into
+        # libggml-cuda.a and adds NCCL::NCCL only to ggml-cuda's own link.
+        # chimera does its own final link from the static archives and does
+        # not link libnccl, so those symbols (ncclCommInitAll, ...) end up
+        # undefined. chimera is single-process; the multi-GPU NCCL allreduce
+        # path is irrelevant. Disable it so there is no libnccl link/runtime
+        # dependency. Opt back in with GGML_CUDA_NCCL=1.
+        nccl = getenv("GGML_CUDA_NCCL", default=False)
+        options["GGML_CUDA_NCCL"] = "ON" if nccl else "OFF"
+        if nccl:
+            self.log.info("  GGML_CUDA_NCCL=ON (linking libnccl)")
         self._forward_env_flags(options, self.CUDA_TUNING_ENV_FLAGS)
 
     def _apply_hip_archs(self, options: dict[str, Any]) -> None:

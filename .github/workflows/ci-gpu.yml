@@ -105,7 +105,9 @@ jobs:
 
   # --- Vulkan ---------------------------------------------------------
   # No GPU needed to compile: ggml-vulkan needs the Vulkan headers
-  # (libvulkan-dev) and the glslc shader compiler at build time. Plain
+  # (libvulkan-dev), the glslc shader compiler, and -- since llama.cpp
+  # b9318 -- the SPIRV-Headers CMake package (find_package(SPIRV-Headers
+  # CONFIG REQUIRED)), provided by the apt `spirv-headers` package. Plain
   # ubuntu-latest already has cmake/git/python. If the apt glslc proves
   # too old / missing on a future runner image, the robust fallback is to
   # build shaderc/glslc from source (see cyllama build-gpu-wheels.yml).
@@ -128,7 +130,32 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libvulkan-dev glslc glslang-tools zip
+            libvulkan-dev glslc glslang-tools spirv-headers zip
+
+      # b9318 ggml-vulkan does find_package(SPIRV-Headers CONFIG REQUIRED).
+      # The apt `spirv-headers` package's CMake config lands under /usr/lib,
+      # /usr/lib/<arch> or /usr/share depending on the distro image. Locate
+      # SPIRV-HeadersConfig.cmake and pre-emptively hint the deps configure
+      # (which inherits this job's env): SPIRV-Headers_DIR points config-mode
+      # search straight at the dir, and the install prefix is added to
+      # CMAKE_PREFIX_PATH as a fallback. Both env vars are honored by CMake's
+      # find_package config-mode search and propagate into the manage.py
+      # cmake subprocess.
+      - name: hint SPIRV-Headers location
+        run: |
+          cfg=$(find /usr -name 'SPIRV-HeadersConfig.cmake' 2>/dev/null | head -n1)
+          if [ -z "$cfg" ]; then
+            echo "ERROR: SPIRV-HeadersConfig.cmake not found after apt install spirv-headers" >&2
+            find /usr -iname '*spirv-headers*' 2>/dev/null >&2 || true
+            exit 1
+          fi
+          dir=$(dirname "$cfg")
+          # Strip a trailing lib/cmake/<name> or share/cmake/<name> to recover
+          # the install prefix for CMAKE_PREFIX_PATH.
+          prefix=$(printf '%s\n' "$dir" | sed -E 's#/(lib|share)(/[^/]+)?/cmake/SPIRV-Headers/?$##')
+          echo "SPIRV-Headers_DIR=$dir" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=${prefix}${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}" >> "$GITHUB_ENV"
+          echo "hinted SPIRV-Headers_DIR=$dir (prefix=$prefix)"
 
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
