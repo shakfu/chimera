@@ -458,6 +458,30 @@ if(GGML_HIP)
     list(APPEND SYSTEM_LIBS hip::host roc::rocblas roc::hipblas)
 endif()
 
+if(GGML_SYCL)
+    # ggml-sycl/CMakeLists.txt links its SYCL runtime, oneMKL, Level Zero and
+    # oneDNN deps PRIVATE, so none of them propagate to chimera, which links
+    # the prebuilt libggml-sycl.a directly rather than via the ggml-sycl CMake
+    # target. Without them the final icpx link fails with undefined
+    # sycl::_V1::* (and MKL/oneDNN) references. Replicate that link interface:
+    # IntelSYCL::SYCL_CXX carries -fsycl, which pulls libsycl and performs the
+    # SYCL device linking; MKL::MKL_SYCL::BLAS is ggml-sycl's BLAS backend. The
+    # Level Zero loader and oneDNN are include-if-present, matching ggml-sycl's
+    # own conditional linkage (both were found in the deps build). External
+    # consumers of a SYCL-enabled libchimera*.a need this same set.
+    find_package(IntelSYCL REQUIRED)
+    find_package(MKL       REQUIRED)
+    list(APPEND SYSTEM_LIBS IntelSYCL::SYCL_CXX MKL::MKL_SYCL::BLAS)
+    find_library(CHIMERA_ZE_LOADER ze_loader)
+    if(CHIMERA_ZE_LOADER)
+        list(APPEND SYSTEM_LIBS ${CHIMERA_ZE_LOADER})
+    endif()
+    find_package(DNNL QUIET)
+    if(DNNL_FOUND)
+        list(APPEND SYSTEM_LIBS DNNL::dnnl)
+    endif()
+endif()
+
 # -----------------------------------------------------------------------------
 # Compile options
 # -----------------------------------------------------------------------------
