@@ -84,8 +84,17 @@ jobs:
       - name: assert cuda backend linked
         run: |
           test -x build/chimera
-          if ! nm build/chimera | grep -q ggml_backend_cuda_reg; then
+          # Materialize symbols to a file before grepping. `nm | grep -q`
+          # short-circuits on first match and closes the pipe; nm, still
+          # writing (the CUDA binary is large), takes SIGPIPE and exits
+          # non-zero, and `set -o pipefail` then reports the whole pipeline
+          # as failed even when the symbol WAS present -- a false negative.
+          # No pipe, no SIGPIPE.
+          nm build/chimera > /tmp/chimera.syms
+          if ! grep -q ggml_backend_cuda_reg /tmp/chimera.syms; then
             echo "FAIL: ggml_backend_cuda_reg not found in binary -- CUDA backend did not link" >&2
+            echo "--- ggml backend reg symbols present: ---" >&2
+            grep -E 'ggml_backend_[a-z]+_reg' /tmp/chimera.syms >&2 || echo "(none)" >&2
             exit 1
           fi
           echo "OK: CUDA backend registration symbol present"
@@ -175,8 +184,15 @@ jobs:
       - name: assert vulkan backend linked
         run: |
           test -x build/chimera
-          if ! nm build/chimera | grep -q ggml_backend_vk_reg; then
+          # See the CUDA leg: grep a materialized symbol dump, not a live
+          # `nm | grep -q` pipe, to avoid the SIGPIPE-under-pipefail false
+          # negative. This leg passed by luck before (smaller binary); make
+          # it robust too.
+          nm build/chimera > /tmp/chimera.syms
+          if ! grep -q ggml_backend_vk_reg /tmp/chimera.syms; then
             echo "FAIL: ggml_backend_vk_reg not found in binary -- Vulkan backend did not link" >&2
+            echo "--- ggml backend reg symbols present: ---" >&2
+            grep -E 'ggml_backend_[a-z]+_reg' /tmp/chimera.syms >&2 || echo "(none)" >&2
             exit 1
           fi
           echo "OK: Vulkan backend registration symbol present"
