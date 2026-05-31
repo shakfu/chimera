@@ -473,11 +473,18 @@ jobs:
       HIP_PATH: "/opt/rocm"
       CMAKE_PREFIX_PATH: "/opt/rocm"       # so CMake's HIP/rocBLAS find_package resolves
     steps:
+      # The rocm/dev image carries the HIP compiler + runtime but NOT the math
+      # libraries; ggml-hip's CMakeLists does find_package(hipblas)+
+      # find_package(rocblas), which fail without the -dev packages (their
+      # CMake configs live in hipblas-dev/rocblas-dev). The image has the AMD
+      # apt repo preconfigured, so install them here at the image's ROCm
+      # version. (build-essential pulls binutils for the readelf/strip below.)
       - name: install host toolchain
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential cmake git ca-certificates python3 python3-venv
+            build-essential cmake git ca-certificates python3 python3-venv \
+            hipblas-dev rocblas-dev
 
       - uses: actions/checkout@v6
 
@@ -537,16 +544,18 @@ jobs:
   # GPU on hosted runners, so this asserts the SYCL backend LINKED, not that it
   # runs.
   #
-  # NOTE: the oneapi-basekit tag is pinned but was not verifiable locally --
-  # bump it if the pull fails or icpx/MKL mismatch the vendored llama.cpp. The
-  # whole-binary icpx compile is the main risk: chimera's own glue must build
-  # under icpx (upstream llama.cpp's SYCL path already does). Same cold-build /
-  # disk caveats as the ROCm leg.
+  # NOTE: the oneapi-basekit tag is verified to exist on Docker Hub (the tags
+  # carry a `-N` build suffix -- `2025.1.0-0-...`, not `2025.1.0-...`). A 2025
+  # oneAPI is chosen over 2024.x for a newer icpx matching the recent vendored
+  # llama.cpp (b9318); bump it if icpx/MKL still mismatch. The whole-binary
+  # icpx compile is the main risk: chimera's own glue must build under icpx
+  # (upstream llama.cpp's SYCL path already does). Same cold-build / disk
+  # caveats as the ROCm leg.
   build-sycl:
     name: build (sycl, linux x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'sycl-linux' }}
     runs-on: ubuntu-latest
-    container: intel/oneapi-basekit:2024.2.1-devel-ubuntu22.04
+    container: intel/oneapi-basekit:2025.1.0-0-devel-ubuntu22.04
     env:
       GGML_NATIVE: "0"
     steps:
