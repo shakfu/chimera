@@ -142,3 +142,27 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}*
           if-no-files-found: error
+
+  # Roll the three per-OS artifacts (each a binary + its .sha256) into one
+  # downloadable bundle so a release-grabber can pull every platform in a
+  # single click instead of three. Uses the merge subaction, which stitches
+  # already-uploaded artifacts together over the API -- no rebuild, no
+  # re-download into the job. The per-OS artifacts are KEPT (delete-merged:
+  # false) so the single-platform download path still works.
+  #
+  # if: always() so a green leg still gets collected when another leg fails;
+  # the matrix is fail-fast: false, so partial bundles are the common case on
+  # a broken PR. The merge errors only if NO artifact matched the pattern
+  # (all legs failed) -- acceptable, there is nothing to collect then.
+  collect:
+    name: collect artifacts
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: merge per-OS artifacts into one bundle
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: chimera-all
+          pattern: chimera-*
+          delete-merged: false

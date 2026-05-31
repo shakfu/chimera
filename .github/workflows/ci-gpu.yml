@@ -209,3 +209,26 @@ jobs:
           name: chimera-linux-x86_64-vulkan
           path: dist/chimera-linux-x86_64-vulkan*
           if-no-files-found: error
+
+  # --- Collect --------------------------------------------------------
+  # Roll the CUDA + Vulkan artifacts (each a stripped binary + its .sha256)
+  # into one downloadable bundle so both GPU builds come down in a single
+  # click. Merge subaction: stitches the already-uploaded artifacts over the
+  # API, no rebuild. Per-backend artifacts are KEPT (delete-merged: false)
+  # so the single-backend download still works.
+  #
+  # if: always() so a green backend is still collected when the other fails.
+  # Merge errors only if NO artifact matched (both legs failed) -- fine,
+  # nothing to collect.
+  collect:
+    name: collect artifacts
+    needs: [build-cuda, build-vulkan]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: merge GPU artifacts into one bundle
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: chimera-gpu-all
+          pattern: chimera-*
+          delete-merged: false
