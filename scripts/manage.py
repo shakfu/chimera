@@ -322,26 +322,6 @@ class ShellCmd:
         if not src_dir.exists():
             raise FileNotFoundError(f"CMake source directory not found: {src_dir}")
         build_dir.mkdir(parents=True, exist_ok=True)
-
-        # Single-config generators (Ninja, *Makefiles) ignore the build-time
-        # `--config Release` that cmake_build() passes, so without an explicit
-        # CMAKE_BUILD_TYPE the deps compile unoptimized. Upstream ggml/llama
-        # auto-default to Release only when NOT MSVC, so a Ninja+MSVC build
-        # (the fast Windows GPU path) slips through that guard and would
-        # otherwise be a no-optimization build. Inject Release ONLY when a
-        # single-config generator was explicitly requested via CMAKE_GENERATOR;
-        # the default Unix Makefiles path on Linux/macOS sets no such env and
-        # is left untouched (its Release-default still comes from upstream).
-        _gen = os.environ.get("CMAKE_GENERATOR", "")
-        if (
-            _gen
-            and "Multi-Config" not in _gen
-            and not _gen.startswith("Visual Studio")
-            and _gen != "Xcode"
-            and "CMAKE_BUILD_TYPE" not in options
-        ):
-            options = {"CMAKE_BUILD_TYPE": "Release", **options}
-
         _cmds = [f"cmake -S {src_dir} -B {build_dir}"]
         if scripts:
             _cmds.append(" ".join(f"-C {path}" for path in scripts))
