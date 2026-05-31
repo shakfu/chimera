@@ -116,46 +116,37 @@ jobs:
   # No GPU needed to compile: ggml-vulkan needs the Vulkan headers
   # (libvulkan-dev), the glslc shader compiler, and -- since llama.cpp
   # b9318 -- the SPIRV-Headers CMake package (find_package(SPIRV-Headers
-  # CONFIG REQUIRED)), provided by the apt `spirv-headers` package. If the
-  # apt glslc / spirv-headers prove too old for the current shaders, the
-  # robust fallback is to build shaderc/glslc from source (see cyllama
-  # build-gpu-wheels.yml).
+  # CONFIG REQUIRED)), provided by the apt `spirv-headers` package. Plain
+  # ubuntu-latest already has cmake/git/python. If the apt glslc proves
+  # too old / missing on a future runner image, the robust fallback is to
+  # build shaderc/glslc from source (see cyllama build-gpu-wheels.yml).
   #
-  # Built inside an ubuntu:22.04 container (glibc 2.34), NOT on bare
-  # ubuntu-latest (now 24.04 / glibc 2.38). Building on the host silently
-  # raised the artifact's glibc floor to 2.38, which excludes Ubuntu 22.04,
-  # Debian 12, and RHEL 9. Pinning the build OS to 22.04 lands the same
-  # glibc-2.34 floor the CUDA leg already gets from its 22.04-based CUDA
-  # image, so both GPU binaries have matching runtime reach.
+  # NOTE: this builds on bare ubuntu-latest (currently 24.04 / glibc 2.38),
+  # so the artifact will not run on glibc < 2.38 hosts (Ubuntu 22.04, Debian
+  # 12, RHEL 9). An earlier attempt to build inside an ubuntu:22.04 container
+  # to land a glibc-2.34 floor matching the CUDA leg was reverted: jammy has
+  # no `glslc` apt package, and the from-source glslc build was more churn
+  # than the portability gain warranted for a manual-only compile-check leg.
   build-vulkan:
     name: build (vulkan, linux x86_64)
     runs-on: ubuntu-latest
-    container: ubuntu:22.04
     env:
       GGML_NATIVE: "0"
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
-      # The stock ubuntu:22.04 image is minimal -- no cmake/git/python, no
-      # binutils, no Vulkan toolchain, and no sudo (we run as root). Install
-      # the host toolchain AND the Vulkan build deps up front, before
-      # checkout (git + ca-certificates are needed for the git-based
-      # checkout). build-essential pulls binutils, which provides the
-      # strip/nm used by the assert + stage steps below.
-      - name: install build deps
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential cmake git ca-certificates python3 python3-venv \
-            libvulkan-dev glslc glslang-tools spirv-headers zip
-
       - uses: actions/checkout@v6
 
-      # No host-path "free disk space" trick here: paths like
-      # /usr/share/dotnet live on the runner VM, outside this container's
-      # mount namespace, so deleting them from inside the container is a
-      # no-op (same reason the CUDA leg omits it). ccache plus
-      # --no-sd-examples keep the build footprint small instead.
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h
+
+      - name: install vulkan build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev glslc glslang-tools spirv-headers zip
 
       # b9318 ggml-vulkan does find_package(SPIRV-Headers CONFIG REQUIRED).
       # The apt `spirv-headers` package's CMake config lands under /usr/lib,
