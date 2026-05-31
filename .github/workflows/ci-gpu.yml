@@ -44,6 +44,8 @@ on:
           - vulkan-linux
           - vulkan-windows
           - cuda-windows
+          - rocm-linux
+          - sycl-linux
 
 defaults:
   run:
@@ -444,6 +446,166 @@ jobs:
           path: dist/chimera-windows-x86_64-cuda.exe*
           if-no-files-found: error
 
+  # --- ROCm / HIP (Linux) ---------------------------------------------
+  # Compile-only AMD backend, mirroring the CUDA-Linux leg's container
+  # approach: run inside AMD's official rocm/dev image (hipcc + rocBLAS +
+  # hipBLAS pre-baked) and apt-install the host toolchain on top (the image
+  # carries ROCm but not cmake/git/python). No AMD GPU on hosted runners, so
+  # this asserts the HIP backend LINKED (the binary pulls in the ROCm runtime),
+  # not that kernels run. CMAKE_HIP_ARCHITECTURES pins a single gfx target to
+  # bound the (CUDA-like, compiled-once-per-engine) hipcc compile; gfx1030
+  # (RDNA2) is arbitrary for a compile check -- change it to target other GPUs.
+  #
+  # NOTE: the rocm/dev image tag is pinned but was not verifiable locally --
+  # bump it if the image pull fails or the ROCm version mismatches the vendored
+  # llama.cpp. Expect a CUDA-like cold build (ggml-hip compiled per engine);
+  # warm thirdparty cache amortizes reruns. Container builds cannot use the
+  # host-path free-disk trick, so watch for out-of-space on the large image.
+  build-rocm:
+    name: build (rocm, linux x86_64)
+    if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'rocm-linux' }}
+    runs-on: ubuntu-latest
+    container: rocm/dev-ubuntu-22.04:6.2.4
+    env:
+      GGML_NATIVE: "0"
+      CMAKE_HIP_ARCHITECTURES: "gfx1030"   # forwarded to deps by manage.py
+      ROCM_PATH: "/opt/rocm"
+      HIP_PATH: "/opt/rocm"
+      CMAKE_PREFIX_PATH: "/opt/rocm"       # so CMake's HIP/rocBLAS find_package resolves
+    steps:
+      - name: install host toolchain
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake git ca-certificates python3 python3-venv
+
+      - uses: actions/checkout@v6
+
+      - name: rocm info
+        run: |
+          echo "ROCM_PATH=$ROCM_PATH"
+          "$ROCM_PATH/bin/hipcc" --version || hipcc --version || true
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-rocm-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+
+      - name: build (rocm)
+        run: make build-rocm DEPS_EXTRA=--no-sd-examples
+
+      - name: assert hip backend linked
+        run: |
+          test -x build/chimera
+          # No AMD GPU to run on, so assert the binary actually pulled in the
+          # ROCm runtime: ggml-hip dynamically links libamdhip64 (+ rocBLAS).
+          # readelf reads DT_NEEDED -- the Linux analog of the Windows dumpbin
+          # /DEPENDENTS check. A NEEDED-lib check is more robust here than a
+          # symbol grep: the HIP reg symbol is shared with CUDA's hipified
+          # sources, so its name is not a reliable HIP discriminator.
+          readelf -d build/chimera > /tmp/dyn.txt
+          if ! grep -E 'NEEDED' /tmp/dyn.txt | grep -iqE 'amdhip64|rocblas|hipblas'; then
+            echo "FAIL: no ROCm runtime (libamdhip64/rocblas/hipblas) in NEEDED -- HIP backend did not link" >&2
+            grep NEEDED /tmp/dyn.txt >&2 || true
+            exit 1
+          fi
+          echo "OK: ROCm runtime libraries present in NEEDED (HIP backend linked)"
+
+      - name: strip + stage artifact
+        run: |
+          strip build/chimera
+          mkdir -p dist
+          cp build/chimera dist/chimera-linux-x86_64-rocm
+          (cd dist && sha256sum chimera-linux-x86_64-rocm > chimera-linux-x86_64-rocm.sha256)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-linux-x86_64-rocm
+          path: dist/chimera-linux-x86_64-rocm*
+          if-no-files-found: error
+
+  # --- SYCL (Linux) ---------------------------------------------------
+  # Compile-only Intel backend, container approach again: run inside Intel's
+  # official oneapi-basekit image (icpx + oneMKL pre-baked under
+  # /opt/intel/oneapi) and apt-install the host toolchain (binutils for
+  # nm/strip/readelf, plus cmake/git/python). Unlike HIP, ggml-sycl REQUIRES
+  # the Intel DPC++ compiler, so the build step sources setvars.sh and exports
+  # CC=icx/CXX=icpx -- which swaps the compiler for the ENTIRE build (deps AND
+  # chimera's own code), since CMake reads CC/CXX at first configure. setvars
+  # also sets MKLROOT/LD_LIBRARY_PATH that ggml-sycl + oneMKL need. No Intel
+  # GPU on hosted runners, so this asserts the SYCL backend LINKED, not that it
+  # runs.
+  #
+  # NOTE: the oneapi-basekit tag is pinned but was not verifiable locally --
+  # bump it if the pull fails or icpx/MKL mismatch the vendored llama.cpp. The
+  # whole-binary icpx compile is the main risk: chimera's own glue must build
+  # under icpx (upstream llama.cpp's SYCL path already does). Same cold-build /
+  # disk caveats as the ROCm leg.
+  build-sycl:
+    name: build (sycl, linux x86_64)
+    if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'sycl-linux' }}
+    runs-on: ubuntu-latest
+    container: intel/oneapi-basekit:2024.2.1-devel-ubuntu22.04
+    env:
+      GGML_NATIVE: "0"
+    steps:
+      - name: install host toolchain
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake git ca-certificates python3 python3-venv
+
+      - uses: actions/checkout@v6
+
+      - name: sycl info
+        run: |
+          source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+          icpx --version || true
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-sycl-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+
+      # Source the oneAPI env and force icx/icpx for BOTH the deps configure and
+      # chimera's own configure (CMake reads CC/CXX at first configure), in one
+      # step so the sourced env reaches `make`. --force re-sources even if a
+      # parent layer already did.
+      - name: build (sycl)
+        run: |
+          source /opt/intel/oneapi/setvars.sh --force
+          export CC=icx CXX=icpx
+          make build-sycl DEPS_EXTRA=--no-sd-examples
+
+      - name: assert sycl backend linked
+        run: |
+          test -x build/chimera
+          # No Intel GPU to run on; assert the DPC++ SYCL runtime linked in.
+          # ggml-sycl dynamically links libsycl. readelf reads DT_NEEDED --
+          # same robust NEEDED-lib check as the ROCm leg.
+          readelf -d build/chimera > /tmp/dyn.txt
+          if ! grep -E 'NEEDED' /tmp/dyn.txt | grep -iqE 'libsycl'; then
+            echo "FAIL: no SYCL runtime (libsycl) in NEEDED -- SYCL backend did not link" >&2
+            grep NEEDED /tmp/dyn.txt >&2 || true
+            exit 1
+          fi
+          echo "OK: libsycl present in NEEDED (SYCL backend linked)"
+
+      - name: strip + stage artifact
+        run: |
+          strip build/chimera
+          mkdir -p dist
+          cp build/chimera dist/chimera-linux-x86_64-sycl
+          (cd dist && sha256sum chimera-linux-x86_64-sycl > chimera-linux-x86_64-sycl.sha256)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-linux-x86_64-sycl
+          path: dist/chimera-linux-x86_64-sycl*
+          if-no-files-found: error
+
   # --- Collect --------------------------------------------------------
   # Roll the CUDA + Vulkan artifacts (each a stripped binary + its .sha256)
   # into one downloadable bundle so both GPU builds come down in a single
@@ -456,7 +618,7 @@ jobs:
   # nothing to collect.
   collect:
     name: collect artifacts
-    needs: [build-cuda, build-vulkan, build-vulkan-windows, build-cuda-windows]
+    needs: [build-cuda, build-vulkan, build-vulkan-windows, build-cuda-windows, build-rocm, build-sycl]
     if: always()
     runs-on: ubuntu-latest
     steps:
