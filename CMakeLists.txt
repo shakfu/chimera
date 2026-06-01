@@ -477,27 +477,30 @@ if(GGML_SYCL)
     # reinterprets the input as C++ ("treating 'c' input as 'c++' when -fsycl is
     # used") and the valid-C-but-not-C++ code (tentative-definition
     # redefinitions, implicit void* conversions, goto-past-init) fails to
-    # compile. -fsycl leaks toward compile via TWO independent paths, and BOTH
-    # guards here are required:
+    # compile.
     #
-    #   1. Target usage requirements. IntelSYCL::SYCL_CXX / MKL / DNNL::dnnl
-    #      carry -fsycl in their INTERFACE_COMPILE_OPTIONS; linking them PUBLIC
-    #      would propagate that onto every chimera_lib TU. $<LINK_ONLY:...>
-    #      keeps the link options/libraries while dropping the compile-side
-    #      usage requirements.
+    # ROOT CAUSE (proven from the SYCL CI verbose compile lines): the imported
+    # targets IntelSYCL::SYCL_CXX / MKL::MKL_SYCL::BLAS / DNNL::dnnl carry -fsycl
+    # (and -DMKL_ILP64, -std=gnu++17) in their INTERFACE_COMPILE_OPTIONS, and
+    # chimera_lib consumes those usage requirements when compiling ITS OWN
+    # sources -- including the C amalgamations via icx. $<LINK_ONLY:...> does NOT
+    # help: it controls only what propagates TRANSITIVELY to consumers of
+    # chimera_lib, not what chimera_lib itself picks up from its dependencies, so
+    # the earlier LINK_ONLY wrapping left -fsycl on every chimera TU regardless
+    # (verified: it still appeared on the icx sqlite-vec.c command). Neither do
+    # the directory-scope / flag-var restores below (kept only as cheap
+    # belt-and-suspenders for a hypothetical add_compile_options-style leak the
+    # CI SYCL-DIAG lines showed is currently absent).
     #
-    #   2. Directory-scope pollution. Intel's IntelSYCLConfig.cmake /
-    #      MKLConfig.cmake ALSO inject -fsycl into the calling directory's scope
-    #      as a side effect of find_package -- via the CMAKE_C_FLAGS /
-    #      CMAKE_CXX_FLAGS variables and/or the COMPILE_OPTIONS /
-    #      COMPILE_DEFINITIONS directory properties (add_compile_options-style,
-    #      which is NOT language-guarded, so it hits C too). All of these are
-    #      inherited by add_subdirectory(src/chimera) and land on every compile,
-    #      and none are reachable by $<LINK_ONLY:...> (that only strips a
-    #      target's usage requirements, not flags already in the directory
-    #      scope). We snapshot every directory-scope compile vector before the
-    #      find_package calls and restore it after (see below), so the
-    #      subdirectory compiles with clean flags.
+    # THE FIX: chimera needs ZERO compile-side usage requirements from these
+    # targets (it has no kernels and includes no MKL/SYCL headers itself -- only
+    # the prebuilt libggml-sycl.a does, and that was compiled in the deps step).
+    # So after find_package, strip each target's INTERFACE_COMPILE_OPTIONS,
+    # keeping its INTERFACE_LINK_LIBRARIES (libsycl, MKL .so set) intact, then
+    # link the targets normally (PUBLIC, NOT LINK_ONLY) so libsycl propagates to
+    # the chimera executable, and add -fsycl explicitly to the link line so the
+    # device-link still happens. Stripping COMPILE_OPTIONS leaves
+    # INTERFACE_INCLUDE_DIRECTORIES / INTERFACE_LINK_* untouched.
     set(_CHIMERA_SAVED_C_FLAGS    "${CMAKE_C_FLAGS}")
     set(_CHIMERA_SAVED_CXX_FLAGS  "${CMAKE_CXX_FLAGS}")
     set(_CHIMERA_SAVED_C_FLAGS_C  "${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}}")
@@ -506,42 +509,48 @@ if(GGML_SYCL)
     get_directory_property(_CHIMERA_SAVED_DIR_CDEFS  COMPILE_DEFINITIONS)
     find_package(IntelSYCL REQUIRED)
     find_package(MKL       REQUIRED)
-    list(APPEND SYSTEM_LIBS
-        $<LINK_ONLY:IntelSYCL::SYCL_CXX>
-        $<LINK_ONLY:MKL::MKL_SYCL::BLAS>)
     find_library(CHIMERA_ZE_LOADER ze_loader)
+    find_package(DNNL QUIET)
+    # Strip the compile-side usage requirements off every SYCL/MKL/oneDNN target
+    # we are about to link, so none of -fsycl/-DMKL_ILP64/-std=gnu++17 lands on a
+    # chimera TU. TEMPORARY SYCL-DIAG lines show before/after so the CI log
+    # confirms the strip; remove the messages once the leg is green.
+    foreach(_t IntelSYCL::SYCL_CXX MKL::MKL_SYCL::BLAS DNNL::dnnl)
+        if(TARGET ${_t})
+            get_target_property(_co ${_t} INTERFACE_COMPILE_OPTIONS)
+            message(STATUS "SYCL-DIAG ${_t} INTERFACE_COMPILE_OPTIONS(before)=[${_co}]")
+            set_target_properties(${_t} PROPERTIES INTERFACE_COMPILE_OPTIONS "")
+        endif()
+    endforeach()
+    unset(_t)
+    unset(_co)
+    list(APPEND SYSTEM_LIBS
+        IntelSYCL::SYCL_CXX
+        MKL::MKL_SYCL::BLAS)
     if(CHIMERA_ZE_LOADER)
         list(APPEND SYSTEM_LIBS ${CHIMERA_ZE_LOADER})
     endif()
-    find_package(DNNL QUIET)
     if(DNNL_FOUND)
-        # $<LINK_ONLY:...> for the same reason as IntelSYCL/MKL above: oneDNN's
-        # DPC++ build exports -fsycl in DNNL::dnnl's INTERFACE_COMPILE_OPTIONS,
-        # and that option is NOT language-guarded, so a plain link propagates
-        # -fsycl onto EVERY chimera_lib TU -- including the C amalgamations
-        # (sqlite3.c / sqlite-vec.c), which icx then reinterprets as C++ and
-        # fails to compile (tentative-definition redefinitions, implicit void*
-        # conversions, goto-past-init). LINK_ONLY keeps oneDNN on the link line
-        # while dropping the compile-side usage requirement.
-        list(APPEND SYSTEM_LIBS $<LINK_ONLY:DNNL::dnnl>)
+        list(APPEND SYSTEM_LIBS DNNL::dnnl)
     endif()
+    # Device-link flag on the link line only (target_link_libraries items that
+    # start with '-' are passed through as link flags, never compile flags).
+    # PUBLIC so the chimera executable's icpx link gets it too.
+    list(APPEND SYSTEM_LIBS -fsycl)
     # TEMPORARY diagnostic: dump every directory-scope compile vector AS LEFT BY
-    # the find_package calls above, so the CI configure log names exactly which
-    # one carries -fsycl (the restore below then clears it). Remove once the
-    # -fsycl-on-C-amalgamation leak is confirmed shut. Pairs with VERBOSE=1 in
-    # the ci-gpu.yml sycl leg.
+    # the find_package calls, so the CI configure log can confirm none of them
+    # carries -fsycl (we expect all clean -- the leak was the target props above,
+    # not directory scope). Remove with the SYCL-DIAG lines above. Pairs with
+    # VERBOSE=1 in the ci-gpu.yml sycl leg.
     get_directory_property(_CHIMERA_DIAG_DIR_COPTS COMPILE_OPTIONS)
     message(STATUS "SYCL-DIAG CMAKE_C_FLAGS=[${CMAKE_C_FLAGS}]")
     message(STATUS "SYCL-DIAG CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}=[${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}}]")
     message(STATUS "SYCL-DIAG CMAKE_CXX_FLAGS=[${CMAKE_CXX_FLAGS}]")
-    message(STATUS "SYCL-DIAG CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}=[${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}}]")
     message(STATUS "SYCL-DIAG dir COMPILE_OPTIONS=[${_CHIMERA_DIAG_DIR_COPTS}]")
     unset(_CHIMERA_DIAG_DIR_COPTS)
-    # Undo every directory-scope compile pollution the find_package calls above
-    # injected (flag vars + COMPILE_OPTIONS/COMPILE_DEFINITIONS properties). This
-    # runs before add_subdirectory(src/chimera), so chimera_lib's C and C++ TUs
-    # compile with clean flags; -fsycl reaches only the link step via the
-    # LINK_ONLY targets. See the snapshot + rationale above.
+    # Belt-and-suspenders: restore directory-scope compile vectors to their
+    # pre-find_package values, in case a future Intel config also pollutes them
+    # (the target-property strip above is the load-bearing fix).
     set(CMAKE_C_FLAGS   "${_CHIMERA_SAVED_C_FLAGS}")
     set(CMAKE_CXX_FLAGS "${_CHIMERA_SAVED_CXX_FLAGS}")
     set(CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}   "${_CHIMERA_SAVED_C_FLAGS_C}")
