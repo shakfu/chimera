@@ -261,6 +261,9 @@ jobs:
       - name: install vulkan sdk
         run: |
           choco install vulkan-sdk -y --no-progress
+          # SC2012: ls (not find) is deliberate -- we want version-sorted glob
+          # over the alphanumeric C:\VulkanSDK\<ver> dirs; no odd filenames here.
+          # shellcheck disable=SC2012
           sdk=$(ls -d /c/VulkanSDK/* 2>/dev/null | sort -V | tail -n1)
           if [ -z "$sdk" ]; then
             echo "::error::Vulkan SDK not found under C:\\VulkanSDK after choco install" >&2
