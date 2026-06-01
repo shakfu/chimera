@@ -10,6 +10,20 @@
       nightly `schedule:` once stable, (b) real runtime coverage needs a
       self-hosted / paid GPU runner (catches silent runtime backend
       non-registration, which compile-only is blind to).
+- [ ] GPU legs for ROCm-Windows and SYCL-Windows. These are the only
+      backend x platform combos left worth adding (ROCm and SYCL are
+      Linux-only today; OpenCL/CANN/MUSA target hardware no hosted runner
+      has -- see `docs/dev/release.md`). Each needs a leg in BOTH
+      `.github/workflows/ci-gpu.yml` (compile-only) and `release-gpu.yml`
+      (versioned `chimera-<v>-windows-x86_64-{rocm,sycl}.zip`). Hurdles:
+      (a) ROCm-Windows needs the AMD HIP SDK for Windows installed on the
+      runner (no container; an installer/choco step, not the Linux
+      rocm/dev image), assert via `dumpbin //DEPENDENTS` for `amdhip64.dll`;
+      (b) SYCL-Windows needs the Intel oneAPI toolkit on Windows with
+      CC=icx/CXX=icpx -- the `if(GGML_SYCL)` INTERFACE_COMPILE_OPTIONS
+      strip in `CMakeLists.txt` already applies, assert via `dumpbin` for
+      the sycl runtime DLL. Both are link-only (no AMD/Intel GPU on hosted
+      runners) and untestable from a Unix host, so expect first-run churn.
 - [ ] Validate non-Metal macOS backends (Vulkan, CPU-only).
 - [ ] Promote the Windows MSVC leg out of `experimental: true` once it
       passes consistently across a release or two.
