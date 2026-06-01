@@ -609,6 +609,12 @@ jobs:
         run: |
           source /opt/intel/oneapi/setvars.sh --force
           export CC=icx CXX=icpx
+          # If -fsycl ever leaks back onto the C amalgamation compiles (sqlite3.c
+          # / sqlite-vec.c / sha256.c break with "treating 'c' input as 'c++'"),
+          # prepend `VERBOSE=1` here so cmake --build echoes the full per-TU
+          # command lines, then grep the log for the icx invocation on *.c.o to
+          # see where -fsycl came from. See the GGML_SYCL flag-restore block in
+          # CMakeLists.txt.
           make build-sycl DEPS_EXTRA=--no-sd-examples
 
       - name: assert sycl backend linked

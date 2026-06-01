@@ -470,19 +470,31 @@ if(GGML_SYCL)
     # own conditional linkage (both were found in the deps build). External
     # consumers of a SYCL-enabled libchimera*.a need this same set.
     #
-    # $<LINK_ONLY:...> is load-bearing: IntelSYCL::SYCL_CXX carries -fsycl in
-    # its INTERFACE_COMPILE_OPTIONS, and chimera_lib links it PUBLIC, so a
-    # plain link would propagate -fsycl onto EVERY chimera TU -- including the
-    # sqlite3.c / sqlite-vec.c amalgamations. icx with -fsycl reinterprets a
-    # .c input as C++ ("treating 'c' input as 'c++' when -fsycl is used"), and
-    # those amalgamations are valid C but not valid C++ (tentative-definition
-    # redefinitions, implicit void* conversions, goto-past-init), so they fail
-    # to compile. It also forces the heavy C++ TUs (chimera_sd.cpp) through the
-    # full SYCL device-compilation path -- needlessly, since none of chimera's
-    # own TUs contain SYCL kernels -- which is pathologically slow under icpx.
-    # chimera needs -fsycl only at the LINK step (device-link + libsycl), never
-    # at compile, so LINK_ONLY keeps the link options/libraries while dropping
-    # the compile-side usage requirements. Same reasoning for the MKL target.
+    # -fsycl must reach the LINK step (device-link + libsycl) but NEVER a
+    # compile step: chimera contains no SYCL kernels, so on .cpp TUs -fsycl only
+    # routes them needlessly through the pathologically-slow icpx device path,
+    # and on the .c amalgamations (sqlite3.c / sqlite-vec.c / sha256.c) icx
+    # reinterprets the input as C++ ("treating 'c' input as 'c++' when -fsycl is
+    # used") and the valid-C-but-not-C++ code (tentative-definition
+    # redefinitions, implicit void* conversions, goto-past-init) fails to
+    # compile. -fsycl leaks toward compile via TWO independent paths, and BOTH
+    # guards below are required:
+    #
+    #   1. Target usage requirements. IntelSYCL::SYCL_CXX / MKL / DNNL::dnnl
+    #      carry -fsycl in their INTERFACE_COMPILE_OPTIONS; linking them PUBLIC
+    #      would propagate that onto every chimera_lib TU. $<LINK_ONLY:...>
+    #      keeps the link options/libraries while dropping the compile-side
+    #      usage requirements.
+    #
+    #   2. Global flag pollution. Intel's IntelSYCLConfig.cmake / MKLConfig.cmake
+    #      ALSO append -fsycl to the directory-scope CMAKE_C_FLAGS /
+    #      CMAKE_CXX_FLAGS as a side effect of find_package -- flags already
+    #      baked into CMAKE_*_FLAGS are beyond LINK_ONLY's reach, and they flow
+    #      into add_subdirectory(src/chimera) onto every compile. We snapshot
+    #      those vars before the find_package calls and restore them after (see
+    #      below), so the subdirectory compiles with clean flags.
+    set(_CHIMERA_SAVED_C_FLAGS   "${CMAKE_C_FLAGS}")
+    set(_CHIMERA_SAVED_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
     find_package(IntelSYCL REQUIRED)
     find_package(MKL       REQUIRED)
     list(APPEND SYSTEM_LIBS
@@ -504,6 +516,15 @@ if(GGML_SYCL)
         # while dropping the compile-side usage requirement.
         list(APPEND SYSTEM_LIBS $<LINK_ONLY:DNNL::dnnl>)
     endif()
+    # Undo the -fsycl (and any other) compile-flag pollution the three
+    # find_package calls above appended to the directory-scope flag vars. This
+    # runs before add_subdirectory(src/chimera), so chimera_lib's C and C++ TUs
+    # compile with clean flags; -fsycl reaches only the link step via the
+    # LINK_ONLY targets. See the snapshot + rationale above.
+    set(CMAKE_C_FLAGS   "${_CHIMERA_SAVED_C_FLAGS}")
+    set(CMAKE_CXX_FLAGS "${_CHIMERA_SAVED_CXX_FLAGS}")
+    unset(_CHIMERA_SAVED_C_FLAGS)
+    unset(_CHIMERA_SAVED_CXX_FLAGS)
 endif()
 
 # -----------------------------------------------------------------------------
