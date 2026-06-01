@@ -1,0 +1,578 @@
+name: release-gpu
+
+# GPU sibling of release.yml.
+#
+# release.yml ships the portable CPU/Metal binaries (macOS-arm64, Linux-x86_64
+# CPU, Windows-x86_64 CPU). This workflow ships the GPU-backend binaries
+# (CUDA / Vulkan / ROCm / SYCL) for the same tag, and ATTACHES them to the
+# same GitHub release. It fires on the same tag patterns, so pushing a release
+# tag triggers both workflows; release.yml owns the release body / CHANGELOG
+# notes and this one only uploads its GPU assets (so the two don't race on the
+# body text).
+#
+# Each build leg is the release-grade twin of the matching leg in ci-gpu.yml:
+# same container / toolchain / SDK setup, same "assert the backend actually
+# linked" gate (we refuse to ship a binary where the GGML_<backend> archive
+# silently dropped), but checked out at the release tag and packaged as a
+# versioned archive (`chimera-<version>-<target>.<ext>`) instead of a bare
+# stripped binary. The archive's inner binary is plain `chimera` /
+# `chimera.exe`, matching what release.yml produces.
+#
+# As in ci-gpu.yml, the hosted runners have no GPU, so these are LINK-checked,
+# not run-checked. Two policy caveats worth knowing before you cut a release:
+#
+#   - GPU arch breadth. CMAKE_CUDA_ARCHITECTURES / CMAKE_HIP_ARCHITECTURES pin
+#     a SINGLE arch (75 / gfx1030), inherited from ci-gpu.yml to bound the
+#     (very slow) nvcc/hipcc compile. A shipped binary built for one arch is
+#     narrower than users may expect. Widen these envs per leg if a release
+#     should cover more GPUs -- at a real (multiplicative) compile-time cost.
+#   - Strict publish. The publish job needs EVERY leg (incl. the ~75-min cold
+#     Windows-CUDA leg) and fail_on_unmatched_files is true, mirroring
+#     release.yml's "no partial releases" stance: one failed leg ships no GPU
+#     assets at all. To allow a partial GPU release instead, drop the flaky
+#     leg from publish.needs, set if: always() on publish, and flip
+#     fail_on_unmatched_files to false.
+
+on:
+  push:
+    tags:
+      # Bare semver (e.g. `0.1.2`) is our convention; the `v`-prefixed form is
+      # also accepted. Identical to release.yml so both fire on one tag push.
+      - '[0-9]+.[0-9]+.[0-9]+*'
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. 0.1.2 or v0.1.2). Must already exist.'
+        required: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # --- Preflight ------------------------------------------------------
+  # Verify the tag exists on origin before any (expensive) GPU build runs.
+  # Same guard release.yml inlines per-leg, hoisted into one job here so the
+  # six build legs can simply `needs: preflight`. Without it, a mistyped
+  # workflow_dispatch tag would burn a 75-min Windows-CUDA build before the
+  # checkout failed with an opaque git error.
+  preflight:
+    name: verify tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: verify tag exists on origin
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="${TAG#refs/tags/}"   # tolerate either bare name or refspec
+          REMOTE="${{ github.server_url }}/${{ github.repository }}"
+          echo "Verifying tag '$TAG' on $REMOTE..."
+          if git ls-remote --tags --exit-code "$REMOTE" "refs/tags/$TAG" >/dev/null 2>&1; then
+            SHA=$(git ls-remote --tags "$REMOTE" "refs/tags/$TAG" | awk '{print $1}')
+            echo "Resolved: $TAG -> $SHA"
+          else
+            echo "::error::tag '$TAG' does not exist on origin."
+            echo "::error::Push it first:  git tag $TAG && git push origin $TAG"
+            echo "Available tags on $REMOTE:"
+            git ls-remote --tags "$REMOTE" 2>/dev/null \
+              | awk -F'refs/tags/' '{print "  " $2}' \
+              | sort -V \
+              | tail -20
+            exit 1
+          fi
+
+  # --- CUDA (Linux) ---------------------------------------------------
+  # See ci-gpu.yml build-cuda for the container/toolchain rationale. Release
+  # twin: checkout at the tag, assert the CUDA backend linked, then package a
+  # versioned .tar.gz.
+  build-cuda:
+    name: build (cuda, linux x86_64)
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    env:
+      GGML_NATIVE: "0"
+      CMAKE_CUDA_ARCHITECTURES: "75"   # forwarded to deps by manage.py
+      CUDAARCHS: "75"                  # read by chimera's own configure
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CMAKE_CUDA_COMPILER_LAUNCHER: ccache
+    steps:
+      - name: install host toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake git ca-certificates python3 python3-venv
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-cuda
+          evict-old-files: 7d
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-cuda-${{ hashFiles('scripts/manage.py') }}
+
+      - name: build (cuda)
+        run: make build-cuda DEPS_EXTRA=--no-sd-examples
+
+      # MUST run before staging (strip discards the symbol table). See
+      # ci-gpu.yml for the materialize-then-grep (no SIGPIPE) rationale.
+      - name: assert cuda backend linked
+        run: |
+          test -x build/chimera
+          nm build/chimera > /tmp/chimera.syms
+          if ! grep -q ggml_backend_cuda_reg /tmp/chimera.syms; then
+            echo "FAIL: ggml_backend_cuda_reg not found in binary -- CUDA backend did not link" >&2
+            grep -E 'ggml_backend_[a-z]+_reg' /tmp/chimera.syms >&2 || echo "(none)" >&2
+            exit 1
+          fi
+          echo "OK: CUDA backend registration symbol present"
+
+      - name: stage artifact
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          STEM="chimera-${VERSION}-linux-x86_64-cuda"
+          mkdir -p dist stage
+          cp build/chimera stage/chimera
+          strip stage/chimera
+          tar -czf "dist/${STEM}.tar.gz" -C stage chimera
+          echo "archive: dist/${STEM}.tar.gz ($(wc -c < "dist/${STEM}.tar.gz") bytes)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-linux-x86_64-cuda
+          path: dist/chimera-*-linux-x86_64-cuda.tar.gz
+          if-no-files-found: error
+
+  # --- Vulkan (Linux) -------------------------------------------------
+  # See ci-gpu.yml build-vulkan for the SPIRV-Headers / glslc apt notes and the
+  # glibc-floor caveat (built on bare ubuntu-latest).
+  build-vulkan:
+    name: build (vulkan, linux x86_64)
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GGML_NATIVE: "0"
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h
+
+      - name: install vulkan build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev glslc glslang-tools spirv-headers
+
+      - name: hint SPIRV-Headers location
+        run: |
+          cfg=$(find /usr -name 'SPIRV-HeadersConfig.cmake' 2>/dev/null | head -n1)
+          if [ -z "$cfg" ]; then
+            echo "ERROR: SPIRV-HeadersConfig.cmake not found after apt install spirv-headers" >&2
+            find /usr -iname '*spirv-headers*' 2>/dev/null >&2 || true
+            exit 1
+          fi
+          dir=$(dirname "$cfg")
+          prefix=$(printf '%s\n' "$dir" | sed -E 's#/(lib|share)(/[^/]+)?/cmake/SPIRV-Headers/?$##')
+          echo "SPIRV-Headers_DIR=$dir" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=${prefix}${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}" >> "$GITHUB_ENV"
+          echo "hinted SPIRV-Headers_DIR=$dir (prefix=$prefix)"
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-vulkan
+          evict-old-files: 7d
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-vulkan-${{ hashFiles('scripts/manage.py') }}
+
+      - name: build (vulkan)
+        run: make build-vulkan DEPS_EXTRA=--no-sd-examples
+
+      - name: assert vulkan backend linked
+        run: |
+          test -x build/chimera
+          nm build/chimera > /tmp/chimera.syms
+          if ! grep -q ggml_backend_vk_reg /tmp/chimera.syms; then
+            echo "FAIL: ggml_backend_vk_reg not found in binary -- Vulkan backend did not link" >&2
+            grep -E 'ggml_backend_[a-z]+_reg' /tmp/chimera.syms >&2 || echo "(none)" >&2
+            exit 1
+          fi
+          echo "OK: Vulkan backend registration symbol present"
+
+      - name: stage artifact
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          STEM="chimera-${VERSION}-linux-x86_64-vulkan"
+          mkdir -p dist stage
+          cp build/chimera stage/chimera
+          strip stage/chimera
+          tar -czf "dist/${STEM}.tar.gz" -C stage chimera
+          echo "archive: dist/${STEM}.tar.gz ($(wc -c < "dist/${STEM}.tar.gz") bytes)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-linux-x86_64-vulkan
+          path: dist/chimera-*-linux-x86_64-vulkan.tar.gz
+          if-no-files-found: error
+
+  # --- Vulkan (Windows) -----------------------------------------------
+  # See ci-gpu.yml build-vulkan-windows for the Vulkan SDK / dumpbin notes. No
+  # strip on Windows (not shipped; the .exe carries no debug info). Packaged as
+  # .zip via 7z, matching release.yml's Windows convention.
+  build-vulkan-windows:
+    name: build (vulkan, windows x86_64)
+    needs: preflight
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      GGML_NATIVE: "0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: setup msvc
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: install vulkan sdk
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          sdk=$(ls -d /c/VulkanSDK/* 2>/dev/null | sort -V | tail -n1)
+          if [ -z "$sdk" ]; then
+            echo "::error::Vulkan SDK not found under C:\\VulkanSDK after choco install" >&2
+            ls -la /c/VulkanSDK 2>&1 || true
+            exit 1
+          fi
+          sdk_win=$(cygpath -w "$sdk")
+          {
+            echo "VULKAN_SDK=$sdk_win"
+            echo "CMAKE_PREFIX_PATH=$sdk_win${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
+          } >> "$GITHUB_ENV"
+          echo "$sdk/Bin" >> "$GITHUB_PATH"
+          echo "located Vulkan SDK: $sdk_win"
+          "$sdk/Bin/glslc.exe" --version || true
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-vulkan-windows-${{ hashFiles('scripts/manage.py') }}
+
+      - name: build (vulkan)
+        run: make build-vulkan DEPS_EXTRA=--no-sd-examples
+
+      - name: assert vulkan backend linked
+        run: |
+          exe=build/Release/chimera.exe
+          if [ ! -f "$exe" ]; then
+            echo "FAIL: $exe not found" >&2
+            ls -la build build/Release 2>&1 || true
+            exit 1
+          fi
+          # `//DEPENDENTS` dodges git-bash msys path-mangling (see ci-gpu.yml).
+          dumpbin //DEPENDENTS "$exe" > /tmp/deps.txt
+          cat /tmp/deps.txt
+          if ! grep -qi 'vulkan-1.dll' /tmp/deps.txt; then
+            echo "FAIL: vulkan-1.dll not among imports -- Vulkan backend did not link" >&2
+            exit 1
+          fi
+          echo "OK: vulkan-1.dll import present (Vulkan backend linked)"
+
+      - name: stage artifact
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          STEM="chimera-${VERSION}-windows-x86_64-vulkan"
+          mkdir -p dist stage
+          cp build/Release/chimera.exe stage/chimera.exe
+          (cd stage && 7z a -tzip "../dist/${STEM}.zip" chimera.exe) >/dev/null
+          echo "archive: dist/${STEM}.zip ($(wc -c < "dist/${STEM}.zip") bytes)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-windows-x86_64-vulkan
+          path: dist/chimera-*-windows-x86_64-vulkan.zip
+          if-no-files-found: error
+
+  # --- CUDA (Windows) -------------------------------------------------
+  # See ci-gpu.yml build-cuda-windows for the Jimver/cuda-toolkit notes and the
+  # ~75-min cold-build cost. This is the slowest leg and the one most likely to
+  # gate a strict publish (see the header caveat).
+  build-cuda-windows:
+    name: build (cuda, windows x86_64)
+    needs: preflight
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      GGML_NATIVE: "0"
+      CMAKE_CUDA_ARCHITECTURES: "75"   # forwarded to deps by manage.py
+      CUDAARCHS: "75"                  # read by chimera's own configure
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: setup msvc
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: install cuda toolkit
+        uses: Jimver/cuda-toolkit@v0.2.19
+        id: cuda-toolkit
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration", "cuda_profiler_api"]'
+
+      - name: cuda info
+        run: |
+          echo "CUDA_PATH=$CUDA_PATH"
+          nvcc --version
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-cuda-windows-${{ hashFiles('scripts/manage.py') }}
+
+      - name: build (cuda)
+        run: make build-cuda DEPS_EXTRA=--no-sd-examples
+
+      - name: assert cuda backend linked
+        run: |
+          exe=build/Release/chimera.exe
+          if [ ! -f "$exe" ]; then
+            echo "FAIL: $exe not found" >&2
+            ls -la build build/Release 2>&1 || true
+            exit 1
+          fi
+          dumpbin //DEPENDENTS "$exe" > /tmp/deps.txt
+          cat /tmp/deps.txt
+          missing=
+          grep -qi 'cudart64_' /tmp/deps.txt || missing="$missing cudart"
+          grep -qi 'cublas64_' /tmp/deps.txt || missing="$missing cublas"
+          if [ -n "$missing" ]; then
+            echo "FAIL: CUDA runtime import(s) absent:$missing -- CUDA backend did not link" >&2
+            exit 1
+          fi
+          echo "OK: cudart64_/cublas64_ imports present (CUDA backend linked)"
+
+      - name: stage artifact
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          STEM="chimera-${VERSION}-windows-x86_64-cuda"
+          mkdir -p dist stage
+          cp build/Release/chimera.exe stage/chimera.exe
+          (cd stage && 7z a -tzip "../dist/${STEM}.zip" chimera.exe) >/dev/null
+          echo "archive: dist/${STEM}.zip ($(wc -c < "dist/${STEM}.zip") bytes)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-windows-x86_64-cuda
+          path: dist/chimera-*-windows-x86_64-cuda.zip
+          if-no-files-found: error
+
+  # --- ROCm / HIP (Linux) ---------------------------------------------
+  # See ci-gpu.yml build-rocm for the rocm/dev image + ROCm>=6.3 requirement.
+  build-rocm:
+    name: build (rocm, linux x86_64)
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container: rocm/dev-ubuntu-22.04:6.4.4
+    env:
+      GGML_NATIVE: "0"
+      CMAKE_HIP_ARCHITECTURES: "gfx1030"   # forwarded to deps by manage.py
+      ROCM_PATH: "/opt/rocm"
+      HIP_PATH: "/opt/rocm"
+      CMAKE_PREFIX_PATH: "/opt/rocm"
+    steps:
+      - name: install host toolchain
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake git ca-certificates python3 python3-venv \
+            hipblas-dev rocblas-dev
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: rocm info
+        run: |
+          echo "ROCM_PATH=$ROCM_PATH"
+          "$ROCM_PATH/bin/hipcc" --version || hipcc --version || true
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-rocm-${{ hashFiles('scripts/manage.py') }}
+
+      - name: build (rocm)
+        run: make build-rocm DEPS_EXTRA=--no-sd-examples
+
+      - name: assert hip backend linked
+        run: |
+          test -x build/chimera
+          # NEEDED-lib check (libamdhip64/rocBLAS): more robust than a symbol
+          # grep since the HIP reg symbol is shared with CUDA's hipified sources.
+          readelf -d build/chimera > /tmp/dyn.txt
+          if ! grep -E 'NEEDED' /tmp/dyn.txt | grep -iqE 'amdhip64|rocblas|hipblas'; then
+            echo "FAIL: no ROCm runtime (libamdhip64/rocblas/hipblas) in NEEDED -- HIP backend did not link" >&2
+            grep NEEDED /tmp/dyn.txt >&2 || true
+            exit 1
+          fi
+          echo "OK: ROCm runtime libraries present in NEEDED (HIP backend linked)"
+
+      - name: stage artifact
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          STEM="chimera-${VERSION}-linux-x86_64-rocm"
+          mkdir -p dist stage
+          cp build/chimera stage/chimera
+          strip stage/chimera
+          tar -czf "dist/${STEM}.tar.gz" -C stage chimera
+          echo "archive: dist/${STEM}.tar.gz ($(wc -c < "dist/${STEM}.tar.gz") bytes)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-linux-x86_64-rocm
+          path: dist/chimera-*-linux-x86_64-rocm.tar.gz
+          if-no-files-found: error
+
+  # --- SYCL (Linux) ---------------------------------------------------
+  # See ci-gpu.yml build-sycl for the oneAPI image + icx/icpx notes and the
+  # CMakeLists.txt GGML_SYCL flag-strip the green build depends on.
+  build-sycl:
+    name: build (sycl, linux x86_64)
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container: intel/oneapi-basekit:2025.3.2-0-devel-ubuntu22.04
+    env:
+      GGML_NATIVE: "0"
+    steps:
+      - name: install host toolchain
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake git ca-certificates python3 python3-venv
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: sycl info
+        run: |
+          source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+          icpx --version || true
+
+      - name: cache thirdparty
+        uses: actions/cache@v5
+        with:
+          path: thirdparty
+          key: thirdparty-sycl-${{ hashFiles('scripts/manage.py') }}
+
+      # Source the oneAPI env and force icx/icpx for BOTH the deps configure and
+      # chimera's own configure (CMake reads CC/CXX at first configure), in one
+      # step so the sourced env reaches `make`.
+      - name: build (sycl)
+        run: |
+          source /opt/intel/oneapi/setvars.sh --force
+          export CC=icx CXX=icpx
+          make build-sycl DEPS_EXTRA=--no-sd-examples
+
+      - name: assert sycl backend linked
+        run: |
+          test -x build/chimera
+          readelf -d build/chimera > /tmp/dyn.txt
+          if ! grep -E 'NEEDED' /tmp/dyn.txt | grep -iqE 'libsycl'; then
+            echo "FAIL: no SYCL runtime (libsycl) in NEEDED -- SYCL backend did not link" >&2
+            grep NEEDED /tmp/dyn.txt >&2 || true
+            exit 1
+          fi
+          echo "OK: libsycl present in NEEDED (SYCL backend linked)"
+
+      - name: stage artifact
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          STEM="chimera-${VERSION}-linux-x86_64-sycl"
+          mkdir -p dist stage
+          cp build/chimera stage/chimera
+          strip stage/chimera
+          tar -czf "dist/${STEM}.tar.gz" -C stage chimera
+          echo "archive: dist/${STEM}.tar.gz ($(wc -c < "dist/${STEM}.tar.gz") bytes)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chimera-linux-x86_64-sycl
+          path: dist/chimera-*-linux-x86_64-sycl.tar.gz
+          if-no-files-found: error
+
+  # --- Publish --------------------------------------------------------
+  # Attach the GPU archives to the release for this tag. Strict: needs every
+  # leg, so one failed backend ships no GPU assets (see header caveat to relax).
+  #
+  # NO NOTES, NO DUPLICATION: this job sets neither body / body_path nor
+  # generate_release_notes, so action-gh-release leaves an existing release's
+  # body exactly as release.yml wrote it and only uploads the `files`. The
+  # CHANGELOG notes are published once, by release.yml -- this workflow never
+  # writes or regenerates them. (If the GPU legs somehow finish first and the
+  # release doesn't exist yet, action-gh-release creates it bodyless and
+  # release.yml's publish fills in the notes afterward.)
+  publish:
+    needs: [build-cuda, build-vulkan, build-vulkan-windows, build-cuda-windows, build-rocm, build-sycl]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: list staged files
+        run: ls -la dist/
+
+      - name: attach GPU assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          # Every glob must match: publish only runs when all legs succeeded, so
+          # all six archives are present. A missing one fails the publish rather
+          # than shipping a partial GPU asset set.
+          files: |
+            dist/chimera-*-linux-x86_64-cuda.tar.gz
+            dist/chimera-*-linux-x86_64-vulkan.tar.gz
+            dist/chimera-*-linux-x86_64-rocm.tar.gz
+            dist/chimera-*-linux-x86_64-sycl.tar.gz
+            dist/chimera-*-windows-x86_64-vulkan.zip
+            dist/chimera-*-windows-x86_64-cuda.zip
+          fail_on_unmatched_files: true

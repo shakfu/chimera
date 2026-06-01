@@ -609,14 +609,12 @@ jobs:
         run: |
           source /opt/intel/oneapi/setvars.sh --force
           export CC=icx CXX=icpx
-          # VERBOSE=1 makes cmake --build echo the full per-TU command lines.
-          # Kept ON while the -fsycl-on-C-amalgamation leak (sqlite3.c /
-          # sqlite-vec.c / sha256.c break with "treating 'c' input as 'c++'") is
-          # under investigation: grep the log for the icx invocation on *.c.o to
-          # see exactly which flag source put -fsycl there. Drop this once the
-          # GGML_SYCL directory-scope flag-restore block in CMakeLists.txt is
-          # confirmed to hold the leak shut.
-          export VERBOSE=1
+          # If the -fsycl-on-C-amalgamation leak (sqlite3.c / sqlite-vec.c /
+          # sha256.c break with "treating 'c' input as 'c++'") ever returns,
+          # prepend `VERBOSE=1` here so cmake --build echoes the full per-TU
+          # command lines, then grep the log for the icx invocation on *.c.o.
+          # See the GGML_SYCL block in CMakeLists.txt (strips -fsycl off the
+          # imported SYCL/MKL/oneDNN targets' INTERFACE_COMPILE_OPTIONS).
           make build-sycl DEPS_EXTRA=--no-sd-examples
 
       - name: assert sycl backend linked

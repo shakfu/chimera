@@ -489,8 +489,8 @@ if(GGML_SYCL)
     # the earlier LINK_ONLY wrapping left -fsycl on every chimera TU regardless
     # (verified: it still appeared on the icx sqlite-vec.c command). Neither do
     # the directory-scope / flag-var restores below (kept only as cheap
-    # belt-and-suspenders for a hypothetical add_compile_options-style leak the
-    # CI SYCL-DIAG lines showed is currently absent).
+    # belt-and-suspenders for a hypothetical add_compile_options-style leak,
+    # which CI confirmed is currently absent -- the target props were the leak).
     #
     # THE FIX: chimera needs ZERO compile-side usage requirements from these
     # targets (it has no kernels and includes no MKL/SYCL headers itself -- only
@@ -513,17 +513,14 @@ if(GGML_SYCL)
     find_package(DNNL QUIET)
     # Strip the compile-side usage requirements off every SYCL/MKL/oneDNN target
     # we are about to link, so none of -fsycl/-DMKL_ILP64/-std=gnu++17 lands on a
-    # chimera TU. TEMPORARY SYCL-DIAG lines show before/after so the CI log
-    # confirms the strip; remove the messages once the leg is green.
+    # chimera TU. This is the load-bearing fix (confirmed on CI: the icx C
+    # compile line is clean and the executable still links libsycl/MKL/oneDNN).
     foreach(_t IntelSYCL::SYCL_CXX MKL::MKL_SYCL::BLAS DNNL::dnnl)
         if(TARGET ${_t})
-            get_target_property(_co ${_t} INTERFACE_COMPILE_OPTIONS)
-            message(STATUS "SYCL-DIAG ${_t} INTERFACE_COMPILE_OPTIONS(before)=[${_co}]")
             set_target_properties(${_t} PROPERTIES INTERFACE_COMPILE_OPTIONS "")
         endif()
     endforeach()
     unset(_t)
-    unset(_co)
     list(APPEND SYSTEM_LIBS
         IntelSYCL::SYCL_CXX
         MKL::MKL_SYCL::BLAS)
@@ -537,17 +534,6 @@ if(GGML_SYCL)
     # start with '-' are passed through as link flags, never compile flags).
     # PUBLIC so the chimera executable's icpx link gets it too.
     list(APPEND SYSTEM_LIBS -fsycl)
-    # TEMPORARY diagnostic: dump every directory-scope compile vector AS LEFT BY
-    # the find_package calls, so the CI configure log can confirm none of them
-    # carries -fsycl (we expect all clean -- the leak was the target props above,
-    # not directory scope). Remove with the SYCL-DIAG lines above. Pairs with
-    # VERBOSE=1 in the ci-gpu.yml sycl leg.
-    get_directory_property(_CHIMERA_DIAG_DIR_COPTS COMPILE_OPTIONS)
-    message(STATUS "SYCL-DIAG CMAKE_C_FLAGS=[${CMAKE_C_FLAGS}]")
-    message(STATUS "SYCL-DIAG CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}=[${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}}]")
-    message(STATUS "SYCL-DIAG CMAKE_CXX_FLAGS=[${CMAKE_CXX_FLAGS}]")
-    message(STATUS "SYCL-DIAG dir COMPILE_OPTIONS=[${_CHIMERA_DIAG_DIR_COPTS}]")
-    unset(_CHIMERA_DIAG_DIR_COPTS)
     # Belt-and-suspenders: restore directory-scope compile vectors to their
     # pre-find_package values, in case a future Intel config also pollutes them
     # (the target-property strip above is the load-bearing fix).
