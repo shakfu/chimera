@@ -494,7 +494,15 @@ if(GGML_SYCL)
     endif()
     find_package(DNNL QUIET)
     if(DNNL_FOUND)
-        list(APPEND SYSTEM_LIBS DNNL::dnnl)
+        # $<LINK_ONLY:...> for the same reason as IntelSYCL/MKL above: oneDNN's
+        # DPC++ build exports -fsycl in DNNL::dnnl's INTERFACE_COMPILE_OPTIONS,
+        # and that option is NOT language-guarded, so a plain link propagates
+        # -fsycl onto EVERY chimera_lib TU -- including the C amalgamations
+        # (sqlite3.c / sqlite-vec.c), which icx then reinterprets as C++ and
+        # fails to compile (tentative-definition redefinitions, implicit void*
+        # conversions, goto-past-init). LINK_ONLY keeps oneDNN on the link line
+        # while dropping the compile-side usage requirement.
+        list(APPEND SYSTEM_LIBS $<LINK_ONLY:DNNL::dnnl>)
     endif()
 endif()
 
