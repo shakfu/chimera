@@ -64,6 +64,11 @@ jobs:
     name: build (cuda, linux x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'cuda-linux' }}
     runs-on: ubuntu-latest
+    # Bound a hung build (e.g. a stuck compile that make -j keeps waiting on)
+    # well under GitHub's 6-hour default so a wedged leg fails fast instead of
+    # burning a full runner-hour budget. Cold nvcc compile is the cost driver;
+    # warm thirdparty + ccache restore drops it to minutes.
+    timeout-minutes: 90
     container: nvidia/cuda:12.4.1-devel-ubuntu22.04
     env:
       GGML_NATIVE: "0"
@@ -150,6 +155,7 @@ jobs:
     name: build (vulkan, linux x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'vulkan-linux' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60   # bound a hung build (see build-cuda)
     env:
       GGML_NATIVE: "0"
       CMAKE_C_COMPILER_LAUNCHER: ccache
@@ -256,6 +262,7 @@ jobs:
     name: build (vulkan, windows x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'vulkan-windows' }}
     runs-on: windows-latest
+    timeout-minutes: 90   # bound a hung build (see build-cuda)
     env:
       GGML_NATIVE: "0"
     steps:
@@ -369,6 +376,9 @@ jobs:
     name: build (cuda, windows x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'cuda-windows' }}
     runs-on: windows-latest
+    # Cold build is ~75 min (ggml-cuda kernels compiled 3x on a 4-core runner);
+    # 150 leaves headroom for that while still bounding a true hang.
+    timeout-minutes: 150
     env:
       GGML_NATIVE: "0"
       CMAKE_CUDA_ARCHITECTURES: "75"   # forwarded to deps by manage.py
@@ -470,6 +480,7 @@ jobs:
     name: build (rocm, linux x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'rocm-linux' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 120   # bound a hung build (see build-cuda); cold hipcc is slow
     container: rocm/dev-ubuntu-22.04:6.4.4
     env:
       GGML_NATIVE: "0"
@@ -562,6 +573,11 @@ jobs:
     name: build (sycl, linux x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'sycl-linux' }}
     runs-on: ubuntu-latest
+    # This leg was the one that wedged for hours: a build error left make -j
+    # waiting on a chimera_sd.cpp compile that -fsycl had wrongly routed
+    # through icpx device-compilation. The CMake LINK_ONLY fix removes that
+    # slow path; this timeout is the backstop if anything else wedges.
+    timeout-minutes: 90
     container: intel/oneapi-basekit:2025.3.2-0-devel-ubuntu22.04
     env:
       GGML_NATIVE: "0"

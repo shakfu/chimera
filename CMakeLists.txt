@@ -469,9 +469,25 @@ if(GGML_SYCL)
     # Level Zero loader and oneDNN are include-if-present, matching ggml-sycl's
     # own conditional linkage (both were found in the deps build). External
     # consumers of a SYCL-enabled libchimera*.a need this same set.
+    #
+    # $<LINK_ONLY:...> is load-bearing: IntelSYCL::SYCL_CXX carries -fsycl in
+    # its INTERFACE_COMPILE_OPTIONS, and chimera_lib links it PUBLIC, so a
+    # plain link would propagate -fsycl onto EVERY chimera TU -- including the
+    # sqlite3.c / sqlite-vec.c amalgamations. icx with -fsycl reinterprets a
+    # .c input as C++ ("treating 'c' input as 'c++' when -fsycl is used"), and
+    # those amalgamations are valid C but not valid C++ (tentative-definition
+    # redefinitions, implicit void* conversions, goto-past-init), so they fail
+    # to compile. It also forces the heavy C++ TUs (chimera_sd.cpp) through the
+    # full SYCL device-compilation path -- needlessly, since none of chimera's
+    # own TUs contain SYCL kernels -- which is pathologically slow under icpx.
+    # chimera needs -fsycl only at the LINK step (device-link + libsycl), never
+    # at compile, so LINK_ONLY keeps the link options/libraries while dropping
+    # the compile-side usage requirements. Same reasoning for the MKL target.
     find_package(IntelSYCL REQUIRED)
     find_package(MKL       REQUIRED)
-    list(APPEND SYSTEM_LIBS IntelSYCL::SYCL_CXX MKL::MKL_SYCL::BLAS)
+    list(APPEND SYSTEM_LIBS
+        $<LINK_ONLY:IntelSYCL::SYCL_CXX>
+        $<LINK_ONLY:MKL::MKL_SYCL::BLAS>)
     find_library(CHIMERA_ZE_LOADER ze_loader)
     if(CHIMERA_ZE_LOADER)
         list(APPEND SYSTEM_LIBS ${CHIMERA_ZE_LOADER})
