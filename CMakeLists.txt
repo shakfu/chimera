@@ -478,7 +478,7 @@ if(GGML_SYCL)
     # used") and the valid-C-but-not-C++ code (tentative-definition
     # redefinitions, implicit void* conversions, goto-past-init) fails to
     # compile. -fsycl leaks toward compile via TWO independent paths, and BOTH
-    # guards below are required:
+    # guards here are required:
     #
     #   1. Target usage requirements. IntelSYCL::SYCL_CXX / MKL / DNNL::dnnl
     #      carry -fsycl in their INTERFACE_COMPILE_OPTIONS; linking them PUBLIC
@@ -486,15 +486,24 @@ if(GGML_SYCL)
     #      keeps the link options/libraries while dropping the compile-side
     #      usage requirements.
     #
-    #   2. Global flag pollution. Intel's IntelSYCLConfig.cmake / MKLConfig.cmake
-    #      ALSO append -fsycl to the directory-scope CMAKE_C_FLAGS /
-    #      CMAKE_CXX_FLAGS as a side effect of find_package -- flags already
-    #      baked into CMAKE_*_FLAGS are beyond LINK_ONLY's reach, and they flow
-    #      into add_subdirectory(src/chimera) onto every compile. We snapshot
-    #      those vars before the find_package calls and restore them after (see
-    #      below), so the subdirectory compiles with clean flags.
-    set(_CHIMERA_SAVED_C_FLAGS   "${CMAKE_C_FLAGS}")
-    set(_CHIMERA_SAVED_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    #   2. Directory-scope pollution. Intel's IntelSYCLConfig.cmake /
+    #      MKLConfig.cmake ALSO inject -fsycl into the calling directory's scope
+    #      as a side effect of find_package -- via the CMAKE_C_FLAGS /
+    #      CMAKE_CXX_FLAGS variables and/or the COMPILE_OPTIONS /
+    #      COMPILE_DEFINITIONS directory properties (add_compile_options-style,
+    #      which is NOT language-guarded, so it hits C too). All of these are
+    #      inherited by add_subdirectory(src/chimera) and land on every compile,
+    #      and none are reachable by $<LINK_ONLY:...> (that only strips a
+    #      target's usage requirements, not flags already in the directory
+    #      scope). We snapshot every directory-scope compile vector before the
+    #      find_package calls and restore it after (see below), so the
+    #      subdirectory compiles with clean flags.
+    set(_CHIMERA_SAVED_C_FLAGS    "${CMAKE_C_FLAGS}")
+    set(_CHIMERA_SAVED_CXX_FLAGS  "${CMAKE_CXX_FLAGS}")
+    set(_CHIMERA_SAVED_C_FLAGS_C  "${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}}")
+    set(_CHIMERA_SAVED_CXX_FLAGS_C "${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}}")
+    get_directory_property(_CHIMERA_SAVED_DIR_COPTS  COMPILE_OPTIONS)
+    get_directory_property(_CHIMERA_SAVED_DIR_CDEFS  COMPILE_DEFINITIONS)
     find_package(IntelSYCL REQUIRED)
     find_package(MKL       REQUIRED)
     list(APPEND SYSTEM_LIBS
@@ -516,15 +525,36 @@ if(GGML_SYCL)
         # while dropping the compile-side usage requirement.
         list(APPEND SYSTEM_LIBS $<LINK_ONLY:DNNL::dnnl>)
     endif()
-    # Undo the -fsycl (and any other) compile-flag pollution the three
-    # find_package calls above appended to the directory-scope flag vars. This
+    # TEMPORARY diagnostic: dump every directory-scope compile vector AS LEFT BY
+    # the find_package calls above, so the CI configure log names exactly which
+    # one carries -fsycl (the restore below then clears it). Remove once the
+    # -fsycl-on-C-amalgamation leak is confirmed shut. Pairs with VERBOSE=1 in
+    # the ci-gpu.yml sycl leg.
+    get_directory_property(_CHIMERA_DIAG_DIR_COPTS COMPILE_OPTIONS)
+    message(STATUS "SYCL-DIAG CMAKE_C_FLAGS=[${CMAKE_C_FLAGS}]")
+    message(STATUS "SYCL-DIAG CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}=[${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}}]")
+    message(STATUS "SYCL-DIAG CMAKE_CXX_FLAGS=[${CMAKE_CXX_FLAGS}]")
+    message(STATUS "SYCL-DIAG CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}=[${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}}]")
+    message(STATUS "SYCL-DIAG dir COMPILE_OPTIONS=[${_CHIMERA_DIAG_DIR_COPTS}]")
+    unset(_CHIMERA_DIAG_DIR_COPTS)
+    # Undo every directory-scope compile pollution the find_package calls above
+    # injected (flag vars + COMPILE_OPTIONS/COMPILE_DEFINITIONS properties). This
     # runs before add_subdirectory(src/chimera), so chimera_lib's C and C++ TUs
     # compile with clean flags; -fsycl reaches only the link step via the
     # LINK_ONLY targets. See the snapshot + rationale above.
     set(CMAKE_C_FLAGS   "${_CHIMERA_SAVED_C_FLAGS}")
     set(CMAKE_CXX_FLAGS "${_CHIMERA_SAVED_CXX_FLAGS}")
+    set(CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}   "${_CHIMERA_SAVED_C_FLAGS_C}")
+    set(CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE} "${_CHIMERA_SAVED_CXX_FLAGS_C}")
+    set_directory_properties(PROPERTIES
+        COMPILE_OPTIONS     "${_CHIMERA_SAVED_DIR_COPTS}"
+        COMPILE_DEFINITIONS "${_CHIMERA_SAVED_DIR_CDEFS}")
     unset(_CHIMERA_SAVED_C_FLAGS)
     unset(_CHIMERA_SAVED_CXX_FLAGS)
+    unset(_CHIMERA_SAVED_C_FLAGS_C)
+    unset(_CHIMERA_SAVED_CXX_FLAGS_C)
+    unset(_CHIMERA_SAVED_DIR_COPTS)
+    unset(_CHIMERA_SAVED_DIR_CDEFS)
 endif()
 
 # -----------------------------------------------------------------------------

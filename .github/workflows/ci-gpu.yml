@@ -96,7 +96,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: thirdparty
-          key: thirdparty-cuda-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+          key: thirdparty-cuda-${{ hashFiles('scripts/manage.py') }}
 
       - name: build (cuda)
         run: make build-cuda DEPS_EXTRA=--no-sd-examples
@@ -209,7 +209,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: thirdparty
-          key: thirdparty-vulkan-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+          key: thirdparty-vulkan-${{ hashFiles('scripts/manage.py') }}
 
       - name: build (vulkan)
         run: make build-vulkan DEPS_EXTRA=--no-sd-examples
@@ -303,7 +303,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: thirdparty
-          key: thirdparty-vulkan-windows-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+          key: thirdparty-vulkan-windows-${{ hashFiles('scripts/manage.py') }}
 
       # Same Makefile target + DEPS_EXTRA passthrough as the Linux leg; make
       # is available in the runner's git-bash (the CPU `ci.yml` Windows leg
@@ -411,7 +411,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: thirdparty
-          key: thirdparty-cuda-windows-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+          key: thirdparty-cuda-windows-${{ hashFiles('scripts/manage.py') }}
 
       - name: build (cuda)
         run: make build-cuda DEPS_EXTRA=--no-sd-examples
@@ -513,7 +513,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: thirdparty
-          key: thirdparty-rocm-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+          key: thirdparty-rocm-${{ hashFiles('scripts/manage.py') }}
 
       - name: build (rocm)
         run: make build-rocm DEPS_EXTRA=--no-sd-examples
@@ -599,7 +599,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: thirdparty
-          key: thirdparty-sycl-${{ hashFiles('scripts/manage.py', 'CMakeLists.txt', 'src/chimera/CMakeLists.txt') }}
+          key: thirdparty-sycl-${{ hashFiles('scripts/manage.py') }}
 
       # Source the oneAPI env and force icx/icpx for BOTH the deps configure and
       # chimera's own configure (CMake reads CC/CXX at first configure), in one
@@ -609,12 +609,14 @@ jobs:
         run: |
           source /opt/intel/oneapi/setvars.sh --force
           export CC=icx CXX=icpx
-          # If -fsycl ever leaks back onto the C amalgamation compiles (sqlite3.c
-          # / sqlite-vec.c / sha256.c break with "treating 'c' input as 'c++'"),
-          # prepend `VERBOSE=1` here so cmake --build echoes the full per-TU
-          # command lines, then grep the log for the icx invocation on *.c.o to
-          # see where -fsycl came from. See the GGML_SYCL flag-restore block in
-          # CMakeLists.txt.
+          # VERBOSE=1 makes cmake --build echo the full per-TU command lines.
+          # Kept ON while the -fsycl-on-C-amalgamation leak (sqlite3.c /
+          # sqlite-vec.c / sha256.c break with "treating 'c' input as 'c++'") is
+          # under investigation: grep the log for the icx invocation on *.c.o to
+          # see exactly which flag source put -fsycl there. Drop this once the
+          # GGML_SYCL directory-scope flag-restore block in CMakeLists.txt is
+          # confirmed to hold the leak shut.
+          export VERBOSE=1
           make build-sycl DEPS_EXTRA=--no-sd-examples
 
       - name: assert sycl backend linked
