@@ -4,6 +4,8 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.4]
+
 ### Added
 
 - **CI now covers the combined-archive seam, schema migrations, and the Python bindings.** The `ci.yml` matrix previously ran only `make build` + `make smoke`, which exercise the `chimera` *executable* -- not the three redistributable archives (`libchimera{,_thirdparty,_ggml}.a`). That gap is exactly why the 0.2.3 `combine_archives.py` libwebp/libwebm regression shipped silently. Three legs close it, all model-free:
