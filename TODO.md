@@ -63,6 +63,22 @@ Longer-term:
 - [ ] `chimera serve --enable-rag` audit table for ingest/search
       calls.
 
+## CLI / loader
+
+- [ ] VRAM-aware `--gpu-layers` auto-fit for `chat`/`gen`/`embed`. Today
+      only `serve` gets it: it loads through `common_init_from_params`,
+      which runs llama.cpp's `llama_params_fit` (gated on `fit_params`,
+      default true), so its `-1` default offloads as much as fits with a
+      ~1 GiB margin. The `chat`/`gen`/`embed` loaders build raw
+      `llama_model_params` and call `llama_model_load_from_file` directly
+      (`chimera_llama.cpp:457`, `chimera_embed.cpp:76`), bypassing the fit
+      step — so they default to `0` because `-1` there is an unsafe
+      all-layers/OOM load. Fix is to route those loads through the fit
+      step (either via `common_init_from_params` or a direct
+      `llama_params_fit` call), then move their default to `-1`. Full
+      trace + the two implementation options + caveats in
+      [`docs/dev/gpu-layers-default.md`](docs/dev/gpu-layers-default.md).
+
 ## Documentation
 
 - [ ] Example gallery: short transcripts of each subcommand against a
