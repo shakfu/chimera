@@ -76,8 +76,13 @@ chimera chat -m model.gguf --color {auto|always|never}
 
 # Chat template / Jinja
 chimera chat -m model.gguf --chat-template-file template.jinja
-chimera chat -m model.gguf --chat-template-kwargs enable_thinking=true
+chimera chat -m model.gguf --chat-template-kwargs enable_thinking true
 chimera chat -m model.gguf --no-jinja             # opt out of Jinja renderer
+
+# Qwen3.5+ dropped the /no_think soft switch; the only way to disable
+# reasoning is via the template kwarg (key and value are space-separated
+# tokens, not key=value):
+chimera chat -m qwen3.5.gguf --chat-template-kwargs enable_thinking false
 
 # Reasoning models (DeepSeek-R1 / o1-style). --reasoning-budget caps
 # tokens inside the <think>...</think> block; if the cap is hit, the
