@@ -100,6 +100,10 @@
 //                                                (wrapped by chimera's persistence
 //                                                shim when --persist-chats — see
 //                                                make_persisting_chat_handler)
+//       POST /v1/chat/completions/control        server_routes.post_control
+//                                                (realtime reasoning_end; requires the
+//                                                originating request to set
+//                                                "reasoning_control": true)
 //       POST /v1/completions                     server_routes.post_completions_oai
 //       POST /v1/embeddings                      server_routes.post_embeddings_oai
 //                                                (or the dedicated emb_ctx variant
@@ -419,6 +423,16 @@ common_params build_common_params(const ServeOptions & opts) {
     params.hostname             = opts.host;
     params.port                 = opts.port;
     params.embedding            = opts.embedding;
+    // HTTP timeouts. Leave the upstream defaults (read/write 3600s, SSE
+    // ping 30s) unless the operator overrides. timeout_write tracks
+    // timeout_read upstream, so set both from the single knob.
+    if (opts.http_timeout > 0) {
+        params.timeout_read  = opts.http_timeout;
+        params.timeout_write = opts.http_timeout;
+    }
+    if (opts.sse_ping_interval > 0) {
+        params.sse_ping_interval = opts.sse_ping_interval;
+    }
     // Server-context's metrics route returns 501 unless this is set.
     // Free to enable: lightweight counters, no external dep on Prometheus.
     params.endpoint_metrics     = true;
@@ -692,10 +706,12 @@ int command_serve(const ServeOptions & opts) {
         slp.keep_vae_on_cpu            = opts.sd_keep_vae_on_cpu;
         slp.keep_control_net_on_cpu    = opts.sd_keep_control_net_on_cpu;
         slp.force_sdxl_vae_conv_scale  = opts.sd_force_sdxl_vae_conv_scale;
+        slp.stream_layers              = opts.sd_stream_layers;
         slp.rng_type                   = opts.sd_rng;
         slp.sampler_rng_type           = opts.sd_sampler_rng;
         slp.prediction                 = opts.sd_prediction;
         slp.lora_apply_mode            = opts.sd_lora_apply_mode;
+        slp.vae_format                 = opts.sd_vae_format;
         if (opts.sd_threads > 0) slp.threads = opts.sd_threads;
         sd_ctx = chimera_sd::load_model(slp);
         if (!sd_ctx) {
@@ -914,6 +930,14 @@ int command_serve(const ServeOptions & opts) {
     // historical path.
     ctx_http.post("/chat/completions",    ex_wrapper(chat_handler));
     ctx_http.post("/v1/chat/completions", ex_wrapper(chat_handler));
+    // Realtime reasoning control (llama.cpp b9528+). A client that started
+    // a completion with "reasoning_control": true can POST
+    // {"id": "<completion-id>", "action": "reasoning_end"} here to make the
+    // model stop thinking and emit its answer immediately. The chat handler
+    // above already passes the reasoning_control sampling flag through from
+    // request JSON, so binding the upstream control handler is the whole
+    // integration. Returns an error if the flag was not armed for that id.
+    ctx_http.post("/v1/chat/completions/control", ex_wrapper(routes.post_control));
     ctx_http.post("/v1/completions",      ex_wrapper(routes.post_completions_oai));
     // When --enable-embeddings was passed, route /v1/embeddings to the
     // dedicated embedding context's handler instead of the primary LLM.

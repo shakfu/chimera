@@ -99,6 +99,11 @@ struct LlamaCommonOptions {
     int  reasoning_budget = -1;
     std::string reasoning_format;      // alias of `reasoning` if specified
     std::string reasoning_budget_message;
+    // Chat-only: arm runtime reasoning termination. With this set, Ctrl-C
+    // while the model is still inside its <think> block ends thinking and
+    // lets it answer (instead of aborting the whole reply). Maps to the
+    // sampler's reasoning_control; a no-op for non-reasoning templates.
+    bool reasoning_control = false;
 
     // Extra sampler knobs. Sentinels match upstream defaults so unset
     // means "don't touch the sampler" — typ_p=1.0 disables typical,
@@ -409,6 +414,9 @@ struct SdOptions {
     bool  keep_vae_on_cpu           = false;
     bool  keep_control_net_on_cpu   = false;
     bool  force_sdxl_vae_conv_scale = false;
+    // Stream diffusion weights from CPU during generation (sd_cli's
+    // --stream-layers). Only engages when max_vram > 0.
+    bool  stream_layers             = false;
 
     // Round 2 sampler / generation core. Floats use < 0 sentinel
     // because upstream defaults are INFINITY (img_cfg, eta) and the
@@ -423,6 +431,7 @@ struct SdOptions {
     std::string sigmas;
     std::string prediction;
     std::string lora_apply_mode;
+    std::string vae_format;       // auto | flux | sd3 | flux2 (empty = auto)
 
     // Round 4 PhotoMaker bundle. Paired with the --photo-maker model
     // path above. pm_id_images_dir is scanned non-recursively for PNG /
@@ -493,6 +502,11 @@ struct ServeOptions {
     std::string api_key;            // --api-key; empty disables auth
     bool        embedding = false;  // --embeddings; switches model to embed mode
 
+    // HTTP server timeouts. 0 leaves the upstream common_params default in
+    // place (read/write 3600s, SSE ping 30s as of llama.cpp b9528).
+    int         http_timeout      = 0; // --http-timeout; read+write timeout in seconds
+    int         sse_ping_interval = 0; // --sse-ping-interval; keep-alive ping cadence in seconds
+
     // Opt-in audio. When non-empty, a whisper.cpp model is loaded
     // alongside the LLM and POST /v1/audio/transcriptions becomes available.
     std::string audio_model;        // --enable-audio <whisper.gguf>
@@ -553,10 +567,12 @@ struct ServeOptions {
     bool        sd_keep_vae_on_cpu           = false;
     bool        sd_keep_control_net_on_cpu   = false;
     bool        sd_force_sdxl_vae_conv_scale = false;
+    bool        sd_stream_layers             = false; // engages only with sd_max_vram > 0
     std::string sd_rng;                      // empty = upstream default
     std::string sd_sampler_rng;              // empty = upstream default
     std::string sd_prediction;               // empty = upstream default
     std::string sd_lora_apply_mode;          // empty = upstream default
+    std::string sd_vae_format;               // empty = upstream default (auto)
     int         sd_threads                   = -1; // -1 = whatever sd.cpp's default is
 
     // PhotoMaker on serve (step 5e). Three knobs:

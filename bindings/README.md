@@ -125,10 +125,17 @@ dependency group in `pyproject.toml` (`uv sync --group dev`).
 ## Known limits / TODO (this is a scaffold)
 
 - **Option coverage is complete** for `LlamaOptions`, `EmbedOptions`,
-  `ServeOptions`, `SdOptions`, and `WhisperOptions` (every field is bound;
-  verified by an auto-generated member-pointer compile check against
-  `chimera.hpp`). `TokenizeOptions` is intentionally not bound -- the
-  `Tokenizer` class takes a path + `use_mmap` directly.
+  `ServeOptions`, `SdOptions`, and `WhisperOptions` -- every field of each
+  struct is bound, including the llama.cpp-b9528 / sd-master-672 additions:
+  `LlamaOptions.reasoning_control`, `SdOptions.stream_layers` /
+  `SdOptions.vae_format`, and `ServeOptions.http_timeout` /
+  `sse_ping_interval` / `sd_stream_layers` / `sd_vae_format`. Coverage is
+  maintained **by hand** -- there is no compile-time enforcement, so any new
+  field on an option struct must be added to `chimera_ext.cpp` (a missing one
+  is silent drift, not a build error). `tests/test_module.py` round-trips a
+  representative subset of each struct as a regression net. `TokenizeOptions`
+  is intentionally not bound -- the `Tokenizer` class takes a path +
+  `use_mmap` directly.
 - **No enum bindings are needed beyond `ExitCode`.** chimera's option structs
   use `std::string` (not C++ enums) for every user-facing choice field --
   `sample_method`, `scheduler`, `rng`, `prediction`, `lora_apply_mode`,

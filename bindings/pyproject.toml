@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "chimera"
-version = "0.2.3"            # keep in sync with CHIMERA_VERSION in scripts/manage.py
+version = "0.2.5"            # keep in sync with CHIMERA_VERSION in scripts/manage.py
 description = "Python bindings for chimera's chimera.hpp OOP layer"
 readme = "README.md"
 requires-python = ">=3.8"

@@ -95,6 +95,11 @@ struct ReasoningBudgetParams {
     std::string         thinking_end_tag;
     int                 budget = -1;
     std::string         budget_message;
+    // Arm the on-demand reasoning-budget sampler even when budget < 0, so
+    // common_sampler_reasoning_budget_force() can end thinking at runtime
+    // (the chat loop fires this on Ctrl-C while the model is still in its
+    // <think> block). Maps to common_params_sampling::reasoning_control.
+    bool                control = false;
 };
 
 common_sampler_ptr make_sampler(const llama_model *           model,

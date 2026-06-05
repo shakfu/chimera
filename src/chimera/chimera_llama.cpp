@@ -667,12 +667,19 @@ common_sampler_ptr make_sampler(const llama_model *           model,
             grammar_str);
     }
 
-    if (rbp.budget >= 0 && rbp.vocab != nullptr && !rbp.thinking_end_tag.empty()) {
+    // A fixed token budget (>= 0) and runtime control (Ctrl-C ends thinking)
+    // share the same reasoning-budget sampler; either one arms it. Upstream
+    // requires the start+end token sequences to be present for the sampler
+    // to be created at all (see common/sampling.cpp), so populate them
+    // whenever either path is active. With control-only and no token budget,
+    // reasoning_budget_tokens stays -1 (upstream treats that as INT_MAX), so
+    // the sampler never auto-fires — only the runtime force ends thinking.
+    if ((rbp.budget >= 0 || rbp.control) && rbp.vocab != nullptr &&
+        !rbp.thinking_start_tag.empty() && !rbp.thinking_end_tag.empty()) {
         sampling.reasoning_budget_tokens = rbp.budget;
-        if (!rbp.thinking_start_tag.empty()) {
-            sampling.reasoning_budget_start =
-                common_tokenize(rbp.vocab, rbp.thinking_start_tag, /*add_special=*/false, /*parse_special=*/true);
-        }
+        sampling.reasoning_control       = rbp.control;
+        sampling.reasoning_budget_start =
+            common_tokenize(rbp.vocab, rbp.thinking_start_tag, /*add_special=*/false, /*parse_special=*/true);
         sampling.reasoning_budget_end =
             common_tokenize(rbp.vocab, rbp.thinking_end_tag, false, true);
         sampling.reasoning_budget_forced =

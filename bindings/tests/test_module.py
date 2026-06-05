@@ -74,6 +74,7 @@ def test_llama_options_roundtrip(chimera_mod):
     o.gpu_layers = 0
     o.ignore_eos = True
     o.samplers = "top_k;top_p;temperature"
+    o.reasoning_control = True
     assert o.model == "/some/path.gguf"
     assert o.n_ctx == 1234
     assert o.n_predict == 7
@@ -81,6 +82,7 @@ def test_llama_options_roundtrip(chimera_mod):
     assert o.gpu_layers == 0
     assert o.ignore_eos is True
     assert o.samplers == "top_k;top_p;temperature"
+    assert o.reasoning_control is True
 
 
 def test_embed_options_roundtrip(chimera_mod):
@@ -99,9 +101,28 @@ def test_serve_options_roundtrip(chimera_mod):
     o.n_ctx = 2048
     o.embedding = True
     o.api_key = "secret"
+    o.http_timeout = 120
+    o.sse_ping_interval = 15
+    o.sd_stream_layers = True
+    o.sd_vae_format = "flux2"
     assert (o.host, o.port, o.n_ctx, o.embedding, o.api_key) == (
         "127.0.0.1", 8123, 2048, True, "secret",
     )
+    assert (o.http_timeout, o.sse_ping_interval) == (120, 15)
+    assert (o.sd_stream_layers, o.sd_vae_format) == (True, "flux2")
+
+
+def test_sd_options_roundtrip(chimera_mod):
+    # SdOptions is only exported when libchimera.a was built with SD.
+    if not hasattr(chimera_mod, "SdOptions"):
+        pytest.skip("module built without SD modality")
+    o = chimera_mod.SdOptions()
+    o.max_vram = 8.0
+    o.stream_layers = True
+    o.vae_format = "sd3"
+    assert o.max_vram == pytest.approx(8.0)
+    assert o.stream_layers is True
+    assert o.vae_format == "sd3"
 
 
 def test_options_handle_is_live_reference(chimera_mod):

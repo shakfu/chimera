@@ -146,6 +146,8 @@ static_assert(std::is_same_v<decltype(sd_ctx_params_t::keep_clip_on_cpu),       
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::keep_vae_on_cpu),                  bool>, "sd_ctx_params_t::keep_vae_on_cpu retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::keep_control_net_on_cpu),          bool>, "sd_ctx_params_t::keep_control_net_on_cpu retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::force_sdxl_vae_conv_scale),        bool>, "sd_ctx_params_t::force_sdxl_vae_conv_scale retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::stream_layers),                    bool>, "sd_ctx_params_t::stream_layers retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::vae_format),         enum sd_vae_format_t>, "sd_ctx_params_t::vae_format retyped.");
 
 // ---- sd_img_gen_params_t top-level fields (build_img_gen_params) ------
 static_assert(std::is_same_v<decltype(sd_img_gen_params_t::prompt),                const char *>, "sd_img_gen_params_t::prompt retyped.");
@@ -223,6 +225,9 @@ static_assert(static_cast<int>(SCHEDULER_COUNT) > 0,
 static_assert(static_cast<int>(PREDICTION_COUNT) > 0,
               "prediction_t::PREDICTION_COUNT missing — str_to_prediction "
               "sentinel relies on it.");
+static_assert(static_cast<int>(SD_VAE_FORMAT_COUNT) > 0,
+              "sd_vae_format_t::SD_VAE_FORMAT_COUNT missing — chimera's "
+              "str_to_vae_format sentinel relies on it.");
 
 // Function signatures chimera calls. The (...) cast forces an unused
 // function pointer of the asserted type; if upstream changes any
@@ -538,6 +543,31 @@ SdContextPtr load_model(const LoadParams & params) {
         }
         ctx_params.lora_apply_mode = lm;
     }
+
+    // sd.cpp has no exported str_to_vae_format (the example CLI's copy is
+    // file-static), so map the same strings here. Empty leaves the
+    // sd_ctx_params_init default (SD_VAE_FORMAT_AUTO) in place.
+    if (!params.vae_format.empty()) {
+        auto str_to_vae_format = [](const std::string & v) -> sd_vae_format_t {
+            if (v == "auto")  return SD_VAE_FORMAT_AUTO;
+            if (v == "flux")  return SD_VAE_FORMAT_FLUX;
+            if (v == "sd3")   return SD_VAE_FORMAT_SD3;
+            if (v == "flux2") return SD_VAE_FORMAT_FLUX2;
+            return SD_VAE_FORMAT_COUNT;
+        };
+        const sd_vae_format_t vf = str_to_vae_format(params.vae_format);
+        if (vf == SD_VAE_FORMAT_COUNT) {
+            fail(ExitCode::BadInput,
+                 "unknown --vae-format value: " + params.vae_format +
+                 " (expected auto, flux, sd3, or flux2)");
+        }
+        ctx_params.vae_format = vf;
+    }
+
+    // Weight streaming only engages when max_vram > 0; sd.cpp disables it
+    // otherwise and logs the reason through our sd_log_callback, so no
+    // extra guard is needed here.
+    ctx_params.stream_layers = params.stream_layers;
 
     // Textual-inversion embedding directory. Scan non-recursively for
     // .gguf / .safetensors / .pt files, deriving each token name from
@@ -1006,8 +1036,10 @@ int command_sd(const SdOptions & opts) {
     lp.keep_vae_on_cpu           = opts.keep_vae_on_cpu;
     lp.keep_control_net_on_cpu   = opts.keep_control_net_on_cpu;
     lp.force_sdxl_vae_conv_scale = opts.force_sdxl_vae_conv_scale;
+    lp.stream_layers             = opts.stream_layers;
     lp.prediction                = opts.prediction;
     lp.lora_apply_mode           = opts.lora_apply_mode;
+    lp.vae_format                = opts.vae_format;
     auto ctx = chimera_sd::load_model(lp);
     if (!ctx) {
         const std::string & shown = opts.model.empty() ? opts.diffusion_model : opts.model;

@@ -216,7 +216,8 @@ std::string chat_sample_loop(
     const common_chat_parser_params & parser_params,
     std::vector<llama_token> * out_tokens,
     std::string * out_reasoning = nullptr,
-    bool * out_interrupted = nullptr) {
+    bool * out_interrupted = nullptr,
+    bool reasoning_control = false) {
 
     std::string raw;
     std::string content;
@@ -230,8 +231,22 @@ std::string chat_sample_loop(
 
     for (int i = 0; i < n_predict; ++i) {
         if (g_chat_interrupt_requested.load(std::memory_order_relaxed)) {
-            if (out_interrupted) *out_interrupted = true;
-            break;
+            // With --reasoning-control, the first Ctrl-C while the model is
+            // actively thinking ends the reasoning block (the model then
+            // answers) instead of aborting. force() transitions only from
+            // the COUNTING state and returns false otherwise (not yet
+            // thinking, already ending, or already answering), in which
+            // case we fall through to the normal abort. Clearing the flag
+            // lets the loop continue; a later Ctrl-C then aborts as usual.
+            if (reasoning_control &&
+                common_sampler_reasoning_budget_force(sampler)) {
+                g_chat_interrupt_requested.store(false, std::memory_order_relaxed);
+                std::cout << Sem::Think << "\n[reasoning ended]\n"
+                          << Sem::Reset << std::flush;
+            } else {
+                if (out_interrupted) *out_interrupted = true;
+                break;
+            }
         }
         const llama_token token = common_sampler_sample(sampler, ctx, -1, false);
         if (token == LLAMA_TOKEN_NULL || llama_vocab_is_eog(vocab, token)) {
@@ -564,8 +579,11 @@ int command_chat(const LlamaCommonOptions & opts,
     // If the template doesn't advertise thinking tags (most non-
     // reasoning models), the tags come back empty and make_sampler
     // skips the budget wiring — matching the "no budget" path.
+    // Both --reasoning-budget (fixed token cap) and --reasoning-control
+    // (Ctrl-C ends thinking at runtime) drive the same reasoning-budget
+    // sampler and need the template's thinking tags resolved here.
     ReasoningBudgetParams rbp;
-    if (opts.reasoning_budget >= 0) {
+    if (opts.reasoning_budget >= 0 || opts.reasoning_control) {
         common_chat_templates_inputs tpl_probe;
         common_chat_msg probe_msg;
         probe_msg.role    = "user";
@@ -579,10 +597,13 @@ int command_chat(const LlamaCommonOptions & opts,
         rbp.thinking_end_tag   = probe.thinking_end_tag;
         rbp.budget             = opts.reasoning_budget;
         rbp.budget_message     = opts.reasoning_budget_message;
-        if (probe.thinking_end_tag.empty()) {
-            std::cerr << "chimera: warning: --reasoning-budget set but the "
+        rbp.control            = opts.reasoning_control;
+        if (probe.thinking_start_tag.empty() || probe.thinking_end_tag.empty()) {
+            const char * which = opts.reasoning_budget >= 0
+                ? "--reasoning-budget" : "--reasoning-control";
+            std::cerr << "chimera: warning: " << which << " set but the "
                          "active chat template advertises no thinking tags; "
-                         "budget will be ignored (the budget sampler activates "
+                         "it will be ignored (the budget sampler activates "
                          "on the template-provided start tag).\n";
         }
     }
@@ -1039,7 +1060,8 @@ int command_chat(const LlamaCommonOptions & opts,
                 ChatSigintGuard sigint_guard;
                 reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
                                          opts.n_predict, parser_params, &generated,
-                                         &reply_reasoning, &reply_interrupted);
+                                         &reply_reasoning, &reply_interrupted,
+                                         opts.reasoning_control);
             }
             t_gen = secs(clock::now() - t1);
         } else {
@@ -1079,7 +1101,8 @@ int command_chat(const LlamaCommonOptions & opts,
                 ChatSigintGuard sigint_guard;
                 reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
                                          opts.n_predict, parser_params, &generated,
-                                         &reply_reasoning, &reply_interrupted);
+                                         &reply_reasoning, &reply_interrupted,
+                                         opts.reasoning_control);
             }
             t_gen = secs(clock::now() - t1);
             kv_tokens = full_tokens;
@@ -2138,6 +2161,10 @@ void bind_chat_cmd(CLI::App & app, ParsedCli & p) {
         "Token budget for reasoning content (-1 = disabled)");
     cmd->add_option("--reasoning-budget-message", p.chat_opts.reasoning_budget_message,
         "Message injected before the closing thought tag when the budget is exhausted");
+    cmd->add_flag("--reasoning-control", p.chat_opts.reasoning_control,
+        "Let Ctrl-C end the model's thinking mid-reply (it then answers) instead of "
+        "aborting; second Ctrl-C, or Ctrl-C while answering, aborts. No-op for "
+        "non-reasoning templates.");
 
     bind_llama_common_opts(cmd, p.chat_opts);
     p.chat_cmd = cmd;
@@ -2434,6 +2461,8 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Disable mmap for model loading (chimera defaults to mmap=on; this flips it off)");
     cmd->add_option("--max-vram", p.sd_opts.max_vram,
         "Soft cap on VRAM use in GiB (0 = leave the upstream default; sd.cpp may swap to CPU above the cap)");
+    cmd->add_flag("--stream-layers", p.sd_opts.stream_layers,
+        "Stream diffusion weights from CPU during generation (only engages with --max-vram > 0; ignored otherwise)");
     cmd->add_flag("--clip-on-cpu", p.sd_opts.keep_clip_on_cpu,
         "Keep the CLIP / text-encoder pass on CPU even when a GPU backend is available");
     cmd->add_flag("--vae-on-cpu", p.sd_opts.keep_vae_on_cpu,
@@ -2458,6 +2487,9 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--lora-apply-mode", p.sd_opts.lora_apply_mode,
         "LoRA application mode: auto | immediately | at_runtime (empty = upstream default)")
         ->check(CLI::IsMember({"auto","immediately","at_runtime"}));
+    cmd->add_option("--vae-format", p.sd_opts.vae_format,
+        "VAE latent format override: auto | flux | sd3 | flux2 (empty = auto)")
+        ->check(CLI::IsMember({"auto","flux","sd3","flux2"}));
     // Round 3 model-loading completers.
     cmd->add_option("--taesd", p.sd_opts.taesd,
         "Tiny AutoEncoder (TAESD) model for fast preview decode");
@@ -2540,6 +2572,10 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "Multimodal projector for vision/audio inputs in chat completions");
     cmd->add_option("--host", p.serve_opts.host, "Bind address");
     cmd->add_option("--port", p.serve_opts.port, "Bind port");
+    cmd->add_option("--http-timeout", p.serve_opts.http_timeout,
+        "HTTP read+write timeout in seconds (0 = upstream default, 3600)");
+    cmd->add_option("--sse-ping-interval", p.serve_opts.sse_ping_interval,
+        "SSE keep-alive ping interval in seconds (0 = upstream default, 30)");
     cmd->add_option("-c,--ctx-size", p.serve_opts.n_ctx,
         "Context size (0 = model's training context)");
     cmd->add_option("-b,--batch-size", p.serve_opts.n_batch,
@@ -2619,6 +2655,8 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "Disable mmap for sd model loading (chimera defaults to mmap=on)");
     cmd->add_option("--sd-max-vram", p.serve_opts.sd_max_vram,
         "Soft cap on VRAM use in GiB (0 = leave the upstream default; sd.cpp may swap to CPU above the cap)");
+    cmd->add_flag("--sd-stream-layers", p.serve_opts.sd_stream_layers,
+        "Stream diffusion weights from CPU during generation (only engages with --sd-max-vram > 0)");
     cmd->add_flag("--sd-offload-to-cpu", p.serve_opts.sd_offload_to_cpu,
         "Offload sd model parameters to CPU memory");
     cmd->add_flag("--sd-clip-on-cpu", p.serve_opts.sd_keep_clip_on_cpu,
@@ -2643,6 +2681,9 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--sd-lora-apply-mode", p.serve_opts.sd_lora_apply_mode,
         "LoRA application mode: auto | immediately | at_runtime (empty = upstream default)")
         ->check(CLI::IsMember({"auto","immediately","at_runtime"}));
+    cmd->add_option("--sd-vae-format", p.serve_opts.sd_vae_format,
+        "VAE latent format override: auto | flux | sd3 | flux2 (empty = auto)")
+        ->check(CLI::IsMember({"auto","flux","sd3","flux2"}));
     cmd->add_option("--sd-threads", p.serve_opts.sd_threads,
         "Threads for the sd context (-1 = leave sd.cpp default)");
     // 5e PhotoMaker on serve.

@@ -214,11 +214,17 @@ struct LoadParams {
     bool  keep_control_net_on_cpu   = false;
     bool  force_sdxl_vae_conv_scale = false;
 
+    // Stream diffusion weights from CPU during generation (sd_cli's
+    // --stream-layers). Only takes effect alongside max_vram > 0; sd.cpp
+    // silently disables it otherwise. Default off = upstream default.
+    bool  stream_layers             = false;
+
     // Enum-string knobs resolved via sd.cpp's str_to_* helpers. Empty
     // leaves the upstream default in place; unknown values exit with
     // BadInput from load_model.
     std::string prediction;       // eps | v | edm_v | flow | flux_flow | flux2_flow
     std::string lora_apply_mode;  // auto | immediately | at_runtime
+    std::string vae_format;       // auto | flux | sd3 | flux2 (empty = auto)
 };
 
 // Loads a stable-diffusion model from a LoadParams. Returns an empty

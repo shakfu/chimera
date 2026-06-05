@@ -142,7 +142,8 @@ NB_MODULE(chimera, m) {
         .def_rw("reasoning",          &LlamaCommonOptions::reasoning)
         .def_rw("reasoning_budget",   &LlamaCommonOptions::reasoning_budget)
         .def_rw("reasoning_format",   &LlamaCommonOptions::reasoning_format)
-        .def_rw("reasoning_budget_message", &LlamaCommonOptions::reasoning_budget_message);
+        .def_rw("reasoning_budget_message", &LlamaCommonOptions::reasoning_budget_message)
+        .def_rw("reasoning_control",  &LlamaCommonOptions::reasoning_control);
 
     // ---- Llama ----------------------------------------------------------
     nb::class_<chimera::Llama>(m, "Llama")
@@ -264,6 +265,9 @@ NB_MODULE(chimera, m) {
         .def_rw("parallel",         &ServeOptions::parallel)
         .def_rw("api_key",          &ServeOptions::api_key)
         .def_rw("embedding",        &ServeOptions::embedding)
+        // http timeouts (0 = upstream default)
+        .def_rw("http_timeout",      &ServeOptions::http_timeout)
+        .def_rw("sse_ping_interval", &ServeOptions::sse_ping_interval)
         // audio (whisper) sidecar
         .def_rw("audio_model",      &ServeOptions::audio_model)
         .def_rw("audio_flash_attn", &ServeOptions::audio_flash_attn)
@@ -297,10 +301,12 @@ NB_MODULE(chimera, m) {
         .def_rw("sd_keep_vae_on_cpu",         &ServeOptions::sd_keep_vae_on_cpu)
         .def_rw("sd_keep_control_net_on_cpu", &ServeOptions::sd_keep_control_net_on_cpu)
         .def_rw("sd_force_sdxl_vae_conv_scale", &ServeOptions::sd_force_sdxl_vae_conv_scale)
+        .def_rw("sd_stream_layers",           &ServeOptions::sd_stream_layers)
         .def_rw("sd_rng",                     &ServeOptions::sd_rng)
         .def_rw("sd_sampler_rng",             &ServeOptions::sd_sampler_rng)
         .def_rw("sd_prediction",              &ServeOptions::sd_prediction)
         .def_rw("sd_lora_apply_mode",         &ServeOptions::sd_lora_apply_mode)
+        .def_rw("sd_vae_format",              &ServeOptions::sd_vae_format)
         .def_rw("sd_threads",                 &ServeOptions::sd_threads)
         .def_rw("sd_photo_maker",             &ServeOptions::sd_photo_maker)
         .def_rw("sd_pm_id_dir",               &ServeOptions::sd_pm_id_dir)
@@ -410,8 +416,10 @@ NB_MODULE(chimera, m) {
         .def_rw("keep_vae_on_cpu",           &SdOptions::keep_vae_on_cpu)
         .def_rw("keep_control_net_on_cpu",   &SdOptions::keep_control_net_on_cpu)
         .def_rw("force_sdxl_vae_conv_scale", &SdOptions::force_sdxl_vae_conv_scale)
+        .def_rw("stream_layers",         &SdOptions::stream_layers)
         .def_rw("prediction",            &SdOptions::prediction)       // string
         .def_rw("lora_apply_mode",       &SdOptions::lora_apply_mode)  // string
+        .def_rw("vae_format",            &SdOptions::vae_format)       // auto|flux|sd3|flux2
         // vae tiling
         .def_rw("vae_tiling",             &SdOptions::vae_tiling)
         .def_rw("vae_tile_size",          &SdOptions::vae_tile_size)
