@@ -4,6 +4,26 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.6]
+
+### Changed
+
+- **Update llama.cpp version to b9592** (from b9528), whisper.cpp to **v1.8.6** (from v1.8.4), and stable-diffusion.cpp to **master-685-19bdfe2** (from master-672-1f9ee88). The whisper and SD bumps built clean with no chimera-side code change. `make bump-check` is clean -- every header it diffs (`llama.h`, `common.h`, `arg.h`, `chat.h`, `mtmd.h`, `server-context.h`, `server-http.h`, and `stable-diffusion.h`) matches upstream at the new refs, and the webui build-system layout is the already-handled b9318+ state (no new drift). Note, though, that the two breaking changes this range *did* introduce live in headers bump-check did not watch at the time -- `sampling.h` and `mtmd-helper.h` -- so they were caught by the compile, not by bump-check; both are fixed below. To close that gap, the bump-check watch list (`scripts/manage.py`) was widened to include `common/sampling.h` and `tools/mtmd/mtmd-helper.h`, so a future bump that resignatures either API fails the pre-flip diff instead of only the build.
+
+- **Adapt to two breaking llama.cpp API changes in the b9528 -> b9592 range.** (1) `common_sampler_types_from_names` dropped its `allow_alt_names` bool parameter -- alternate sampler names are now always accepted -- so the call in `chimera_llama.cpp` drops the argument. (2) `mtmd_helper_bitmap_init_from_file` gained a trailing `bool placeholder` parameter and now returns a `mtmd_helper_bitmap_wrapper { mtmd_bitmap*, mtmd_helper_video* }` struct instead of a raw `mtmd_bitmap*` (the wrapper carries a video-decode context when the input file decodes as video). All three call sites (the library mtmd generation path plus the two CLI media-attach paths) were updated to pass `placeholder=false` and unpack the wrapper.
+
+### Added
+
+- **Video input on `chimera gen` and `chimera chat`.** The b9592 llama.cpp bundles upstream's `MTMD_VIDEO` decoder (enabled by default; ffmpeg/ffprobe required at runtime), which was already compiled into chimera's vendored `libmtmd`. Wired it through:
+  - **`gen --video <path>`** (repeatable, requires `--mmproj`), distinct from `--image`: `--image` keeps upstream's content-based auto-dispatch (image/audio/video with default decode params), while `--video` always routes through the video decoder and honors the new knobs `--video-fps` (frames/sec to sample; `<=0` = native fps, default 4), `--video-timestamp-ms` (interval for timestamp text chunks; `0` = off, default 5000), and `--ffmpeg-dir` (ffmpeg/ffprobe location; default: search `PATH`).
+  - **chat `/video <file>`** (with help, tab-completion, and path-completion), honoring the same `--video-fps` / `--video-timestamp-ms` / `--ffmpeg-dir` session knobs.
+  - Honoring custom decode params required a chimera-side helper (`load_video_lazy_bitmap` in `chimera_llama.cpp`) that replicates upstream's lazy frame-pump callback, because `mtmd_helper_bitmap_init_from_file` hardcodes default video params internally.
+  - A guard rejects `--video`/`/video` when the build or mmproj lacks video support (`mtmd_helper_support_video`), and `command_prompt` rejects `--video` without `--mmproj`. A smoke test covers the latter (model-free). End-to-end decode is not yet CI-covered -- it needs a video-capable mmproj fixture (see `TODO.md`).
+
+### Fixed
+
+- **Video-decode context (`video_ctx`) was leaked when adopting the new mtmd wrapper API.** A video lazy bitmap's frame callback reads from a caller-owned `mtmd_helper_video` context that must outlive `mtmd_tokenize`; the initial wrapper unpack discarded it. The context is now RAII-owned via a new `MtmdVideoPtr` (`mtmd_helper_video_free` deleter) for the lifetime of its bitmap on both the `gen` and chat paths. As part of this, chat `/video` (and a video auto-dispatched via `/image`) now decode correctly across turns: video lazy bitmaps are single-use, so the REPL -- which re-tokenizes the whole media history every turn -- defers video decoding and rebuilds each video from its source path before each turn, rather than reusing an already-consumed context (which would have made the video silently vanish after the first turn).
+
 ## [0.2.5]
 
 ### Changed

@@ -643,7 +643,7 @@ common_sampler_ptr make_sampler(const llama_model *           model,
             if (sc == std::string::npos) break;
             pos = sc + 1;
         }
-        sampling.samplers = common_sampler_types_from_names(names, /*allow_alt_names=*/true);
+        sampling.samplers = common_sampler_types_from_names(names);
         if (sampling.samplers.empty()) {
             fail(ExitCode::BadInput,
                  "--samplers parsed to an empty chain from value: '" + opts.samplers + "'");
@@ -715,6 +715,40 @@ void MtmdBitmapDeleter::operator()(mtmd_bitmap * b) const {
 void MtmdInputChunksDeleter::operator()(mtmd_input_chunks * c) const {
     if (c) mtmd_input_chunks_free(c);
 }
+void MtmdVideoDeleter::operator()(mtmd_helper_video * v) const {
+    if (v) mtmd_helper_video_free(v);
+}
+
+ChimeraVideoBitmap load_video_lazy_bitmap(
+    mtmd_context * mctx, const std::string & path,
+    float fps_target, int64_t timestamp_ms, const std::string & ffmpeg_dir) {
+    mtmd_helper_video_init_params params = mtmd_helper_video_init_params_default();
+    params.fps_target            = fps_target;
+    params.timestamp_interval_ms = timestamp_ms;
+    // ffmpeg_bin_dir is read only during _video_init (it resolves the binaries
+    // into owned strings there), so a pointer into `ffmpeg_dir` is safe.
+    if (!ffmpeg_dir.empty()) {
+        params.ffmpeg_bin_dir = ffmpeg_dir.c_str();
+    }
+    mtmd_helper_video * vctx = mtmd_helper_video_init(mctx, path.c_str(), params);
+    if (!vctx) {
+        return {};
+    }
+    mtmd_bitmap * bmp = mtmd_bitmap_init_lazy(
+        mctx, /*id=*/nullptr, /*user_data=*/vctx,
+        [](size_t, void * user_data, mtmd_bitmap ** out_bitmap, char ** out_text) -> int {
+            auto * v = static_cast<mtmd_helper_video *>(user_data);
+            char * text = nullptr;
+            int ret = mtmd_helper_video_read_next(v, out_bitmap, &text);
+            *out_text = text;  // heap-allocated by read_next; freed by mtmd
+            return ret;
+        });
+    if (!bmp) {
+        mtmd_helper_video_free(vctx);
+        return {};
+    }
+    return { bmp, vctx };
+}
 
 std::string run_generation_mtmd(
     llama_model * model,
@@ -722,8 +756,8 @@ std::string run_generation_mtmd(
     const std::string & user_prompt,
     const TokenCallback & on_token) {
 
-    if (opts.mmproj.empty() || opts.images.empty()) {
-        fail(ExitCode::Runtime, "run_generation_mtmd called without mmproj/images");
+    if (opts.mmproj.empty() || (opts.images.empty() && opts.videos.empty())) {
+        fail(ExitCode::Runtime, "run_generation_mtmd called without mmproj/media");
     }
 
     mtmd_context_params mparams = mtmd_context_params_default();
@@ -743,16 +777,45 @@ std::string run_generation_mtmd(
     if (!mtmd_support_vision(mctx.get())) {
         fail(ExitCode::Load, "mmproj does not support vision input");
     }
+    if (!opts.videos.empty() && !mtmd_helper_support_video(mctx.get())) {
+        fail(ExitCode::BadInput,
+             "--video requires a build with video support (MTMD_VIDEO) and a "
+             "vision-capable mmproj");
+    }
 
     std::vector<MtmdBitmapPtr> bitmaps_owned;
     std::vector<const mtmd_bitmap *> bitmaps_c;
-    bitmaps_owned.reserve(opts.images.size());
-    bitmaps_c.reserve(opts.images.size());
+    // Video inputs decode to a lazy bitmap backed by a video_ctx; the frame
+    // callback reads from that ctx during mtmd_tokenize() below, so the ctx must
+    // stay alive until at least then. RAII-own it here (freed at function scope).
+    std::vector<MtmdVideoPtr> videos_owned;
+    const size_t n_media = opts.images.size() + opts.videos.size();
+    bitmaps_owned.reserve(n_media);
+    bitmaps_c.reserve(n_media);
     for (const std::string & path : opts.images) {
-        MtmdBitmapPtr bmp(mtmd_helper_bitmap_init_from_file(mctx.get(), path.c_str()));
+        // Upstream returns a wrapper {bitmap, video_ctx}; placeholder=false so the
+        // bitmap holds real data. video_ctx is non-null only for video files.
+        mtmd_helper_bitmap_wrapper w =
+            mtmd_helper_bitmap_init_from_file(mctx.get(), path.c_str(), /*placeholder=*/false);
+        MtmdBitmapPtr bmp(w.bitmap);
         if (!bmp) {
             fail(ExitCode::BadInput, "failed to load image: " + path);
         }
+        if (w.video_ctx) {
+            videos_owned.emplace_back(w.video_ctx);
+        }
+        bitmaps_c.push_back(bmp.get());
+        bitmaps_owned.push_back(std::move(bmp));
+    }
+    // Explicit --video inputs: always the video decoder, honoring --video-* params.
+    for (const std::string & path : opts.videos) {
+        ChimeraVideoBitmap v = load_video_lazy_bitmap(
+            mctx.get(), path, opts.video_fps, opts.video_timestamp_ms, opts.ffmpeg_dir);
+        MtmdBitmapPtr bmp(v.bitmap);
+        if (!bmp) {
+            fail(ExitCode::BadInput, "failed to load video: " + path);
+        }
+        videos_owned.emplace_back(v.video);
         bitmaps_c.push_back(bmp.get());
         bitmaps_owned.push_back(std::move(bmp));
     }
@@ -760,7 +823,7 @@ std::string run_generation_mtmd(
     const char * marker = mtmd_default_marker();
     std::string augmented_prompt;
     if (user_prompt.find(marker) == std::string::npos) {
-        for (size_t i = 0; i < opts.images.size(); ++i) {
+        for (size_t i = 0; i < n_media; ++i) {
             augmented_prompt += marker;
             augmented_prompt += '\n';
         }
@@ -845,8 +908,8 @@ std::string run_generation(
 // ---- command entrypoints --------------------------------------------------
 
 int command_prompt(const LlamaCommonOptions & opts, const std::string & prompt) {
-    if (!opts.images.empty() && opts.mmproj.empty()) {
-        fail(ExitCode::BadInput, "--image requires --mmproj");
+    if ((!opts.images.empty() || !opts.videos.empty()) && opts.mmproj.empty()) {
+        fail(ExitCode::BadInput, "--image/--video requires --mmproj");
     }
     // The CLI's gen subcommand streams tokens to stdout. sample_loop no
     // longer manages the trailing newline (it stopped writing to cout
@@ -857,7 +920,7 @@ int command_prompt(const LlamaCommonOptions & opts, const std::string & prompt) 
     };
     auto model = load_llama_model(opts);
     std::string text;
-    if (!opts.images.empty()) {
+    if (!opts.images.empty() || !opts.videos.empty()) {
         text = run_generation_mtmd(model.get(), opts, prompt, stream_to_cout);
     } else {
         text = run_generation(model.get(), opts, prompt, /*add_special=*/true, stream_to_cout);

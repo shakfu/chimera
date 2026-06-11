@@ -780,6 +780,17 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
         )
         _check_rc(t, rc, want=3, timeout=60)
 
+    # --image/--video require --mmproj. This guard fires in command_prompt
+    # before any model load or backend init, so it needs no real model and
+    # returns quickly with BadInput (2).
+    with maybe(rec, "gen --video without --mmproj exits 2 (BadInput)") as t:
+        rc = run_silent(
+            [str(chimera), "gen", "-m", "/no/such/model.gguf",
+             "--video", "/no/such/clip.mp4", "-p", "hi"],
+            timeout=60,
+        )
+        _check_rc(t, rc, want=2, timeout=60)
+
 
 # ============================================================================
 # End-to-end: gen + tokenize

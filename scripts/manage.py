@@ -93,10 +93,10 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.2.5"
-LLAMACPP_VERSION = "b9528" # from: b9318
-WHISPERCPP_VERSION = "v1.8.4"
-SDCPP_VERSION = "master-672-1f9ee88" # from: master-650-1ceb5bd
+CHIMERA_VERSION = "0.2.6"
+LLAMACPP_VERSION = "b9592" # from: b9528 
+WHISPERCPP_VERSION = "v1.8.6" # from: v1.8.4
+SDCPP_VERSION = "master-685-19bdfe2" # from: master-672-1f9ee88
 # linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
 # commit in CHANGELOG for traceability.
 LINENOISE_VERSION = "master"
@@ -1788,12 +1788,19 @@ class Application(ShellCmd, metaclass=MetaCommander):
                     # the larger public + common surface chimera also pokes
                     # (common_params fields, llama_tokenize signature, mtmd
                     # helper protos, etc.) without any extra plumbing.
+                    # sampling.h and mtmd-helper.h were added after the b9592
+                    # bump silently broke common_sampler_types_from_names and
+                    # mtmd_helper_bitmap_init_from_file (both called by
+                    # chimera) -- bump-check missed them because mtmd.h, not
+                    # mtmd-helper.h, was watched and sampling.h not at all.
                     "files": [
                         "include/llama.h",
                         "common/common.h",
                         "common/arg.h",
                         "common/chat.h",
+                        "common/sampling.h",
                         "tools/mtmd/mtmd.h",
+                        "tools/mtmd/mtmd-helper.h",
                         "tools/server/server-context.h",
                         "tools/server/server-http.h",
                     ],

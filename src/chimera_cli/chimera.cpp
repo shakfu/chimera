@@ -403,7 +403,8 @@ void chat_completion_cb(const char * buf, linenoise_completions_t * lc) {
         starts_with_sv(head, "/read ")  ||
         starts_with_sv(head, "/glob ")  ||
         starts_with_sv(head, "/image ") ||
-        starts_with_sv(head, "/audio ");
+        starts_with_sv(head, "/audio ") ||
+        starts_with_sv(head, "/video ");
     if (!path_cmd) return;
 
     namespace fs = std::filesystem;
@@ -613,6 +614,14 @@ int command_chat(const LlamaCommonOptions & opts,
     struct Media {
         std::string   path;
         MtmdBitmapPtr bitmap;
+        // Non-null only for video files: the lazy bitmap's frame callback reads
+        // from this ctx during mtmd_tokenize(), so it must live as long as bitmap.
+        MtmdVideoPtr  video;
+        // Video lazy bitmaps are single-use (frames are consumed at tokenize).
+        // Because this REPL re-tokenizes the whole history every turn, video
+        // entries defer decoding and are rebuilt from `path` before each turn;
+        // `bitmap`/`video` are left null until then. Images decode once at attach.
+        bool          is_video = false;
     };
 
     std::vector<common_chat_msg> history;
@@ -700,6 +709,7 @@ int command_chat(const LlamaCommonOptions & opts,
 
     const bool can_image = mctx && mtmd_support_vision(mctx.get());
     const bool can_audio = mctx && mtmd_support_audio(mctx.get());
+    const bool can_video = mctx && mtmd_helper_support_video(mctx.get());
 
     // ---- banner / startup help -----------------------------------------
     // Clear the screen on TTY entry so the chat session starts on a clean
@@ -739,6 +749,7 @@ int command_chat(const LlamaCommonOptions & opts,
         cmd_line("/glob <pattern>     ", "attach text files matching a glob");
         if (can_image) cmd_line("/image <file>       ", "attach an image to the next message");
         if (can_audio) cmd_line("/audio <file>       ", "attach an audio file to the next message");
+        if (can_video) cmd_line("/video <file>       ", "attach a video to the next message (requires ffmpeg)");
     };
 
     // ---- linenoise wiring ----------------------------------------------
@@ -753,6 +764,7 @@ int command_chat(const LlamaCommonOptions & opts,
                              "/quit", "/read", "/regen"};
     if (can_image) completion_state.cmds.push_back("/image");
     if (can_audio) completion_state.cmds.push_back("/audio");
+    if (can_video) completion_state.cmds.push_back("/video");
     std::sort(completion_state.cmds.begin(), completion_state.cmds.end());
 
     std::string history_path;
@@ -816,15 +828,57 @@ int command_chat(const LlamaCommonOptions & opts,
                       << Sem::Reset << "\n";
             return false;
         }
-        MtmdBitmapPtr bmp(mtmd_helper_bitmap_init_from_file(mctx.get(), path.c_str()));
-        if (!bmp) {
+        // Upstream returns a wrapper {bitmap, video_ctx}; placeholder=false so the
+        // bitmap holds real data. video_ctx is non-null only when the file decoded
+        // as video.
+        mtmd_helper_bitmap_wrapper w =
+            mtmd_helper_bitmap_init_from_file(mctx.get(), path.c_str(), /*placeholder=*/false);
+        if (!w.bitmap) {
             std::cerr << Sem::Err << "failed to load media: " << path
                       << Sem::Reset << "\n";
             return false;
         }
-        pending_media.push_back({path, std::move(bmp)});
+        if (w.video_ctx) {
+            // Auto-dispatched to video. Single-use lazy bitmaps can't survive the
+            // per-turn re-tokenize, so drop this probe decode and defer to the
+            // per-turn rebuild (which re-decodes from `path`).
+            mtmd_bitmap_free(w.bitmap);
+            mtmd_helper_video_free(w.video_ctx);
+            pending_media.push_back({path, nullptr, nullptr, /*is_video=*/true});
+            std::cout << Sem::Info << "attached video from '" << path << "'"
+                      << Sem::Reset << "\n";
+            return true;
+        }
+        pending_media.push_back({path, MtmdBitmapPtr(w.bitmap), nullptr, /*is_video=*/false});
         std::cout << Sem::Info << "attached " << (need_vision ? "image" : "audio")
                   << " from '" << path << "'" << Sem::Reset << "\n";
+        return true;
+    };
+
+    // Explicit video attach: records the path for the per-turn rebuild, which
+    // decodes via the video decoder honoring the session's --video-fps /
+    // --video-timestamp-ms / --ffmpeg-dir params. Decoding is deferred (not done
+    // here) because the lazy bitmap is single-use and would be consumed by the
+    // first turn's tokenize; the rebuild re-decodes fresh from `path` each turn.
+    auto attach_video = [&](const std::string & path) -> bool {
+        if (!mctx) {
+            std::cerr << Sem::Err << "multimodal not loaded: pass --mmproj <gguf>"
+                      << Sem::Reset << "\n";
+            return false;
+        }
+        if (!can_video) {
+            std::cerr << Sem::Err << "video requires a build with video support "
+                         "(MTMD_VIDEO) and a vision-capable mmproj"
+                      << Sem::Reset << "\n";
+            return false;
+        }
+        if (!std::filesystem::exists(path)) {
+            std::cerr << Sem::Err << "no such file: " << path << Sem::Reset << "\n";
+            return false;
+        }
+        pending_media.push_back({path, nullptr, nullptr, /*is_video=*/true});
+        std::cout << Sem::Info << "attached video from '" << path << "'"
+                  << Sem::Reset << "\n";
         return true;
     };
 
@@ -923,6 +977,11 @@ int command_chat(const LlamaCommonOptions & opts,
                 multimodal_active = true;
             }
             continue;
+        } else if (starts_with_sv(line, "/video ")) {
+            if (attach_video(trim(line.substr(7)))) {
+                multimodal_active = true;
+            }
+            continue;
         } else {
             // Plain user message: assemble content from any buffered /read text
             // and pending media markers, then commit to history.
@@ -1015,6 +1074,26 @@ int command_chat(const LlamaCommonOptions & opts,
             // turn. Correct but O(history) per turn.
             llama_memory_seq_rm(mem, seq_id, 0, -1);
             kv_tokens.clear();
+
+            // Video entries carry single-use lazy bitmaps that the previous turn's
+            // tokenize already consumed, so re-decode each one fresh from its path
+            // before re-tokenizing. Images keep their bitmap across turns.
+            bool video_rebuild_ok = true;
+            for (auto & m : conv_media) {
+                if (!m.is_video) continue;
+                ChimeraVideoBitmap v = load_video_lazy_bitmap(
+                    mctx.get(), m.path, opts.video_fps, opts.video_timestamp_ms,
+                    opts.ffmpeg_dir);
+                if (!v.bitmap) {
+                    std::cerr << Sem::Err << "failed to decode video (is ffmpeg "
+                                 "installed?): " << m.path << Sem::Reset << "\n";
+                    video_rebuild_ok = false;
+                    break;
+                }
+                m.bitmap.reset(v.bitmap);
+                m.video.reset(v.video);
+            }
+            if (!video_rebuild_ok) continue;
 
             std::vector<const mtmd_bitmap *> bitmaps_c;
             bitmaps_c.reserve(conv_media.size());
@@ -2095,7 +2174,17 @@ void bind_gen_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--mmproj", p.prompt_opts.mmproj,
         "Multimodal projector (mmproj GGUF) for vision/audio input");
     cmd->add_option("--image", p.prompt_opts.images,
-        "Image to feed alongside the prompt (repeatable; requires --mmproj)");
+        "Image to feed alongside the prompt (repeatable; requires --mmproj). "
+        "Auto-detects image/audio/video; video uses default decode params");
+    cmd->add_option("--video", p.prompt_opts.videos,
+        "Video to feed alongside the prompt (repeatable; requires --mmproj and "
+        "ffmpeg). Honors --video-fps / --video-timestamp-ms / --ffmpeg-dir");
+    cmd->add_option("--video-fps", p.prompt_opts.video_fps,
+        "Frames per second to sample from --video (<=0 = native fps) [default 4]");
+    cmd->add_option("--video-timestamp-ms", p.prompt_opts.video_timestamp_ms,
+        "Interval in ms for timestamp text chunks in --video (0 = disabled) [default 5000]");
+    cmd->add_option("--ffmpeg-dir", p.prompt_opts.ffmpeg_dir,
+        "Directory containing ffmpeg/ffprobe binaries (default: search PATH)");
     bind_llama_common_opts(cmd, p.prompt_opts);
     p.prompt_cmd = cmd;
 }
@@ -2141,7 +2230,13 @@ void bind_chat_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--db",      p.chat_db_path,
         "Path to the DB file (default: $CHIMERA_DB or platform default)");
     cmd->add_option("--mmproj", p.chat_opts.mmproj,
-        "Multimodal projector (mmproj GGUF) enabling /image and /audio");
+        "Multimodal projector (mmproj GGUF) enabling /image, /audio and /video");
+    cmd->add_option("--video-fps", p.chat_opts.video_fps,
+        "Frames per second to sample from /video (<=0 = native fps) [default 4]");
+    cmd->add_option("--video-timestamp-ms", p.chat_opts.video_timestamp_ms,
+        "Interval in ms for timestamp text chunks in /video (0 = disabled) [default 5000]");
+    cmd->add_option("--ffmpeg-dir", p.chat_opts.ffmpeg_dir,
+        "Directory containing ffmpeg/ffprobe binaries (default: search PATH)");
     cmd->add_option("--color", p.color_arg,
         "Colorize input/output: auto | always | never")
         ->check(CLI::IsMember({"auto", "always", "never"}));

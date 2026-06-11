@@ -46,9 +46,40 @@ struct MtmdBitmapDeleter {
 struct MtmdInputChunksDeleter {
     void operator()(mtmd_input_chunks * c) const;
 };
+// Opaque video-decode context (mtmd-helper.h). When a media file decodes as
+// video, mtmd_helper_bitmap_init_from_file() returns a lazy bitmap whose frame
+// callback reads from this context, so it must outlive mtmd_tokenize(). Forward-
+// declared here to keep mtmd-helper.h out of this header (matches mtmd_context).
+struct mtmd_helper_video;
+struct MtmdVideoDeleter {
+    void operator()(mtmd_helper_video * v) const;
+};
 using MtmdContextPtr     = std::unique_ptr<mtmd_context, MtmdContextDeleter>;
 using MtmdBitmapPtr      = std::unique_ptr<mtmd_bitmap, MtmdBitmapDeleter>;
 using MtmdInputChunksPtr = std::unique_ptr<mtmd_input_chunks, MtmdInputChunksDeleter>;
+using MtmdVideoPtr       = std::unique_ptr<mtmd_helper_video, MtmdVideoDeleter>;
+
+// --- video input ------------------------------------------------------------
+
+// A lazily-decoded video as an mtmd bitmap plus its backing decode context.
+// The bitmap's frame callback reads from `video` during mtmd_tokenize(), so
+// `video` must outlive that call. On failure both are null.
+struct ChimeraVideoBitmap {
+    mtmd_bitmap *       bitmap = nullptr;
+    mtmd_helper_video * video  = nullptr;
+};
+
+// Build a lazy video bitmap honoring custom decode params, replicating the
+// frame-pump callback that mtmd_helper_bitmap_init_from_file() uses internally
+// (which hardcodes default params and so cannot honor --video-fps etc.).
+//   fps_target:   <=0 uses the video's native fps; otherwise resample to this.
+//   timestamp_ms: interval for timestamp text chunks; 0 disables them.
+//   ffmpeg_dir:   directory holding ffmpeg/ffprobe; empty searches PATH.
+// Caller owns the result: wrap .bitmap in MtmdBitmapPtr and .video in
+// MtmdVideoPtr. Requires mtmd_helper_support_video(mctx) == true.
+ChimeraVideoBitmap load_video_lazy_bitmap(
+    mtmd_context * mctx, const std::string & path,
+    float fps_target, int64_t timestamp_ms, const std::string & ffmpeg_dir);
 
 // --- file I/O ---------------------------------------------------------------
 

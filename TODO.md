@@ -79,6 +79,32 @@ Longer-term:
       trace + the two implementation options + caveats in
       [`docs/dev/gpu-layers-default.md`](docs/dev/gpu-layers-default.md).
 
+## Multimodal / video
+
+Video input (`gen --video`, chat `/video`) landed on top of upstream's
+`MTMD_VIDEO` decoder (ffmpeg/ffprobe at runtime). Open items:
+
+- [ ] End-to-end video test. Only the plumbing is covered today (the
+      `--video`-without-`--mmproj` guard is a smoke test); the actual
+      decode path has never been exercised in CI because it needs a
+      video-capable mmproj (Qwen-VL class) plus a short clip fixture in
+      `models/`. Add a `test-slow` case mirroring the existing
+      `gen --mmproj --image` vision-pipeline test once a fixture exists.
+- [ ] Chat `/video` re-decodes the entire clip via ffmpeg on every turn.
+      The REPL re-tokenizes the whole media history each turn (see the
+      `multimodal_active` branch in `command_chat`), and a video lazy
+      bitmap is single-use, so each video entry is rebuilt from its path
+      before every turn — O(history) ffmpeg invocations. Correct but
+      heavy; an incremental-`n_past` / decoded-frame-cache path would
+      avoid the repeated decode. Inherent to the current re-tokenize
+      design, not video-specific.
+- [ ] Video input on `chimera serve`. Only `gen` and `chat` route video
+      today. The server multimodal path runs through upstream
+      server-context (no chimera-side `--video-*` knobs); decide whether
+      to expose fps/timestamp/ffmpeg-dir there and verify a video sent
+      via the OpenAI `image_url` field decodes (it would currently use
+      upstream's default decode params, if it works at all).
+
 ## Documentation
 
 - [ ] Example gallery: short transcripts of each subcommand against a

@@ -28,6 +28,13 @@ struct LlamaCommonOptions {
     std::string model;
     std::string mmproj;             // empty = text-only; otherwise mtmd vision projector
     std::vector<std::string> images;  // images to feed alongside the prompt (gen only)
+    // Explicit video inputs (gen only). Unlike --image (which auto-detects
+    // image/audio/video with default decode params), --video always routes
+    // through the video decoder and honors the params below. Requires ffmpeg.
+    std::vector<std::string> videos;
+    float       video_fps          = 4.0f;  // mtmd fps_target; <=0 = native video fps
+    int64_t     video_timestamp_ms = 5000;  // timestamp-text interval; 0 = disabled
+    std::string ffmpeg_dir;                 // dir with ffmpeg/ffprobe; empty = search PATH
     uint32_t n_ctx = 4096;
     uint32_t n_batch = 512;
     uint32_t n_ubatch = 0;          // 0 = follow n_batch (preserves legacy behavior)
