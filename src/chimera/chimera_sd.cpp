@@ -136,17 +136,19 @@ static_assert(std::is_same_v<decltype(sd_ctx_params_t::sampler_rng_type),       
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::prediction),                      enum prediction_t>,     "sd_ctx_params_t::prediction retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::lora_apply_mode),                 enum lora_apply_mode_t>,"sd_ctx_params_t::lora_apply_mode retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::enable_mmap),                      bool>, "sd_ctx_params_t::enable_mmap retyped.");
-static_assert(std::is_same_v<decltype(sd_ctx_params_t::vae_decode_only),                  bool>, "sd_ctx_params_t::vae_decode_only retyped.");
-static_assert(std::is_same_v<decltype(sd_ctx_params_t::offload_params_to_cpu),            bool>, "sd_ctx_params_t::offload_params_to_cpu retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::diffusion_flash_attn),             bool>, "sd_ctx_params_t::diffusion_flash_attn retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::diffusion_conv_direct),            bool>, "sd_ctx_params_t::diffusion_conv_direct retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::vae_conv_direct),                  bool>, "sd_ctx_params_t::vae_conv_direct retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::flash_attn),                       bool>, "sd_ctx_params_t::flash_attn retyped.");
-static_assert(std::is_same_v<decltype(sd_ctx_params_t::keep_clip_on_cpu),                 bool>, "sd_ctx_params_t::keep_clip_on_cpu retyped.");
-static_assert(std::is_same_v<decltype(sd_ctx_params_t::keep_vae_on_cpu),                  bool>, "sd_ctx_params_t::keep_vae_on_cpu retyped.");
-static_assert(std::is_same_v<decltype(sd_ctx_params_t::keep_control_net_on_cpu),          bool>, "sd_ctx_params_t::keep_control_net_on_cpu retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::force_sdxl_vae_conv_scale),        bool>, "sd_ctx_params_t::force_sdxl_vae_conv_scale retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::stream_layers),                    bool>, "sd_ctx_params_t::stream_layers retyped.");
+// sd.cpp (master-700) dropped the per-component "keep on CPU" / decode-only
+// booleans (vae_decode_only, offload_params_to_cpu, keep_{clip,vae,control_net}_on_cpu)
+// in favor of backend-assignment spec strings. load_model translates chimera's
+// offload flags into these (see below). The VAE is now always built with full
+// encode+decode, so vae_decode_only has no replacement and is simply dropped.
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::backend),                  const char *>, "sd_ctx_params_t::backend retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::params_backend),           const char *>, "sd_ctx_params_t::params_backend retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::vae_format),         enum sd_vae_format_t>, "sd_ctx_params_t::vae_format retyped.");
 
 // ---- sd_img_gen_params_t top-level fields (build_img_gen_params) ------
@@ -488,16 +490,30 @@ SdContextPtr load_model(const LoadParams & params) {
     ctx_params.photo_maker_path      = cstr(params.photo_maker);
     ctx_params.n_threads             = params.threads;
     ctx_params.enable_mmap           = params.enable_mmap;
-    ctx_params.vae_decode_only       = params.vae_decode_only;
-    ctx_params.offload_params_to_cpu = params.offload_to_cpu;
     ctx_params.diffusion_flash_attn  = params.diffusion_flash_attn;
     ctx_params.diffusion_conv_direct = params.diffusion_conv_direct;
     ctx_params.vae_conv_direct       = params.vae_conv_direct;
     ctx_params.flash_attn               = params.flash_attn;
-    ctx_params.keep_clip_on_cpu         = params.keep_clip_on_cpu;
-    ctx_params.keep_vae_on_cpu          = params.keep_vae_on_cpu;
-    ctx_params.keep_control_net_on_cpu  = params.keep_control_net_on_cpu;
     ctx_params.force_sdxl_vae_conv_scale = params.force_sdxl_vae_conv_scale;
+
+    // Offload translation. sd.cpp (master-700) replaced the per-component
+    // "keep on CPU" booleans with backend-assignment spec strings: a global
+    // params spec (params_backend) and a per-module compute spec (backend).
+    // Mirror the upstream CLI exactly -- offload_to_cpu prepends "*=cpu" to
+    // params_backend; the keep_*_on_cpu flags prepend te=/vae=/controlnet=cpu
+    // to backend. The backing std::strings must outlive new_sd_ctx() below,
+    // which copies them; they live for the rest of this function.
+    std::string sd_backend_spec;
+    std::string sd_params_backend_spec;
+    auto prepend_assignment = [](std::string & spec, const char * assignment) {
+        spec = spec.empty() ? assignment : std::string(assignment) + "," + spec;
+    };
+    if (params.offload_to_cpu)         prepend_assignment(sd_params_backend_spec, "*=cpu");
+    if (params.keep_clip_on_cpu)       prepend_assignment(sd_backend_spec, "te=cpu");
+    if (params.keep_vae_on_cpu)        prepend_assignment(sd_backend_spec, "vae=cpu");
+    if (params.keep_control_net_on_cpu) prepend_assignment(sd_backend_spec, "controlnet=cpu");
+    if (!sd_backend_spec.empty())        ctx_params.backend        = sd_backend_spec.c_str();
+    if (!sd_params_backend_spec.empty()) ctx_params.params_backend = sd_params_backend_spec.c_str();
     if (params.max_vram > 0.0f) {
         ctx_params.max_vram = params.max_vram;
     }
