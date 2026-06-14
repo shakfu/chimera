@@ -36,11 +36,12 @@ compiles it as part of the `chimera` target (see
 same trick. **The mechanism changed at b9318** — see § 2.1 for the
 history. Current (b9318+) flow:
 
-1. Stage the four prebuilt assets into `src-aux/webui/` and the upstream
-   host helper `tools/ui/embed.cpp` as `src-aux/ui-embed.cpp`.
+1. Stage the **entire prebuilt `dist/` tree** into `src-aux/webui/` and the
+   upstream host helper `tools/ui/embed.cpp` as `src-aux/ui-embed.cpp`.
+   (Before b9631 this was a fixed set of four flat files; see § 2.1.)
 2. The chimera CMake **always** builds the helper and runs it to generate
    `ui.cpp` + `ui.h` in the chimera build dir. With
-   `-DCHIMERA_WEBUI_EMBED=ON` the four assets are passed to the helper, so
+   `-DCHIMERA_WEBUI_EMBED=ON` the staged `webui/` dir is passed to the helper, so
    the generated `ui.h` emits `#define LLAMA_UI_HAS_ASSETS 1` and `ui.cpp`
    carries the embedded byte arrays. With it OFF (default), the helper
    gets no assets and emits an empty stub (`llama_ui_find_asset` returns
@@ -123,9 +124,15 @@ enabling embed requires building them first (`npm install && npm run
 build` in `tools/ui/`), after which `make deps` stages them.
 
 What didn't survive the rename: the staged-asset path. Upstream no
-longer ships built `bundle.js` / `bundle.css` / `index.html` in the
-source tree. To embed the UI on a post-b9200 pin you must run the
-Vite build yourself **before** invoking the chimera builder:
+longer ships built assets in the source tree, and at **b9631** the asset
+*shape* changed again — the flat `bundle.js` / `bundle.css` are gone,
+replaced by a SvelteKit/PWA `dist/` tree (hashed JS/CSS under
+`_app/immutable/`, plus PWA splash images, `sw.js`, manifest, etc.).
+`embed.cpp`'s CLI changed in lockstep, from a fixed list of
+`<name> <path>` pairs to a single `<asset_dir>` it recurses (asset
+names become relative paths). chimera now stages the whole `dist/` tree
+and passes the directory. To embed the UI you must run the Vite build
+yourself **before** invoking the chimera builder:
 
 ```
 make deps        # clone llama.cpp@<pin> first; this also stages headers etc.
@@ -147,10 +154,11 @@ make rebuild
 3. `tools/ui/dist/` (post-b9200, in case a future Vite config writes
    to the source tree instead).
 
-The first directory containing all four expected files wins. If none
-does, `manage.py` logs the absence and `CHIMERA_WEBUI_EMBED=ON` will
-either FATAL_ERROR (explicit ON) or quietly become OFF (AUTO mode) at
-CMake-time.
+The first directory containing `index.html` (the SPA entrypoint, and the
+sentinel the top-level CMake probe also checks) wins; its full tree is
+copied verbatim into `src-aux/webui/`. If none has it, `manage.py` logs
+the absence and `CHIMERA_WEBUI_EMBED=ON` will either FATAL_ERROR
+(explicit ON) or quietly become OFF (AUTO mode) at CMake-time.
 
 This is opt-in extra work and deliberately so: requiring Node toolchain
 as a hard chimera dependency would be a regression. If upstream ever
@@ -167,12 +175,14 @@ intended), chimera can add a fourth candidate dir and the manual
 | `CHIMERA_WEBUI_EMBED=ON`  | 41 MB | 37 MB |
 | **net webui cost** | **+7 MB** | **+6 MB** |
 
-The asset bytes (6.6 MB `bundle.js` + 505 KB `bundle.css` + ~7 KB
-`index.html` + ~268 B `loading.html`) sit in the binary's data section
-as plain `unsigned char` arrays, which `strip` cannot touch — so the
-asset payload passes through ~1:1. The strip-recoverable delta (~1 MB)
-is debug info on the surrounding chimera + server-http code, not on the
-xxd'd assets.
+The asset bytes (the full `dist/` tree — hashed JS/CSS under
+`_app/immutable/`, `index.html`, `loading.html`, PWA splash images,
+`sw.js`, manifest; ~8 MB on the b9631 pin) sit in the binary's data
+section as plain `unsigned char` arrays, which `strip` cannot touch — so
+the asset payload passes through ~1:1. The strip-recoverable delta
+(~1 MB) is debug info on the surrounding chimera + server-http code, not
+on the embedded assets. (The +7 MB table above predates the b9631
+PWA-tree growth; expect ~+8 MB now.)
 
 Stripped is what gets shipped; the +6 MB figure is the one to quote in
 user-facing material. See § 6.4 for the only viable size-reduction path
@@ -227,14 +237,18 @@ PORT=8080
 # Wait for /health to go 200, then:
 curl -o /dev/null -w "%{http_code} %{content_type} size=%{size_download}\n" \
     http://127.0.0.1:$PORT/
-# expect: 200 text/html; charset=utf-8  size=~6900
+# expect: 200 text/html; charset=utf-8
 
-curl -o /dev/null -w "%{http_code} size=%{size_download}\n" \
-    http://127.0.0.1:$PORT/bundle.js
-# expect: 200  size=~6.6 MB
+# Assets are now served at their relative path under the dist tree, with
+# content-hashed names. Pick one from the staged tree and request it:
+ASSET=$(find thirdparty/llama.cpp/src-aux/webui/_app/immutable -name 'bundle.*.js' \
+    | head -1 | sed 's#.*src-aux/webui##')
+curl -o /dev/null -w "%{http_code} %{content_type} size=%{size_download}\n" \
+    "http://127.0.0.1:$PORT$ASSET"
+# expect: 200 application/javascript ...
 
-curl -o /dev/null -w "%{http_code}\n" http://127.0.0.1:$PORT/bundle.css
-# expect: 200
+curl -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:$PORT/_app/nope.js"
+# expect: 404 (unknown asset)
 ```
 
 The startup banner should also include a `webui:` line. If

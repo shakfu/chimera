@@ -200,14 +200,15 @@
 //   - Built-in tool plugins (`--server-tools`). EXPERIMENTAL upstream.
 //   - MCP CORS proxy (`--webui-mcp-proxy`). EXPERIMENTAL upstream.
 //   - GCP / Vertex AI compat (`ctx_http.register_gcp_compat()`).
-//   - Web chat UI (`index.html, bundle.js, bundle.css`). Experimental:
+//   - Web chat UI (the upstream SvelteKit/PWA dist tree). Experimental:
 //     opt in at configure time with `-DCHIMERA_WEBUI_EMBED=ON` to bake
-//     upstream's prebuilt bundle (~7 MB) into the chimera binary via the
+//     upstream's prebuilt bundle (~8 MB) into the chimera binary via the
 //     generated ui.cpp (see src/chimera/CMakeLists.txt). When enabled,
-//     GET / serves index.html and GET /bundle.{js,css} serve the assets;
-//     the runtime route-binding lives in upstream's server-http.cpp gated
-//     by the generated LLAMA_UI_HAS_ASSETS define + params.ui (chimera
-//     defaults the latter true; pass `--no-webui` to disable per-run).
+//     GET / serves index.html and every embedded asset is served at its
+//     relative path (e.g. /_app/immutable/bundle.HASH.js) via upstream's
+//     dynamic llama_ui_get_assets() route binding in server-http.cpp,
+//     gated by the generated LLAMA_UI_HAS_ASSETS define + params.ui
+//     (chimera defaults the latter true; pass `--no-webui` to disable).
 //   - Child-server / parent-process sleeping notification.
 //   - SSL / TLS (no `--ssl-cert-file` / `--ssl-key-file`). Run behind a
 //     reverse proxy for HTTPS.
@@ -1138,7 +1139,7 @@ int command_serve(const ServeOptions & opts) {
               << "  tools: /infill  /tokenize  /detokenize  /apply-template\n"
 #ifdef LLAMA_BUILD_WEBUI
               << (opts.webui
-                    ? "  webui: GET /  /bundle.js  /bundle.css (built with CHIMERA_WEBUI_EMBED=ON)\n"
+                    ? "  webui: GET /  + embedded UI assets (built with CHIMERA_WEBUI_EMBED=ON)\n"
                     : "  webui: built in but disabled by --no-webui\n")
 #endif
               << "  anthropic: /v1/messages  /v1/messages/count_tokens\n";

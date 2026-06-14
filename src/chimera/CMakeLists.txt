@@ -179,14 +179,19 @@ endif()
 #   - ui.h:   struct llama_ui_asset + llama_ui_find_asset() decl, plus
 #             `#define LLAMA_UI_HAS_ASSETS 1` when >=1 asset is embedded.
 #   - ui.cpp: the definition (asset table + lookup, or a nullptr stub).
-# server-http.cpp gates its GET / + /bundle.{js,css} routes on the
-# generated LLAMA_UI_HAS_ASSETS define and the runtime params.ui flag —
-# NOT on LLAMA_BUILD_WEBUI/LLAMA_BUILD_UI, which it no longer consults.
+# server-http.cpp gates its asset routes (GET / + every embedded asset,
+# served dynamically via llama_ui_get_assets()) on the generated
+# LLAMA_UI_HAS_ASSETS define and the runtime params.ui flag — NOT on
+# LLAMA_BUILD_WEBUI/LLAMA_BUILD_UI, which it no longer consults.
 #
-# When CHIMERA_LINK_WEBUI is ON (top-level scope decided assets are
-# present), the four prebuilt assets are passed to the generator so
-# LLAMA_UI_HAS_ASSETS is emitted and the routes compile in. When OFF, the
-# generator gets no assets and emits the stub.
+# embed.cpp's CLI changed at b9631: it now takes a single asset DIRECTORY
+# (`<out_cpp> <out_h> [<asset_dir>]`) and recursively embeds every file
+# under it, naming each asset by its relative path (e.g.
+# "_app/immutable/bundle.HASH.js"). The pre-b9631 "pass a fixed list of
+# flat files" convention is gone, because upstream's SvelteKit/PWA build no
+# longer emits flat bundle.{js,css}. So when CHIMERA_LINK_WEBUI is ON we
+# pass the staged dist tree root and the generator embeds the whole tree;
+# when OFF it gets no dir and emits the nullptr stub.
 set(_ui_embed_src "${LLAMACPP_SRC_AUX}/ui-embed.cpp")
 set(_ui_cpp "${CMAKE_CURRENT_BINARY_DIR}/ui.cpp")
 set(_ui_h   "${CMAKE_CURRENT_BINARY_DIR}/ui.h")
@@ -199,11 +204,12 @@ target_compile_features(chimera_ui_embed PRIVATE cxx_std_17)
 set(_ui_embed_args "")
 set(_ui_embed_deps "")
 if(CHIMERA_LINK_WEBUI)
+    # Pass the staged dist tree root; embed.cpp recurses it. CONFIGURE_DEPENDS
+    # so the dependency glob re-evaluates when assets are (re-)staged, since
+    # the hashed filenames change on every upstream UI rebuild.
     set(_webui_src "${LLAMACPP_SRC_AUX}/webui")
-    foreach(_asset index.html bundle.js bundle.css loading.html)
-        list(APPEND _ui_embed_args "${_asset}" "${_webui_src}/${_asset}")
-        list(APPEND _ui_embed_deps "${_webui_src}/${_asset}")
-    endforeach()
+    list(APPEND _ui_embed_args "${_webui_src}")
+    file(GLOB_RECURSE _ui_embed_deps CONFIGURE_DEPENDS "${_webui_src}/*")
     unset(_webui_src)
 endif()
 

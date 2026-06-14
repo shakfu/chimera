@@ -806,14 +806,21 @@ class LlamaCppBuilder(GgmlBuilder):
         # filenames match the pre-b9200 names (the Vite plugin normalizes
         # bundle.<hash>.js -> bundle.js etc.).
         #
-        # Probe both layouts. The first directory that contains all four
-        # expected files wins. If none has them, log and skip — the
-        # CHIMERA_WEBUI_EMBED=ON path is unavailable on this pin and the
-        # AUTO-mode probe in the top-level CMake will quietly disable it.
-        # Default builds (WEBUI_EMBED=OFF) are unaffected either way.
+        # The b9631+ embed helper (tools/ui/embed.cpp, staged below) takes a
+        # single asset DIRECTORY and recursively embeds every file under it,
+        # naming each asset by its relative path. This replaced the pre-b9631
+        # model of passing a fixed set of flat files (index.html, bundle.js,
+        # bundle.css, loading.html): upstream's SvelteKit/PWA build no longer
+        # emits flat bundle.* (JS/CSS now live hashed under _app/immutable/),
+        # so the whole dist/ tree must be staged verbatim.
+        #
+        # Probe each known dist layout; the first that contains index.html
+        # (the SPA entrypoint, and the same sentinel the top-level CMake probe
+        # checks) wins. If none has it, log and skip — CHIMERA_WEBUI_EMBED=ON
+        # is unavailable on this pin and the AUTO-mode probe in the top-level
+        # CMake will quietly disable it. Default builds (OFF) are unaffected.
         webui_aux = src_aux / "webui"
-        webui_aux.mkdir(exist_ok=True)
-        webui_assets = ["index.html", "bundle.js", "bundle.css", "loading.html"]
+        webui_sentinel = "index.html"
         candidate_dirs = [
             # Pre-b9200 layout (prebuilt assets in source tree).
             (self.src_dir / "tools" / "server" / "public", "pre-b9200 layout"),
@@ -836,23 +843,29 @@ class LlamaCppBuilder(GgmlBuilder):
         ]
         chosen = None
         for candidate, label in candidate_dirs:
-            if candidate.is_dir() and all(
-                (candidate / a).is_file() for a in webui_assets
-            ):
+            if (candidate / webui_sentinel).is_file():
                 chosen = (candidate, label)
                 break
         if chosen is not None:
             src, label = chosen
-            self.log.info(f"staging webui assets from {src} ({label})")
-            self.glob_copy(src, webui_aux, patterns=webui_assets)
+            self.log.info(f"staging webui assets (full dist tree) from {src} ({label})")
+            # copytree (via self.copy) requires a non-existent dst, so clear
+            # any prior staging first. This also drops stale hashed filenames
+            # from an earlier UI build.
+            self.remove(webui_aux, silent=True)
+            self.copy(src, webui_aux)
         else:
+            # Keep an empty dir so the top-level CMake AUTO/ON probe (which
+            # checks webui/index.html) resolves deterministically to "off".
+            webui_aux.mkdir(parents=True, exist_ok=True)
             self.log.info(
                 "webui prebuilt assets not present — CHIMERA_WEBUI_EMBED=ON "
                 "is unavailable on this pin. Checked:"
             )
             for candidate, label in candidate_dirs:
                 self.log.info(
-                    f"  - {candidate} ({label}): {'exists but incomplete' if candidate.is_dir() else 'absent'}"
+                    f"  - {candidate} ({label}): "
+                    f"{'exists but no index.html' if candidate.is_dir() else 'absent'}"
                 )
             self.log.info(
                 "  To enable embed on a post-b9200 pin: run "
