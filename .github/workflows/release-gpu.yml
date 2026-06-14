@@ -328,7 +328,7 @@ jobs:
   build-cuda-windows:
     name: build (cuda, windows x86_64)
     needs: preflight
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 150
     env:
       GGML_NATIVE: "0"
