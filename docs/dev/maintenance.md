@@ -212,7 +212,8 @@ failure later.
 
 `src/chimera/chimera_pin_check.cpp` for the llama.cpp surface
 (every `server_routes` handler_t field, `common_params` field types
-including `webui`/`ui`, `LLAMA_POOLING_TYPE_*` enum values, key
+including `ui` — formerly `webui`, whose deprecated alias upstream
+dropped at b9741 — `LLAMA_POOLING_TYPE_*` enum values, key
 `llama_*` function signatures including the `llama_memory_t` API
 that the persistent `chimera::Llama` ctx relies on). Matching
 per-modality pin blocks live in `chimera_whisper.cpp`
@@ -225,6 +226,23 @@ function signatures: `new_sd_ctx`, `free_sd_ctx`, `generate_image`,
 `sd_ctx_supports_image_generation`). ggml.h collisions mean whisper
 / sd can't share a TU with llama, so each modality owns its own
 pin-check function.
+
+**Blind spot: field -> accessor drift.** Pin-checks assert member
+*types* via `decltype`; they cannot assert that a plain data member
+stayed a plain data member. When upstream converts a field into an
+accessor method, `decltype(common_params_model::name)` simply stops
+compiling rather than tripping a chimera-specific message — and there
+is no `static_assert` to keep ahead of it. This is exactly what bit
+the b9741 bump: `common_params_model::name` (a `std::string` field)
+became `get_name()` (derives the name from `hf_repo` / `docker_repo` /
+`path`), breaking the `model_alias` defaulting in `chimera_serve.cpp`.
+The catch is the `bump-check` header diff, not a pin: `bump-check`
+diffs `common/common.h`, so a `common_params_model` struct change
+shows up as added/removed symbols *before* you flip the pin. Add
+"scan the `common_params_model` diff for field <-> accessor changes
+(`name`/`get_name`, `path`, `hf_repo`, ...)" to the bump checklist —
+chimera reads these members directly and they are not statically
+pinned.
 
 ### 4. Adapter shim between chimera_serve and `server_routes`
 

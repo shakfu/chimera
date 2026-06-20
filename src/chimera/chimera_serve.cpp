@@ -447,13 +447,10 @@ common_params build_common_params(const ServeOptions & opts) {
     // these fields. In a webui-less build the routes don't exist either
     // way, so the flag is a harmless pass-through.
     //
-    // Around b9318 server-http.cpp switched to reading params.ui; the
-    // older params.webui is now only a default-initializer alias
-    // (`bool webui = ui;`), so setting webui alone no longer disables the
-    // UI. Set both: ui for the current consumer, webui for forward-compat
-    // if anything still reads it.
-    params.ui    = opts.webui;
-    params.webui = opts.webui;
+    // Around b9318 server-http.cpp switched to reading params.ui; the older
+    // params.webui became a deprecated alias and was removed entirely around
+    // b9741, so `ui` is now the only knob that gates the embedded UI.
+    params.ui = opts.webui;
 
     // External static UI directory. server_http_context::init mounts
     // this at GET / via cpp-httplib's set_mount_point when non-empty.
@@ -519,8 +516,10 @@ common_params build_common_params(const ServeOptions & opts) {
 
     // For consistency between router-mode and single-model paths upstream
     // sets the same name as alias if not provided. /v1/models reads this.
-    if (params.model_alias.empty() && !params.model.name.empty()) {
-        params.model_alias.insert(params.model.name);
+    // Upstream replaced common_params_model::name with a get_name() accessor
+    // (derives from hf_repo / docker_repo / path) around b9741.
+    if (params.model_alias.empty() && !params.model.get_name().empty()) {
+        params.model_alias.insert(params.model.get_name());
     }
 
     return params;

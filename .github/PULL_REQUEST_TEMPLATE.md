@@ -61,6 +61,12 @@ doc/dev/maintenance.md for the full rationale.
   - `src/chimera/CMakeLists.txt` link order / archive groups.
   - `src/chimera/chimera_pin_check.cpp` — does each removed/renamed
     symbol have a matching `static_assert`? If not, add one.
+  - `common_params_model` accessor drift — scan the `common.h` diff for
+    fields that became accessor methods (`name` -> `get_name()` at b9741,
+    and likewise `path` / `hf_repo` / `docker_repo`). chimera reads these
+    members directly in `chimera_serve.cpp` and they are *not* statically
+    pinned (`decltype` can't assert a field stayed a field), so the diff
+    is the only catch.
   - `thirdparty/llama.cpp/src-aux/server-http.cpp` — chimera compiles
     this directly into its own target; check for any new
     `#include` it expects.

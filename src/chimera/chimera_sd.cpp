@@ -129,7 +129,7 @@ static_assert(std::is_same_v<decltype(sd_ctx_params_t::photo_maker_path),       
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::embeddings),                      const sd_embedding_t *>, "sd_ctx_params_t::embeddings retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::embedding_count),                 uint32_t>, "sd_ctx_params_t::embedding_count retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::n_threads),                       int>,   "sd_ctx_params_t::n_threads retyped.");
-static_assert(std::is_same_v<decltype(sd_ctx_params_t::max_vram),                        float>, "sd_ctx_params_t::max_vram retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::max_vram),                        const char *>, "sd_ctx_params_t::max_vram retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::wtype),                           enum sd_type_t>,        "sd_ctx_params_t::wtype retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::rng_type),                        enum rng_type_t>,       "sd_ctx_params_t::rng_type retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::sampler_rng_type),                enum rng_type_t>,       "sd_ctx_params_t::sampler_rng_type retyped.");
@@ -505,6 +505,7 @@ SdContextPtr load_model(const LoadParams & params) {
     // which copies them; they live for the rest of this function.
     std::string sd_backend_spec;
     std::string sd_params_backend_spec;
+    std::string sd_max_vram_str;
     auto prepend_assignment = [](std::string & spec, const char * assignment) {
         spec = spec.empty() ? assignment : std::string(assignment) + "," + spec;
     };
@@ -514,8 +515,14 @@ SdContextPtr load_model(const LoadParams & params) {
     if (params.keep_control_net_on_cpu) prepend_assignment(sd_backend_spec, "controlnet=cpu");
     if (!sd_backend_spec.empty())        ctx_params.backend        = sd_backend_spec.c_str();
     if (!sd_params_backend_spec.empty()) ctx_params.params_backend = sd_params_backend_spec.c_str();
+    // Upstream retyped max_vram from float to const char* (sd.cpp master-709):
+    // it now accepts either a GiB budget or a per-backend assignment spec
+    // ("cuda0=6,vulkan0=2") for graph-cut segmented param offload. chimera's
+    // typed knob only expresses a GiB budget, so format the float into a
+    // string that outlives this function; sd_ctx copies/parses it downstream.
     if (params.max_vram > 0.0f) {
-        ctx_params.max_vram = params.max_vram;
+        sd_max_vram_str     = std::to_string(params.max_vram);
+        ctx_params.max_vram = sd_max_vram_str.c_str();
     }
     auto parse_rng = [](const std::string & name, const char * flag) -> rng_type_t {
         const rng_type_t t = str_to_rng_type(name.c_str());

@@ -111,18 +111,14 @@ static_assert(std::is_same_v<decltype(common_params::api_keys),
                              std::vector<std::string>>,
               "common_params::api_keys changed type "
               "(chimera serve --api-key push_back relies on this).");
-static_assert(std::is_same_v<decltype(common_params::webui),         bool>,
-              "common_params::webui changed type "
-              "(chimera serve --no-webui flips this).");
-// Around llama.cpp b9200 upstream renamed the canonical UI flag to `ui`
-// and kept `webui` as a deprecated alias (`bool webui = ui;` in common.h).
-// Asserting `ui` here too means that when upstream eventually drops the
-// alias, the compile error points at the right replacement field rather
-// than just the disappearing `webui`.
+// Around llama.cpp b9200 upstream renamed the canonical UI flag from `webui`
+// to `ui`, keeping `webui` as a deprecated alias (`bool webui = ui;`). The
+// alias was dropped around b9741, so `ui` is now the only field; chimera
+// serve --no-webui flips it.
 static_assert(std::is_same_v<decltype(common_params::ui),            bool>,
               "common_params::ui changed type or was removed "
               "(upstream renamed webui -> ui around b9200; chimera serve "
-              "should mirror that name when the deprecated alias is dropped).");
+              "--no-webui flips this).");
 static_assert(std::is_same_v<decltype(common_params::public_path),   std::string>,
               "common_params::public_path changed type "
               "(chimera serve --public-path assigns this).");

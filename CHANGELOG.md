@@ -4,6 +4,24 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.8]
+
+### Changed
+
+- **Update llama.cpp version to b9741** (from b9631) and stable-diffusion.cpp to **master-709-92a3b73** (from master-700-c2df4e1); whisper.cpp stays at v1.8.6. Both deps required chimera-side code changes this time (see Fixed): the b9631 -> b9741 llama.cpp range removed a deprecated `common_params` alias chimera was still setting and converted a `common_params_model` field into an accessor, and the sd.cpp range retyped one `sd_ctx_params_t` field. All three were caught at compile time -- the SD one by its field-level pin-check `static_assert`, the two llama.cpp ones by the call sites in `chimera_serve.cpp` (the dropped field has no pin to trip; see the new accessor-drift note in `docs/dev/maintenance.md`).
+
+### Fixed
+
+- **Adapt to sd.cpp retyping `sd_ctx_params_t::max_vram` from `float` to `const char*` (master-700 -> master-709).** The field now accepts either a GiB budget *or* a per-backend assignment spec (`"cuda0=6,vulkan0=2"`) for graph-cut segmented param offload, parsed by upstream's `MaxVramAssignment::parse`. chimera's public knob is unchanged -- the `--max-vram` / `--sd-max-vram` CLI flags, `SdOptions::max_vram`, and `LoadParams::max_vram` stay `float` (a GiB budget) -- so this is a non-breaking translation: `chimera_sd.cpp::load_model` now formats the float via `std::to_string` into a `std::string` scoped to outlive the `new_sd_ctx()` call that copies it, and assigns its `.c_str()` (mirroring the adjacent backend-spec strings). Verified that upstream's `parse_strict_float` accepts the `std::to_string` output. The field-type `static_assert` pin-check was updated `float` -> `const char *`. chimera does not expose the new spec syntax, which it never did, so there is no behavior change.
+
+- **Drop the removed `common_params::webui` alias.** llama.cpp had kept `webui` as a deprecated alias of `ui` (`bool webui = ui;`) since ~b9200 and removed it entirely at b9741. `chimera serve --no-webui` now sets only `params.ui`; the dead forward-compat `params.webui = opts.webui;` assignment and its `static_assert` pin-check were removed (the `ui` pin remains). chimera's own `ServeOptions::webui` option field is unaffected -- only the upstream alias is gone.
+
+- **Adapt to `common_params_model::name` becoming the `get_name()` accessor.** llama.cpp replaced the plain `std::string name` field with a `get_name()` method that derives the name from `hf_repo` / `docker_repo` / `path`. The `/v1/models` alias defaulting in `chimera_serve.cpp` (which copies the model name into `model_alias` when the user did not supply one) now calls `params.model.get_name()`. This is the field-to-accessor drift documented below -- `decltype`-based pin-checks cannot guard it, so it surfaced as a compile error rather than a chimera-specific assert message.
+
+### Changed (docs)
+
+- **Document the field-to-accessor pin-check blind spot.** `docs/dev/maintenance.md` (item 3, pin assertions) gains a "Blind spot: field -> accessor drift" note explaining that `decltype` can assert a member's *type* but cannot assert it stayed a plain data member, with the b9741 `name` -> `get_name()` change as the worked example, and that the `bump-check` `common.h` diff -- not a pin -- is the catch. `.github/PULL_REQUEST_TEMPLATE.md` gains a matching pre-bump audit bullet: scan the `common.h` diff for `common_params_model` members that became accessors (`name`/`get_name`, `path`, `hf_repo`, `docker_repo`), since chimera reads them directly and they are not statically pinned.
+
 ## [0.2.7]
 
 ### Changed
