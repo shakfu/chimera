@@ -4,6 +4,20 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.9]
+
+### Changed
+
+- **Update llama.cpp version to b9804** (from b9741) and stable-diffusion.cpp to **master-721-8caa3f9** (from master-709-92a3b73); whisper.cpp stays at v1.8.6. Both deps built clean with no forced chimera-side code change -- the upstream API surface chimera links against was unaffected. Audit notes from the b9741 -> b9804 / master-709 -> master-721 ranges: llama.cpp removed `common_params::skip_download` and refactored `common_params_model` (added an `empty()` helper, made `get_name()` const), neither of which chimera depends on (build stayed green); the new `llama_model_n_layer_nextn()` accessor and the additive `mtmd_context_params` load-progress callback are unwrapped (niche / cosmetic, deferred); the server-side `/models/sse` progress feed and `SERVER_STATE_DOWNLOADING` are tied to upstream's model-downloading router, which chimera does not use. The sd.cpp range added `LOGIT_NORMAL_SCHEDULER` -- already reachable, since chimera delegates `--scheduler` to upstream's `str_to_scheduler()` and has no hardcoded list to update -- plus one new public `sd_ctx_params_t` field, wired below. Note also that `common_params::checkpoint_min_step` changed its default 256 -> 8192 (a serve context-checkpoint-spacing behavior change, nothing to wrap).
+
+### Added
+
+- **`--eager-load` (`sd`) / `--sd-eager-load` (serve): pre-load SD weights at model-load time.** Wraps the new `sd_ctx_params_t::eager_load` (sd.cpp master-721, PR #1687). sd.cpp's default is lazy weight residency -- tensors are copied into the params backend on first use, so model-load returns fast but the first generation pays a one-time warmup cost. The flag flips this to load every weight up front, trading a slower load for steady-state latency from the very first request. The useful case is `chimera serve`, where lazy residency otherwise makes the first HTTP request after startup slow; for the one-shot `chimera sd` CLI the cost is paid either way so the flag mostly shifts *when*. Independent of `--max-vram`; default off preserves the upstream lazy behavior. Wired through `LoadParams`, `SdOptions`, and `ServeOptions` mirroring the existing `--stream-layers` plumbing, and guarded by a field-level `static_assert` pin-check on `sd_ctx_params_t::eager_load`.
+
+### Changed (docs)
+
+- **Document the new SD load flags and re-verify the webui embed after the bump.** `docs/dev/cli-api-coverage.md` gains perf/offload rows for `--eager-load` and the previously-undocumented `--stream-layers` (both note their `--sd-*` serve mirrors and the `sd_ctx_params_t` field they map to). Separately, `CHIMERA_WEBUI_EMBED=ON` was re-verified end-to-end on this pin (`make test` only ever builds the default `OFF`): an embed build serves `GET /` (200 text/html), a hashed `_app/immutable/*.js` (200 application/javascript), and `manifest.webmanifest` (200), while `--no-webui` 404s the root. The bump shifted upstream's Vite output dir in-tree -- a manual `npm run build` in `tools/ui/` now writes `tools/ui/dist/` (manage.py probe candidate #3) instead of `build/tools/ui/dist/` (candidate #2). manage.py's probe list already covered it, so staging still works; the stale candidate-#3 comment (which described that path as speculative, "kept for symmetry") was corrected to record that it is the candidate that actually wins on the current pin.
+
 ## [0.2.8]
 
 ### Changed

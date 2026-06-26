@@ -425,6 +425,11 @@ struct SdOptions {
     // --stream-layers). Only engages when max_vram > 0.
     bool  stream_layers             = false;
 
+    // Pre-load all params into the params backend at model-load time
+    // instead of lazily on first use (sd_cli's --eager-load). Trades a
+    // slower load for no first-generation warmup. Default off = lazy.
+    bool  eager_load                = false;
+
     // Round 2 sampler / generation core. Floats use < 0 sentinel
     // because upstream defaults are INFINITY (img_cfg, eta) and the
     // legitimate ranges are >= 0. shifted_timestep=0 already means
@@ -575,6 +580,7 @@ struct ServeOptions {
     bool        sd_keep_control_net_on_cpu   = false;
     bool        sd_force_sdxl_vae_conv_scale = false;
     bool        sd_stream_layers             = false; // engages only with sd_max_vram > 0
+    bool        sd_eager_load                = false; // pre-load params at load time (vs lazy on first use)
     std::string sd_rng;                      // empty = upstream default
     std::string sd_sampler_rng;              // empty = upstream default
     std::string sd_prediction;               // empty = upstream default

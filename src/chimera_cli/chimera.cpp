@@ -2558,6 +2558,8 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Soft cap on VRAM use in GiB (0 = leave the upstream default; sd.cpp may swap to CPU above the cap)");
     cmd->add_flag("--stream-layers", p.sd_opts.stream_layers,
         "Stream diffusion weights from CPU during generation (only engages with --max-vram > 0; ignored otherwise)");
+    cmd->add_flag("--eager-load", p.sd_opts.eager_load,
+        "Pre-load all weights into the params backend at model-load time instead of lazily on first use (slower load, no first-generation warmup)");
     cmd->add_flag("--clip-on-cpu", p.sd_opts.keep_clip_on_cpu,
         "Keep the CLIP / text-encoder pass on CPU even when a GPU backend is available");
     cmd->add_flag("--vae-on-cpu", p.sd_opts.keep_vae_on_cpu,
@@ -2752,6 +2754,8 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "Soft cap on VRAM use in GiB (0 = leave the upstream default; sd.cpp may swap to CPU above the cap)");
     cmd->add_flag("--sd-stream-layers", p.serve_opts.sd_stream_layers,
         "Stream diffusion weights from CPU during generation (only engages with --sd-max-vram > 0)");
+    cmd->add_flag("--sd-eager-load", p.serve_opts.sd_eager_load,
+        "Pre-load all sd weights into the params backend at model-load time instead of lazily on first use (slower load, no first-request warmup)");
     cmd->add_flag("--sd-offload-to-cpu", p.serve_opts.sd_offload_to_cpu,
         "Offload sd model parameters to CPU memory");
     cmd->add_flag("--sd-clip-on-cpu", p.serve_opts.sd_keep_clip_on_cpu,

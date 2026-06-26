@@ -93,10 +93,10 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.2.8"
-LLAMACPP_VERSION = "b9741" # from: b9631 
+CHIMERA_VERSION = "0.2.9"
+LLAMACPP_VERSION = "b9804" # from: b9741
 WHISPERCPP_VERSION = "v1.8.6" # from: v1.8.4
-SDCPP_VERSION = "master-709-92a3b73" # from: master-700-c2df4e1
+SDCPP_VERSION = "master-721-8caa3f9" # from: master-709-92a3b73
 # linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
 # commit in CHANGELOG for traceability.
 LINENOISE_VERSION = "master"
@@ -824,18 +824,21 @@ class LlamaCppBuilder(GgmlBuilder):
         candidate_dirs = [
             # Pre-b9200 layout (prebuilt assets in source tree).
             (self.src_dir / "tools" / "server" / "public", "pre-b9200 layout"),
-            # Post-b9200 layout, upstream-built (LLAMA_BUILD_UI=ON in
-            # upstream's CMake invokes npm build and writes here).
+            # Post-b9200 layout, upstream-built: where upstream's own
+            # LLAMA_BUILD_UI=ON CMake build invokes npm and writes the dist.
+            # On older pins (the Vite OUTPUT_DIR was `../../build/tools/ui/dist`
+            # relative to `tools/ui/`) a manual `npm run build` also landed
+            # here; on the current pin it does not -- see the in-tree entry.
             (
                 self.src_dir / "build" / "tools" / "ui" / "dist",
                 "post-b9200 layout, upstream-built",
             ),
-            # Post-b9200 layout, operator-built (operator ran
-            # `npm run build` in tools/ui/ manually). The Vite plugin's
-            # OUTPUT_DIR is `../../build/tools/ui/dist` relative to
-            # `tools/ui/`, so the operator-built path collapses to the
-            # same as upstream-built; this entry kept for symmetry and
-            # in case future Vite configs write elsewhere.
+            # Post-b9200 layout, operator-built in-tree: on the current pin
+            # (b9804) the SvelteKit/adapter-static build moved its output dir
+            # into the source tree, so `npm run build` in `tools/ui/` writes
+            # `tools/ui/dist/` here rather than `build/tools/ui/dist/`.
+            # Verified 2026-06-26: this is the candidate that actually wins on
+            # the current pin when an operator builds the assets by hand.
             (
                 self.src_dir / "tools" / "ui" / "dist",
                 "post-b9200 layout, operator-built (in-tree)",

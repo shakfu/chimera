@@ -707,6 +707,7 @@ int command_serve(const ServeOptions & opts) {
         slp.keep_control_net_on_cpu    = opts.sd_keep_control_net_on_cpu;
         slp.force_sdxl_vae_conv_scale  = opts.sd_force_sdxl_vae_conv_scale;
         slp.stream_layers              = opts.sd_stream_layers;
+        slp.eager_load                 = opts.sd_eager_load;
         slp.rng_type                   = opts.sd_rng;
         slp.sampler_rng_type           = opts.sd_sampler_rng;
         slp.prediction                 = opts.sd_prediction;

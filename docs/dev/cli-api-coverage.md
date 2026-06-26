@@ -295,6 +295,8 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--diffusion-conv-direct` / `--vae-conv-direct` | same | ✅ | Landed 2026-05-20. Map directly to `sd_ctx_params_t.{diffusion,vae}_conv_direct`. |
 | `--clip-on-cpu` / `--vae-on-cpu` / `--control-net-cpu` | same | ✅ | Landed 2026-05-20. Per-component CPU offload — more surgical than `--offload-to-cpu`. |
 | `--force-sdxl-vae-conv-scale` | `--force-sdxl-vae-conv-scale` | ✅ | Landed 2026-05-20. SDXL VAE conv-scale numerics fix. |
+| `--stream-layers` | `--stream-layers` | ✅ | Residency+prefetch weight streaming from CPU during generation; only engages alongside `--max-vram > 0` (sd.cpp silently disables it otherwise). Maps to `sd_ctx_params_t.stream_layers`. Serve mirror: `--sd-stream-layers`. |
+| `--eager-load` | `--eager-load` | ✅ | Landed 2026-06-26 (sd.cpp master-721, PR #1687). Pre-loads all weights into the params backend at model-load time instead of lazily on first use — trades a slower load for no first-generation warmup; independent of `--max-vram`. Maps to `sd_ctx_params_t.eager_load`. Serve mirror: `--sd-eager-load`. |
 
 ### Coverage table — sampler / scheduler / generation core
 

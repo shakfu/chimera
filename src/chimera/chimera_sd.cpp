@@ -142,6 +142,7 @@ static_assert(std::is_same_v<decltype(sd_ctx_params_t::vae_conv_direct),        
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::flash_attn),                       bool>, "sd_ctx_params_t::flash_attn retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::force_sdxl_vae_conv_scale),        bool>, "sd_ctx_params_t::force_sdxl_vae_conv_scale retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::stream_layers),                    bool>, "sd_ctx_params_t::stream_layers retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::eager_load),                       bool>, "sd_ctx_params_t::eager_load retyped.");
 // sd.cpp (master-700) dropped the per-component "keep on CPU" / decode-only
 // booleans (vae_decode_only, offload_params_to_cpu, keep_{clip,vae,control_net}_on_cpu)
 // in favor of backend-assignment spec strings. load_model translates chimera's
@@ -591,6 +592,10 @@ SdContextPtr load_model(const LoadParams & params) {
     // otherwise and logs the reason through our sd_log_callback, so no
     // extra guard is needed here.
     ctx_params.stream_layers = params.stream_layers;
+
+    // Eager param residency: load every weight into the params backend now
+    // instead of on first use. Independent of max_vram / stream_layers.
+    ctx_params.eager_load = params.eager_load;
 
     // Textual-inversion embedding directory. Scan non-recursively for
     // .gguf / .safetensors / .pt files, deriving each token name from
@@ -1060,6 +1065,7 @@ int command_sd(const SdOptions & opts) {
     lp.keep_control_net_on_cpu   = opts.keep_control_net_on_cpu;
     lp.force_sdxl_vae_conv_scale = opts.force_sdxl_vae_conv_scale;
     lp.stream_layers             = opts.stream_layers;
+    lp.eager_load                = opts.eager_load;
     lp.prediction                = opts.prediction;
     lp.lora_apply_mode           = opts.lora_apply_mode;
     lp.vae_format                = opts.vae_format;

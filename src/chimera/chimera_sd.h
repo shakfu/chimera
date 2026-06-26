@@ -219,6 +219,12 @@ struct LoadParams {
     // silently disables it otherwise. Default off = upstream default.
     bool  stream_layers             = false;
 
+    // Pre-load all params into the params backend at model-load time
+    // instead of lazily on first use (sd_cli's --eager-load). Trades a
+    // slower load for no first-generation warmup; independent of max_vram.
+    // Default off = upstream default (lazy).
+    bool  eager_load                = false;
+
     // Enum-string knobs resolved via sd.cpp's str_to_* helpers. Empty
     // leaves the upstream default in place; unknown values exit with
     // BadInput from load_model.
