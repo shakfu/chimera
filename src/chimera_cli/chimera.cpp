@@ -1099,8 +1099,12 @@ int command_chat(const LlamaCommonOptions & opts,
             bitmaps_c.reserve(conv_media.size());
             for (const auto & m : conv_media) bitmaps_c.push_back(m.bitmap.get());
 
-            mtmd_input_text input_text;
+            // text_len is load-bearing: newer mtmd bounds its media-marker
+            // scan by this length rather than strlen(text). Leaving it unset
+            // makes mtmd_tokenize see zero markers and fail rc=2.
+            mtmd_input_text input_text{};
             input_text.text = params.prompt.c_str();
+            input_text.text_len = params.prompt.size();
             // See the text-only branch below for the rationale: the chat
             // template already includes BOS, so add_special=true would
             // double-BOS the prompt and the model emits a stray

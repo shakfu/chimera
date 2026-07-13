@@ -93,10 +93,10 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.2.9"
-LLAMACPP_VERSION = "b9804" # from: b9741
-WHISPERCPP_VERSION = "v1.8.6" # from: v1.8.4
-SDCPP_VERSION = "master-721-8caa3f9" # from: master-709-92a3b73
+CHIMERA_VERSION = "0.2.10"
+LLAMACPP_VERSION = "b9979"
+WHISPERCPP_VERSION = "v1.9.1"
+SDCPP_VERSION = "master-775-b5d8120"
 # linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
 # commit in CHANGELOG for traceability.
 LINENOISE_VERSION = "master"

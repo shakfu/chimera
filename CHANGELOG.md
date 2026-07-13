@@ -4,6 +4,18 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.10]
+
+### Changed
+
+- **Update llama.cpp version to b9979** (from b9804), whisper.cpp to **v1.9.1** (from v1.8.6), and stable-diffusion.cpp to **master-775-b5d8120** (from master-721-8caa3f9). The whisper bump -- its first since v1.8.6 landed in 0.2.6 -- built clean with no chimera-side code change. The llama.cpp and sd.cpp ranges each required one adaptation (see Fixed): sd.cpp resignatured `generate_image`, and mtmd made `mtmd_input_text::text_len` load-bearing. Both breakages were caught by the build and end-to-end tests (the SD one at compile time via its function-pointer pin-check cast, the mtmd one as an empty-output vision-test failure), not by a pre-flip header audit.
+
+### Fixed
+
+- **Adapt to sd.cpp resignaturing `generate_image` (master-721 -> master-775).** Upstream changed the entry point from `sd_image_t* generate_image(ctx, params)` -- returning a heap array, `NULL` on failure -- to `bool generate_image(ctx, params, sd_image_t** images_out, int* num_images_out)`, where success is the return value and the image array plus its count come back through out-params. `chimera_sd.cpp::generate` was updated to the out-param form and now iterates the returned `num_images` instead of `req.batch_count`, so the copy loop matches exactly what sd.cpp produced. The `generate_image` function-pointer `static_cast` pin-check was updated to the new signature (it had already tripped the build at compile time). chimera's public SD path is unchanged; the `sd` and `sd img2img` tests pass.
+
+- **Adapt to mtmd making `mtmd_input_text::text_len` load-bearing (b9804 -> b9979).** `mtmd_tokenize` now bounds its media-marker scan with `input_text.assign(text->text, text->text_len)` (`tools/mtmd/mtmd.cpp`) rather than falling back to `strlen(text)`. chimera had never populated `text_len` in either mtmd path -- it worked only because the old code length-scanned the pointer -- so after the bump the scan string was empty, zero markers were detected, and `mtmd_tokenize` failed hard with `rc=2` ("number of media markers in text (0) does not match number of bitmaps (1)"). Both call sites now value-initialize the struct and set `text_len` to the prompt length: `chimera_llama.cpp::run_generation_mtmd` (the `gen --image` / `--video` path) and `command_chat` in `chimera.cpp` (the interactive multimodal chat path). This restores the vision pipeline -- `gen --mmproj --image` returned empty output before the fix -- verified end-to-end by `make test` (57 pass / 0 fail / 6 skip).
+
 ## [0.2.9]
 
 ### Changed

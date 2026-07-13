@@ -848,8 +848,12 @@ std::string run_generation_mtmd(
         }
     }
 
-    mtmd_input_text input_text;
+    // text_len is load-bearing: newer mtmd bounds its media-marker scan by
+    // this length rather than strlen(text). Leaving it unset makes
+    // mtmd_tokenize see zero markers and fail rc=2 ("markers != bitmaps").
+    mtmd_input_text input_text{};
     input_text.text = final_prompt.c_str();
+    input_text.text_len = final_prompt.size();
     input_text.add_special = !prompt_is_templated;
     input_text.parse_special = true;
 

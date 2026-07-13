@@ -240,7 +240,7 @@ static_assert(static_cast<int>(SD_VAE_FORMAT_COUNT) > 0,
 [[maybe_unused]] static constexpr auto _free_sd_ctx_sig =
     static_cast<void (*)(sd_ctx_t *)>(&free_sd_ctx);
 [[maybe_unused]] static constexpr auto _generate_image_sig =
-    static_cast<sd_image_t * (*)(sd_ctx_t *, const sd_img_gen_params_t *)>(&generate_image);
+    static_cast<bool (*)(sd_ctx_t *, const sd_img_gen_params_t *, sd_image_t **, int *)>(&generate_image);
 [[maybe_unused]] static constexpr auto _sd_ctx_params_init_sig =
     static_cast<void (*)(sd_ctx_params_t *)>(&sd_ctx_params_init);
 [[maybe_unused]] static constexpr auto _sd_img_gen_params_init_sig =
@@ -943,14 +943,19 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
         gp.lora_count = static_cast<uint32_t>(lora_specs.size());
     }
 
-    sd_image_t * images = generate_image(ctx, &gp);
-    if (images == nullptr) {
+    // Upstream (sd.cpp master-775+) returns bool and outputs the image
+    // array + count via out-params; older builds returned the array
+    // directly. Use the returned count rather than req.batch_count so the
+    // loop matches what sd.cpp actually produced.
+    sd_image_t * images     = nullptr;
+    int          num_images = 0;
+    if (!generate_image(ctx, &gp, &images, &num_images) || images == nullptr) {
         fail(ExitCode::Generate, "image generation failed");
     }
 
     std::vector<PixelImage> out;
-    out.reserve(static_cast<size_t>(req.batch_count));
-    for (int i = 0; i < req.batch_count; ++i) {
+    out.reserve(static_cast<size_t>(num_images));
+    for (int i = 0; i < num_images; ++i) {
         PixelImage p;
         p.width    = static_cast<int>(images[i].width);
         p.height   = static_cast<int>(images[i].height);
