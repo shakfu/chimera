@@ -37,6 +37,9 @@ struct Config {
     bool        normalize = true;       // L2-normalize the output vector
     bool        use_mmap = true;
     bool        use_mlock = false;
+    // Names llama_load_mode directly: none | mmap | mlock | dio. Empty =
+    // derive from use_mmap/use_mlock; a non-empty value wins over both.
+    std::string load_mode;
     bool        flash_attn = false;
 
     // RoPE / YaRN — 0 / sentinel = leave llama.cpp default

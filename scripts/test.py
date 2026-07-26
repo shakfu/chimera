@@ -791,6 +791,50 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
         )
         _check_rc(t, rc, want=2, timeout=60)
 
+    # --load-mode (llama.cpp b10107 replaced use_mmap/use_mlock with the
+    # llama_load_mode enum). CLI11's IsMember validator fires at parse time,
+    # before any model load, so an unknown name must exit non-zero without
+    # touching the (nonexistent) model path.
+    for sub, extra in [("gen", ["-p", "hi"]), ("embed", ["-i", "hi"])]:
+        with maybe(rec, f"{sub} --load-mode bogus exits non-zero (CLI11 enum)") as t:
+            rc = run_silent(
+                [str(chimera), sub, "-m", "/no/such/model.gguf",
+                 "--load-mode", "bogus", *extra],
+                timeout=30,
+            )
+            if rc == TIMED_OUT:
+                t.fail("timed out after 30s (expected non-zero exit)")
+            elif rc == 0:
+                t.fail("expected non-zero exit, got 0")
+
+    # ...and every valid name must pass the validator and reach model load,
+    # which then fails with Load (3) on the missing file. "dio" in particular
+    # is reachable ONLY through --load-mode -- there is no boolean for it --
+    # so this is what proves the new flag is actually wired through.
+    for mode in ("none", "mmap", "mlock", "dio"):
+        with maybe(rec, f"gen --load-mode {mode} reaches model load (exit 3)") as t:
+            rc = run_silent(
+                [str(chimera), "gen", "-m", "/no/such/model.gguf",
+                 "--load-mode", mode, "-p", "hi"],
+                timeout=60,
+            )
+            _check_rc(t, rc, want=3, timeout=60)
+
+    # --ref-image-args is a verbatim passthrough to sd_img_gen_params_t
+    # (sd master-795 folded --increase-ref-index / --no-auto-resize-ref-image
+    # into it). chimera does not validate the string -- sd warns on unknown
+    # keys at generation time -- so all we can assert without a model is that
+    # the flag parses and the run proceeds to model load. The composition and
+    # override ordering are pinned in tests/external/smoke.cpp.
+    with maybe(rec, "sd --ref-image-args parses and reaches model load (exit 3)") as t:
+        rc = run_silent(
+            [str(chimera), "sd", "-m", "/no/such/model.gguf", "-p", "hi",
+             "-o", "/no/such/dir/out.png",
+             "--ref-image-args", "ref_index_mode=increase,vlm_size=512"],
+            timeout=60,
+        )
+        _check_rc(t, rc, want=3, timeout=60)
+
 
 # ============================================================================
 # End-to-end: gen + tokenize
@@ -828,6 +872,25 @@ def e2e_gen_tests(rec: Recorder, chimera: Path) -> None:
         )
         if rc != 0:
             t.fail(f"exit code {rc}")
+
+    # --load-mode against a REAL model. The parse-level checks in
+    # smoke_tests() only prove the validator accepts each name and the run
+    # reaches model load; they cannot catch a mode that loads garbage or
+    # fails at runtime. Each of the four maps to a distinct llama.cpp weight-
+    # loading path (b10107's llama_load_mode), and "dio" (direct I/O) in
+    # particular is a path chimera never exercised before the flag existed.
+    # ~0.5s each on a 1.2G Q8_0, so all four are cheap to cover.
+    for mode in ("none", "mmap", "mlock", "dio"):
+        with maybe(rec, f"gen --load-mode {mode} generates (real model)") as t:
+            rc, out, _ = run_capture(
+                [str(chimera), "gen", "-m", str(GEN_MODEL), "-p", "Hello",
+                 "-n", "8", "--load-mode", mode],
+                timeout=120,
+            )
+            if rc != 0:
+                t.fail(f"exit code {rc}")
+            elif not out.strip():
+                t.fail(f"--load-mode {mode} loaded but produced no output")
 
 
 # ============================================================================
@@ -1116,9 +1179,40 @@ def e2e_sd_cli_tests(rec: Recorder, chimera: Path) -> None:
         rec.skip("sd img2img round-trip", f"no diffusion model under {MODELS}/")
         # The fixture-gated tests also need an SD base model; SKIP them
         # all with the same reason so the absent-base case is uniform.
-        for label in ("sd --lora", "sd --control-net", "sd --photo-maker"):
+        for label in ("sd --lora", "sd --control-net", "sd --photo-maker",
+                      "sd --ref-image-args reaches sd's parser"):
             rec.skip(label, f"no diffusion model under {MODELS}/")
         return
+
+    # --ref-image-args plumbing. build_ref_image_args() is unit-tested in
+    # tests/external/smoke.cpp, but that only pins string COMPOSITION -- it
+    # cannot prove chimera assigns the result to sd_img_gen_params_t
+    # .ref_image_args or that sd reads it. A dropped assignment would pass
+    # both the unit test and the field-level static_assert. So feed sd a key
+    # it does not know and assert its warning comes back: sd resolves
+    # ref_image_args unconditionally on the image-gen path (before any
+    # reference image is touched), so plain txt2img is enough. The key is
+    # deliberately bogus -- sd warns and continues, so the run still
+    # succeeds and this stays a plumbing check, not a generation check.
+    with maybe(rec, "sd --ref-image-args reaches sd's parser") as t:
+        with scratch_file(suffix=".png") as out:
+            rc, combined, _ = run_capture(
+                [
+                    str(chimera), "sd", "-m", str(SD_MODEL),
+                    "-p", "a red cube", "-o", str(out),
+                    "-W", "256", "-H", "256", "-s", "1",
+                    "--ref-image-args", "chimera_bogus_key=1",
+                ],
+                timeout=300,
+                combined=True,
+            )
+            if rc != 0:
+                t.fail(f"exit code {rc}")
+            elif "chimera_bogus_key" not in combined:
+                t.fail(
+                    "sd never saw the --ref-image-args string "
+                    "(expected an 'ignoring unknown reference image arg' warning)"
+                )
 
     # We run SD twice (txt2img + img2img round-trip) instead of reusing the
     # first image as the img2img init. Costs ~10s more than the bash version

@@ -22,12 +22,117 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "ggml-backend.h"
 #include "llama.h"
 
 #include "chimera.h"
+#include "chimera_llama_load_mode.h"
+#ifdef CHIMERA_HAS_SD
+#include "chimera_sd.h"
+#endif
+
+namespace {
+
+int g_failures = 0;
+
+void check(bool ok, const char * what) {
+    if (!ok) {
+        std::fprintf(stderr, "FAIL: %s\n", what);
+        ++g_failures;
+    }
+}
+
+// (0) Pure-function probes for the two upstream-API translation layers.
+// These need no model, so they run on every invocation — and because they
+// return before the "inference probe: SKIP" line is printed, a failure here
+// is reported as a real failure rather than being folded into ctest's
+// Skipped outcome for the model-gated section below.
+
+// llama.cpp b10107 replaced llama_model_params::use_mmap / ::use_mlock with
+// `enum llama_load_mode`. chimera keeps the booleans and adds a --load-mode
+// string; this pins the mapping between the two.
+void probe_load_mode() {
+    check(chimera_llama_load_mode("", true,  false) == LLAMA_LOAD_MODE_MMAP,
+          "load_mode: default (mmap on, mlock off) should be MMAP");
+    check(chimera_llama_load_mode("", false, false) == LLAMA_LOAD_MODE_NONE,
+          "load_mode: --no-mmap should be NONE");
+    // --mlock implies mmap upstream, so it wins over the mmap flag either way.
+    check(chimera_llama_load_mode("", true,  true) == LLAMA_LOAD_MODE_MLOCK,
+          "load_mode: --mlock should be MLOCK");
+    check(chimera_llama_load_mode("", false, true) == LLAMA_LOAD_MODE_MLOCK,
+          "load_mode: --mlock should beat --no-mmap");
+
+    // An explicit --load-mode overrides both booleans.
+    check(chimera_llama_load_mode("none",  true, true) == LLAMA_LOAD_MODE_NONE,
+          "load_mode: explicit 'none' should override the booleans");
+    check(chimera_llama_load_mode("mmap",  false, true) == LLAMA_LOAD_MODE_MMAP,
+          "load_mode: explicit 'mmap' should override the booleans");
+    check(chimera_llama_load_mode("mlock", false, false) == LLAMA_LOAD_MODE_MLOCK,
+          "load_mode: explicit 'mlock' should override the booleans");
+    // dio is reachable only through --load-mode.
+    check(chimera_llama_load_mode("dio",   true, false) == LLAMA_LOAD_MODE_DIRECT_IO,
+          "load_mode: explicit 'dio' should map to DIRECT_IO");
+
+    // An unknown name must be rejected, not silently defaulted.
+    bool threw_bad_input = false;
+    try {
+        (void)chimera_llama_load_mode("bogus", true, false);
+    } catch (const ChimeraError & e) {
+        threw_bad_input = e.code() == ExitCode::BadInput;
+    } catch (...) {
+    }
+    check(threw_bad_input, "load_mode: unknown name should throw BadInput");
+}
+
+#ifdef CHIMERA_HAS_SD
+// sd master-795 folded increase_ref_index / auto_resize_ref_image into the
+// ref_image_args key=value string. Pin the composition and, critically, the
+// ordering: sd applies pairs left to right, so the flags must land AFTER the
+// caller's passthrough string to override a colliding key.
+void probe_ref_image_args() {
+    chimera_sd::GenerateRequest req;
+    check(chimera_sd::build_ref_image_args(req).empty(),
+          "ref_image_args: defaults should produce an empty string");
+
+    req.increase_ref_index = true;
+    check(chimera_sd::build_ref_image_args(req) == "ref_index_mode=increase",
+          "ref_image_args: --increase-ref-index alone");
+
+    req.increase_ref_index = false;
+    req.disable_auto_resize_ref_image = true;
+    check(chimera_sd::build_ref_image_args(req) == "resize_before_vae=0",
+          "ref_image_args: --no-auto-resize-ref-image alone");
+
+    req.increase_ref_index = true;
+    check(chimera_sd::build_ref_image_args(req) ==
+              "ref_index_mode=increase,resize_before_vae=0",
+          "ref_image_args: both flags should be comma-joined");
+
+    req.increase_ref_index = false;
+    req.disable_auto_resize_ref_image = false;
+    req.ref_image_args = "preset=qwen,vlm_size=512";
+    check(chimera_sd::build_ref_image_args(req) == "preset=qwen,vlm_size=512",
+          "ref_image_args: passthrough should survive verbatim");
+
+    req.increase_ref_index = true;
+    req.disable_auto_resize_ref_image = true;
+    check(chimera_sd::build_ref_image_args(req) ==
+              "preset=qwen,vlm_size=512,ref_index_mode=increase,resize_before_vae=0",
+          "ref_image_args: flags must be appended after the passthrough");
+
+    // A colliding key: the flag is appended last, so sd resolves it to the flag.
+    req.disable_auto_resize_ref_image = false;
+    req.ref_image_args = "ref_index_mode=decrease";
+    check(chimera_sd::build_ref_image_args(req) ==
+              "ref_index_mode=decrease,ref_index_mode=increase",
+          "ref_image_args: flag must come after a colliding passthrough key");
+}
+#endif
+
+}  // namespace
 
 int main() {
     // (1) ggml side: count registered backend devices. If the whole-
@@ -61,6 +166,19 @@ int main() {
 #endif
 
     std::printf("chimera version: %s\n", CHIMERA_VERSION);
+
+    // (3b) Model-free probes of the upstream-API translation layers. Must
+    // run (and bail) before the SKIP line below, or ctest folds a genuine
+    // failure into the model-gated Skipped outcome.
+    probe_load_mode();
+#ifdef CHIMERA_HAS_SD
+    probe_ref_image_args();
+#endif
+    if (g_failures != 0) {
+        std::fprintf(stderr, "FAIL: %d translation-layer check(s) failed\n", g_failures);
+        return 1;
+    }
+    std::printf("translation-layer probes: OK\n");
 
     // (4) Optional inference probe. Gated on CHIMERA_SMOKE_MODEL so the
     // test stays runnable on machines without a model file. The point

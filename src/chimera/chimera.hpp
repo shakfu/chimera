@@ -275,6 +275,7 @@ private:
         c.normalize        = o.normalize;
         c.use_mmap         = o.use_mmap;
         c.use_mlock        = o.use_mlock;
+        c.load_mode        = o.load_mode;
         c.flash_attn       = o.flash_attn;
         c.rope_freq_base   = o.rope_freq_base;
         c.rope_freq_scale  = o.rope_freq_scale;

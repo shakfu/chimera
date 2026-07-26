@@ -109,6 +109,11 @@ struct GenerateRequest {
     std::vector<PixelImage> ref_images;
     bool                    increase_ref_index           = false;
     bool                    disable_auto_resize_ref_image = false;
+    // Verbatim sd_img_gen_params_t::ref_image_args passthrough (comma- or
+    // semicolon-separated key=value pairs; see sd's resolve_ref_image_params
+    // for the accepted keys). The two booleans above are appended after this
+    // string, so they override a colliding key set here.
+    std::string             ref_image_args;
 
     // Round 6 hires-fix. Disabled by default; the scalar sentinels
     // (0 / -1) leave sd_hires_params_init's defaults in place.
@@ -275,6 +280,15 @@ void save_png_file(const std::string &   path,
 // order. Throws ChimeraError(Generate) on failure. The caller owns the
 // returned vector and the pixel data inside each entry.
 std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req);
+
+// Compose sd_img_gen_params_t::ref_image_args from the request: the caller's
+// `ref_image_args` passthrough first, then `increase_ref_index` and
+// `disable_auto_resize_ref_image` appended as key=value pairs. sd applies the
+// pairs left to right, so the two booleans override a colliding key in the
+// passthrough string. Returns empty when nothing is set, which leaves sd's
+// per-architecture preset defaults in place. Exposed for testing; generate()
+// calls it and hands the result to sd.
+std::string build_ref_image_args(const GenerateRequest & req);
 
 // ---- runtime introspection (for `chimera info`) ------------------------
 

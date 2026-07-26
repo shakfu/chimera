@@ -155,10 +155,10 @@ static_assert(std::is_same_v<decltype(llama_model_params::main_gpu),     int32_t
               "llama_model_params::main_gpu retyped.");
 static_assert(std::is_same_v<decltype(llama_model_params::split_mode),   enum llama_split_mode>,
               "llama_model_params::split_mode retyped.");
-static_assert(std::is_same_v<decltype(llama_model_params::use_mmap),     bool>,
-              "llama_model_params::use_mmap retyped.");
-static_assert(std::is_same_v<decltype(llama_model_params::use_mlock),    bool>,
-              "llama_model_params::use_mlock retyped.");
+// b10107 replaced the use_mmap / use_mlock booleans with this enum; see
+// chimera_llama_load_mode.h for how chimera's two flags map onto it.
+static_assert(std::is_same_v<decltype(llama_model_params::load_mode),    enum llama_load_mode>,
+              "llama_model_params::load_mode retyped.");
 
 // llama_context_params (new_llama_context)
 static_assert(std::is_same_v<decltype(llama_context_params::n_ctx),            uint32_t>,

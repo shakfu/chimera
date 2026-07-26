@@ -10,6 +10,7 @@
 #include "chimera_embed.h"
 #include "chimera_embed_cache.h"
 #include "chimera_db.h"
+#include "chimera_llama_load_mode.h"
 #include "chimera.h"
 
 #include "common.h"
@@ -279,6 +280,7 @@ void apply_model_common(llama_model_params & params,
                         ModelExtras & extras,
                         bool use_mmap,
                         bool use_mlock,
+                        const std::string & load_mode_name,
                         int main_gpu,
                         const std::string & tensor_split_csv,
                         const std::string & split_mode_name,
@@ -287,8 +289,7 @@ void apply_model_common(llama_model_params & params,
                         int  n_cpu_moe,
                         const std::vector<std::string> & override_tensor,
                         const std::vector<std::string> & override_kv) {
-    params.use_mmap  = use_mmap;
-    params.use_mlock = use_mlock;
+    params.load_mode = chimera_llama_load_mode(load_mode_name, use_mmap, use_mlock);
     params.main_gpu  = main_gpu;
     if (!split_mode_name.empty()) {
         params.split_mode = parse_split_mode(split_mode_name);
@@ -458,7 +459,7 @@ LlamaModelPtr load_llama_model(const LlamaCommonOptions & opts) {
     params.n_gpu_layers = opts.gpu_layers;
     ModelExtras extras;
     apply_model_common(params, extras,
-                       opts.use_mmap, opts.use_mlock,
+                       opts.use_mmap, opts.use_mlock, opts.load_mode,
                        opts.main_gpu, opts.tensor_split,
                        opts.split_mode, opts.devices,
                        opts.cpu_moe, opts.n_cpu_moe,
@@ -987,6 +988,7 @@ int command_embed(const EmbedOptions & opts) {
     cfg.normalize  = opts.normalize;
     cfg.use_mmap   = opts.use_mmap;
     cfg.use_mlock  = opts.use_mlock;
+    cfg.load_mode  = opts.load_mode;
     cfg.flash_attn = opts.flash_attn;
     cfg.rope_freq_base   = opts.rope_freq_base;
     cfg.rope_freq_scale  = opts.rope_freq_scale;

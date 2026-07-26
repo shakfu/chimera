@@ -74,7 +74,8 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 | `--ignore-eos` | `--ignore-eos` | ✅ | Landed 2026-05-20. |
 | `--grammar` / `--grammar-file` / `--json-schema` / `--json-schema-file` | same | ✅ | Landed 2026-05-20. JSON schema converted via `json_schema_to_grammar`. Mutually exclusive group. End-to-end smoke verified. |
 | `--flash-attn` | `--flash-attn` | ✅ | Landed 2026-05-20. Available on gen/chat/embed. |
-| `--mmap` / `--mlock` | `--no-mmap` / `--mlock` | ✅ | Landed 2026-05-20. `use_mmap` default stays true; `--no-mmap` to opt out. |
+| `--mmap` / `--mlock` | `--no-mmap` / `--mlock` | ✅ | Landed 2026-05-20. `use_mmap` default stays true; `--no-mmap` to opt out. Deprecated upstream as of b10107 in favour of `--load-mode`, but still the chimera-side spelling. |
+| `-lm` / `--load-mode` | `--load-mode` | ✅ | Landed 2026-07-26 alongside the b10107 bump, which replaced `llama_model_params::use_mmap` / `::use_mlock` with `enum llama_load_mode`. Accepts `none\|mmap\|mlock\|dio` (CLI11-validated) on gen/chat/embed; `dio` (direct I/O) is reachable only here. An explicit `--load-mode` wins over `--no-mmap`/`--mlock` — chimera can't reproduce upstream's last-flag-wins ordering because the booleans and the enum live in separate option fields. Upstream's `-lm` short form is dropped: CLI11 rejects multi-character short names. Mapping lives in `chimera_llama_load_mode.h` and is pinned in `tests/external/smoke.cpp`. |
 | `--gpu-layers` | `--gpu-layers` | ✅ | |
 | `--main-gpu` / `--tensor-split` / `--split-mode` | same | ✅ | Landed 2026-05-20. `--split-mode` accepts none/layer/row/tensor; `--tensor-split` parses comma-separated floats. |
 | `--device` / `--list-devices` | `--device` only | 🟡 | `--device` landed 2026-05-20 (comma-separated device list). `--list-devices` skipped — better fit as a `chimera info` extension. |
@@ -180,7 +181,7 @@ All five priorities from the original audit landed on 2026-05-20 (`--flash-attn`
 
 ### Also landed 2026-05-20 (carried over from the llama-shared option set)
 
-`embed` picked up `--flash-attn`, `--ubatch-size`, `--no-mmap`, `--mlock`, `--main-gpu`, `--tensor-split`, `--split-mode`, `--device`, and the full RoPE / YaRN family (`--rope-freq-base`, `--rope-freq-scale`, `--rope-scale`, `--rope-scaling`, `--yarn-orig-ctx`, `--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-fast`, `--yarn-beta-slow`). These aren't part of `llama-embedding`'s historic surface but are useful for embedding models on long-context fine-tunes / multi-GPU.
+`embed` picked up `--flash-attn`, `--ubatch-size`, `--no-mmap`, `--mlock` (joined 2026-07-26 by `--load-mode`), `--main-gpu`, `--tensor-split`, `--split-mode`, `--device`, and the full RoPE / YaRN family (`--rope-freq-base`, `--rope-freq-scale`, `--rope-scale`, `--rope-scaling`, `--yarn-orig-ctx`, `--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-fast`, `--yarn-beta-slow`). These aren't part of `llama-embedding`'s historic surface but are useful for embedding models on long-context fine-tunes / multi-GPU.
 
 ### Deliberately omitted
 
@@ -337,6 +338,7 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 | `--control-video` | — | 🚫 | Video-only; chimera-sd is image-only today. |
 | `--strength` | `--strength` | ✅ | |
 | `--ref-image` | `--ref-image` | ✅ | Landed 2026-05-20. Repeatable; each entry is decoded to RGB and borrowed into `sd_img_gen_params_t.ref_images`. Companion flags `--increase-ref-index` and `--no-auto-resize-ref-image` also landed (chimera inverts sd's auto-resize default-on into an opt-out). |
+| `--ref-image-args` | `--ref-image-args` | ✅ | Landed 2026-07-26 alongside the master-795 bump, which folded the `increase_ref_index` / `auto_resize_ref_image` booleans into a single comma-separated `key=value` string layered on a per-architecture preset. Passed through verbatim; chimera does not validate it (sd warns on unknown keys at generation time). Keys: `preset`, `pass_to_vlm`, `pass_to_dit`, `ref_index_mode`, `force_ref_timestep_zero`, `resize_before_vae`, `vae_input_max_pixels`, `vlm_resize_mode`, `vlm_min_size`, `vlm_max_size`, `vlm_size`. The two older flags are appended *after* this string so they override a colliding key, matching upstream's own deprecated-flag shim. Composition is pinned in `tests/external/smoke.cpp`. |
 | `--pm-id-images-dir` / `--pm-id-embed-path` / `--pm-style-strength` | same | ✅ | Landed 2026-05-20. `--pm-id-images-dir` scans the directory non-recursively in alphabetical order; non-image entries are skipped, an empty result is `BadInput`. Decoded images are borrowed into `sd_pm_params_t.id_images`. |
 
 ### Coverage table — hires fix / VAE tiling

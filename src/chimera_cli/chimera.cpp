@@ -2098,6 +2098,10 @@ void bind_llama_common_opts(CLI::App * cmd, LlamaCommonOptions & o) {
     // Mmap / mlock
     cmd->add_flag("!--no-mmap", o.use_mmap, "Disable mmap'ing model weights");
     cmd->add_flag("--mlock", o.use_mlock, "Force the system to keep model in RAM");
+    cmd->add_option("--load-mode",o.load_mode,
+        "Model loading mode, overriding --no-mmap/--mlock: "
+        "none | mmap | mlock | dio (direct I/O where supported)")
+        ->check(CLI::IsMember({"none","mmap","mlock","dio"}));
 
     // mmproj offload
     cmd->add_flag("!--no-mmproj-offload", o.mmproj_use_gpu,
@@ -2321,6 +2325,10 @@ void bind_embed_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_flag("--flash-attn", p.embed_opts.flash_attn, "Enable Flash Attention");
     cmd->add_flag("!--no-mmap", p.embed_opts.use_mmap, "Disable mmap'ing model weights");
     cmd->add_flag("--mlock", p.embed_opts.use_mlock, "Force the system to keep model in RAM");
+    cmd->add_option("--load-mode",p.embed_opts.load_mode,
+        "Model loading mode, overriding --no-mmap/--mlock: "
+        "none | mmap | mlock | dio (direct I/O where supported)")
+        ->check(CLI::IsMember({"none","mmap","mlock","dio"}));
     cmd->add_option("--rope-freq-base",  p.embed_opts.rope_freq_base,  "RoPE base frequency (0 = from model)");
     cmd->add_option("--rope-freq-scale", p.embed_opts.rope_freq_scale, "RoPE frequency scale (0 = from model)");
     cmd->add_option("--rope-scale",      p.embed_opts.rope_freq_scale, "Alias of --rope-freq-scale");
@@ -2622,6 +2630,13 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Increment the ref-image index across batch positions");
     cmd->add_flag("--no-auto-resize-ref-image", p.sd_opts.no_auto_resize_ref_image,
         "Disable sd's automatic resize of --ref-image inputs to match --width/--height");
+    cmd->add_option("--ref-image-args", p.sd_opts.ref_image_args,
+        "Reference-image processing args as a comma-separated key=value list, layered "
+        "on the preset sd picks from the model architecture. Keys: preset, pass_to_vlm, "
+        "pass_to_dit, ref_index_mode (fixed|increase|decrease), force_ref_timestep_zero, "
+        "resize_before_vae, vae_input_max_pixels, vlm_resize_mode (longest_side|area|none), "
+        "vlm_min_size, vlm_max_size, vlm_size. --increase-ref-index and "
+        "--no-auto-resize-ref-image are applied after this string and override it");
     // Round 6 hires-fix.
     cmd->add_flag("--hires", p.sd_opts.hires_fix,
         "Enable the hires-fix second-pass upscale (sd_hires_params_t.enabled)");

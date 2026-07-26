@@ -4,6 +4,7 @@
 #include "chimera_embed.h"
 #include "chimera.h"   // ChimeraError, ExitCode
 #include "chimera_embed_cache.h"
+#include "chimera_llama_load_mode.h"
 
 #include "llama.h"
 #include "ggml-backend.h"
@@ -74,8 +75,7 @@ struct Embedder::Impl {
 Embedder::Embedder(const Config & cfg) : impl_(std::make_unique<Impl>()) {
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = cfg.gpu_layers;
-    mparams.use_mmap     = cfg.use_mmap;
-    mparams.use_mlock    = cfg.use_mlock;
+    mparams.load_mode    = chimera_llama_load_mode(cfg.load_mode, cfg.use_mmap, cfg.use_mlock);
     mparams.main_gpu     = cfg.main_gpu;
 
     // The model_params raw pointers must stay valid until the model load

@@ -167,8 +167,9 @@ static_assert(std::is_same_v<decltype(sd_img_gen_params_t::mask_image),         
 static_assert(std::is_same_v<decltype(sd_img_gen_params_t::control_image),         sd_image_t>,    "sd_img_gen_params_t::control_image retyped.");
 static_assert(std::is_same_v<decltype(sd_img_gen_params_t::ref_images),            sd_image_t *>,  "sd_img_gen_params_t::ref_images retyped.");
 static_assert(std::is_same_v<decltype(sd_img_gen_params_t::ref_images_count),      int>,     "sd_img_gen_params_t::ref_images_count retyped.");
-static_assert(std::is_same_v<decltype(sd_img_gen_params_t::increase_ref_index),    bool>,    "sd_img_gen_params_t::increase_ref_index retyped.");
-static_assert(std::is_same_v<decltype(sd_img_gen_params_t::auto_resize_ref_image), bool>,    "sd_img_gen_params_t::auto_resize_ref_image retyped.");
+// sd master-795 folded the increase_ref_index / auto_resize_ref_image booleans
+// into this comma-separated key=value string; see the translation in generate().
+static_assert(std::is_same_v<decltype(sd_img_gen_params_t::ref_image_args),        const char *>,  "sd_img_gen_params_t::ref_image_args retyped.");
 static_assert(std::is_same_v<decltype(sd_img_gen_params_t::loras),                 const sd_lora_t *>, "sd_img_gen_params_t::loras retyped.");
 static_assert(std::is_same_v<decltype(sd_img_gen_params_t::lora_count),            uint32_t>, "sd_img_gen_params_t::lora_count retyped.");
 
@@ -735,6 +736,30 @@ void save_png_file(const std::string &   path,
     }
 }
 
+// sd master-795 replaced the increase_ref_index / auto_resize_ref_image
+// booleans with a comma-separated key=value string, resolved on top of a
+// per-architecture preset. The caller's passthrough string goes first and the
+// two legacy flags are appended after it, exactly as upstream's own
+// deprecated-flag shim does (examples/common/common.cpp) — sd's parser applies
+// pairs left to right, so a repeated key resolves to the last one and the
+// explicit flags win. An empty result leaves the preset defaults alone.
+std::string build_ref_image_args(const GenerateRequest & req) {
+    std::string args = req.ref_image_args;
+    const auto append = [&args](const char * pair) {
+        if (!args.empty()) {
+            args += ",";
+        }
+        args += pair;
+    };
+    if (req.increase_ref_index) {
+        append("ref_index_mode=increase");
+    }
+    if (req.disable_auto_resize_ref_image) {
+        append("resize_before_vae=0");
+    }
+    return args;
+}
+
 std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
     if (ctx == nullptr) {
         fail(ExitCode::Runtime, "sd context is null");
@@ -841,9 +866,12 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
         gp.ref_images       = ref_imgs_sd.data();
         gp.ref_images_count = static_cast<int>(ref_imgs_sd.size());
     }
-    gp.increase_ref_index    = req.increase_ref_index;
-    // sd defaults auto_resize_ref_image to true; CLI flag flips it off.
-    gp.auto_resize_ref_image = !req.disable_auto_resize_ref_image;
+    // gp.ref_image_args borrows this buffer for the duration of
+    // generate_image, so it lives on this stack frame.
+    const std::string ref_image_args = build_ref_image_args(req);
+    if (!ref_image_args.empty()) {
+        gp.ref_image_args = ref_image_args.c_str();
+    }
 
     if (!req.skip_layers.empty()) {
         // sd_slg_params_t.layers borrows the int* buffer from the
@@ -1274,6 +1302,7 @@ int run_sd(sd_ctx_t * ctx, const SdOptions & opts) {
     }
     req.increase_ref_index            = opts.increase_ref_index;
     req.disable_auto_resize_ref_image = opts.no_auto_resize_ref_image;
+    req.ref_image_args                = opts.ref_image_args;
 
     // Cache / SCM validation up-front (before load_model) so a typo
     // doesn't waste a model load. Populates req's parsed-cache fields.

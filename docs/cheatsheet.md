@@ -179,7 +179,12 @@ chimera embed -m bge.gguf -p "..." --cache-embeddings   # memoize to SQLite
 chimera embed -m bge.gguf -p "..." --cache-embeddings --cache-db /tmp/cache.db
 chimera embed -m bge.gguf -p "..." --flash-attn --ubatch-size 256
 chimera embed -m bge.gguf -p "..." --no-mmap --mlock     # pin model in RAM
+chimera embed -m bge.gguf -p "..." --load-mode dio        # none|mmap|mlock|dio
 ```
+
+`--load-mode` names llama.cpp's `llama_load_mode` directly and overrides
+`--no-mmap`/`--mlock`; `dio` (direct I/O, where the platform supports it) is
+reachable only this way. Also available on `gen` and `chat`.
 
 ---
 
@@ -325,6 +330,12 @@ chimera sd --diffusion-model flux1-dev.gguf -p "..." -o out.png \
 chimera sd -m sd.gguf -p "person on a beach" -o out.png \
     --ref-image style1.png --ref-image style2.png \
     --increase-ref-index
+chimera sd -m sd.gguf -p "person on a beach" -o out.png \
+    --ref-image style1.png \
+    --ref-image-args "preset=qwen,vlm_size=512,resize_before_vae=off"
+# ^ comma-separated key=value list layered on the preset sd picks from the
+#   model architecture. --increase-ref-index / --no-auto-resize-ref-image are
+#   applied after it and override a colliding key.
 chimera sd --diffusion-model flux1-dev.gguf -p "the same person, painting" -o out.png \
     --photo-maker pm.safetensors \
     --pm-id-images-dir ./id_images/ --pm-style-strength 0.7

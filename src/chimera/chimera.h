@@ -49,6 +49,10 @@ struct LlamaCommonOptions {
     float repeat_penalty = 1.1f;
     bool use_mmap = true;
     bool use_mlock = false;
+    // --load-mode names llama_load_mode directly: none | mmap | mlock | dio.
+    // Empty = derive from use_mmap/use_mlock above; a non-empty value wins
+    // over both. "dio" (direct I/O) is reachable only this way.
+    std::string load_mode;
 
     // Perf / cache
     bool        flash_attn = false;
@@ -181,6 +185,8 @@ struct EmbedOptions {
     bool normalize = true;
     bool use_mmap = true;
     bool use_mlock = false;
+    // See LlamaCommonOptions::load_mode.
+    std::string load_mode;
     bool flash_attn = false;
 
     // RoPE / YaRN
@@ -460,6 +466,11 @@ struct SdOptions {
     std::vector<std::string> ref_images;
     bool                     increase_ref_index           = false;
     bool                     no_auto_resize_ref_image     = false;
+    // sd master-795 folded those two flags into a comma-separated key=value
+    // string layered on a per-architecture preset. `--ref-image-args` passes
+    // it through verbatim; the two flags above are appended after it (so they
+    // win on a repeated key), matching upstream's own deprecated-flag shim.
+    std::string              ref_image_args;
 
     // Round 6 hires-fix bundle. `--hires` is the toggle; everything
     // else has a sentinel that leaves the upstream default in place
