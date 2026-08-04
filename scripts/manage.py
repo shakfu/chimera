@@ -334,7 +334,10 @@ class ShellCmd:
 
             def cmake_flag(k: str, v: Union[str, bool, int]) -> str:
                 val = cmake_value(v)
-                if isinstance(val, str) and ";" in val:
+                # Quote list separators and multi-token flag strings (e.g.
+                # CMAKE_CXX_FLAGS="/bigobj /utf-8") so the shell hands cmake a
+                # single -D argument instead of splitting on the space.
+                if isinstance(val, str) and (";" in val or " " in val):
                     return f'-D{k}="{val}"'
                 return f"-D{k}={val}"
 
@@ -1125,6 +1128,16 @@ class StableDiffusionCppBuilder(GgmlBuilder):
 
         backend_options = self.get_backend_cmake_options()
 
+        # MSVC caps an object file at 65535 sections. src/stable-diffusion.cpp
+        # blew past that at sd.cpp master-795 (error C1128), which is why the
+        # Windows CI leg started failing while macOS/Linux stayed green. sd.cpp
+        # does not set the flag in its CMakeLists.txt -- upstream works around
+        # it in its own workflow (.github/workflows/build.yml passes
+        # -DCMAKE_CXX_FLAGS='/bigobj'), so chimera has to do the same.
+        extra: dict[str, Any] = {}
+        if PLATFORM == "Windows":
+            extra["CMAKE_CXX_FLAGS"] = "/bigobj"
+
         self.cmake_config(
             src_dir=self.src_dir,
             build_dir=self.build_dir,
@@ -1145,6 +1158,7 @@ class StableDiffusionCppBuilder(GgmlBuilder):
             # caller (SD_WEBP=1 / SD_WEBM=1 in the env) if you need them.
             SD_WEBP=getenv("SD_WEBP", default=False),
             SD_WEBM=getenv("SD_WEBM", default=False),
+            **extra,
             **backend_options,
         )
         self.cmake_build(build_dir=self.build_dir, release=True)

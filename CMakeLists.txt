@@ -556,7 +556,14 @@ endif()
 # Compile options
 # -----------------------------------------------------------------------------
 if(WIN32)
-    set(CXX_COMPILE_OPTIONS /std:c++17 /EHsc /MD)
+    # /bigobj: MSVC caps an object file at 65535 sections, and the heavily
+    # templated upstream headers push chimera's per-modality TUs (chimera_sd.cpp
+    # pulls in sd.cpp's ggml_extend.hpp, chimera_llama.cpp pulls in mtmd +
+    # server-context) toward that ceiling. sd.cpp's own src/stable-diffusion.cpp
+    # crossed it at master-795 with error C1128 -- see the matching /bigobj in
+    # StableDiffusionCppBuilder.build (scripts/manage.py). The flag only widens
+    # the object file's section table; no codegen or runtime effect.
+    set(CXX_COMPILE_OPTIONS /std:c++17 /EHsc /MD /bigobj)
 else()
     set(CXX_COMPILE_OPTIONS -std=c++17 -fvisibility=hidden -fvisibility-inlines-hidden)
 endif()
