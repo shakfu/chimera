@@ -1100,15 +1100,44 @@ class StableDiffusionCppBuilder(GgmlBuilder):
         Read from SD's CMakeLists so a future upstream bump propagates to
         llama.cpp/whisper.cpp/chimera automatically instead of silently
         diverging.
+
+        Builders clone lazily and run in list order, so on a fresh tree (after
+        `make reset`) llama.cpp and whisper.cpp are configured before SD exists
+        on disk. Clone SD here rather than taking the fallback: the fallback is
+        only right until upstream moves the value, and taking it silently is
+        exactly how the 128-vs-160 split this function exists to prevent got
+        introduced. SD is about to be cloned by its own builder anyway, so the
+        only cost is doing it earlier.
         """
         proj = project or Project()
         cmakelists = proj.src / cls.name / "CMakeLists.txt"
+        log = logging.getLogger(cls.__name__)
+
+        if not cmakelists.exists():
+            log.info(f"fetching {cls.name} early to resolve GGML_MAX_NAME")
+            try:
+                cls(project=proj).setup()
+            except Exception as exc:  # noqa: BLE001 - fall back, but loudly
+                log.warning(f"could not fetch {cls.name} to read GGML_MAX_NAME: {exc}")
+
         try:
             text = cmakelists.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            log.warning(
+                f"{cmakelists} unreadable; falling back to "
+                f"GGML_MAX_NAME={cls.GGML_MAX_NAME_FALLBACK}. If upstream has "
+                f"changed it, the shared-ggml build will be ABI-split."
+            )
             return cls.GGML_MAX_NAME_FALLBACK
+
         m = re.search(r"GGML_MAX_NAME=(\d+)", text)
-        return int(m.group(1)) if m else cls.GGML_MAX_NAME_FALLBACK
+        if m is None:
+            log.warning(
+                f"no GGML_MAX_NAME in {cmakelists}; falling back to "
+                f"{cls.GGML_MAX_NAME_FALLBACK}"
+            )
+            return cls.GGML_MAX_NAME_FALLBACK
+        return int(m.group(1))
 
     @staticmethod
     def uses_shared_ggml() -> bool:
