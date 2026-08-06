@@ -42,6 +42,7 @@ import argparse
 import logging
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -93,7 +94,7 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.2.11"
+CHIMERA_VERSION = "0.2.12"
 LLAMACPP_VERSION = "b10107"
 WHISPERCPP_VERSION = "v1.9.1"
 SDCPP_VERSION = "master-795-87a0177"
@@ -512,6 +513,31 @@ class GgmlBuilder(Builder):
     def get_backend_cmake_options(self) -> dict[str, Any]:
         raise NotImplementedError
 
+    def ggml_max_name_flags(self) -> dict[str, str]:
+        """-DGGML_MAX_NAME for every language that compiles ggml_tensor code.
+
+        Empty unless SD shares llama.cpp's ggml; see
+        StableDiffusionCppBuilder.ggml_max_name for why the value is read from
+        upstream rather than pinned.
+
+        CUDA and HIP are separate CMake languages: they do NOT inherit
+        CMAKE_C_FLAGS / CMAKE_CXX_FLAGS. Omitting them leaves ggml-cuda /
+        ggml-hip on the 64 default while ggml-base and the dep's own sources
+        use SD's value -- i.e. the backend disagrees with the rest of the same
+        ggml about sizeof(ggml_tensor). SD's own tree avoids this only because
+        it uses add_definitions(), which applies to all languages.
+        """
+        if not StableDiffusionCppBuilder.uses_shared_ggml():
+            return {}
+        n = StableDiffusionCppBuilder.ggml_max_name(self.project)
+        flag = f"-DGGML_MAX_NAME={n}"
+        return {
+            "CMAKE_C_FLAGS": flag,
+            "CMAKE_CXX_FLAGS": flag,
+            "CMAKE_CUDA_FLAGS": flag,
+            "CMAKE_HIP_FLAGS": flag,
+        }
+
     CUDA_TUNING_ENV_FLAGS: tuple[str, ...] = (
         "GGML_CUDA_FORCE_MMQ",
         "GGML_CUDA_FORCE_CUBLAS",
@@ -896,13 +922,10 @@ class LlamaCppBuilder(GgmlBuilder):
 
         backend_options = self.get_backend_cmake_options()
 
-        # SD requires GGML_MAX_NAME=128 (vs llama.cpp's 64). When both share
-        # the same ggml, both sides must agree or ggml_tensor's layout diverges.
-        extra = {}
-        if StableDiffusionCppBuilder.uses_shared_ggml():
-            _def = f"-DGGML_MAX_NAME={StableDiffusionCppBuilder.GGML_MAX_NAME}"
-            extra["CMAKE_C_FLAGS"] = _def
-            extra["CMAKE_CXX_FLAGS"] = _def
+        # SD compiles itself with a larger GGML_MAX_NAME than llama.cpp's
+        # default 64. When both share the same ggml, every side must agree or
+        # ggml_tensor's layout diverges and SD overruns tensors ggml allocated.
+        extra = self.ggml_max_name_flags()
 
         self.cmake_config(
             src_dir=self.src_dir,
@@ -1023,6 +1046,12 @@ class WhisperCppBuilder(GgmlBuilder):
 
         backend_options = self.get_backend_cmake_options()
 
+        # whisper.cpp never sets GGML_MAX_NAME, so its TUs would default to 64
+        # while the shared ggml they link against is built with SD's larger
+        # value -- a ggml_tensor layout mismatch in the whisper path. Pin it to
+        # the same value as the rest of the shared-ggml build.
+        extra = self.ggml_max_name_flags()
+
         self.cmake_config(
             src_dir=self.src_dir,
             build_dir=self.build_dir,
@@ -1032,6 +1061,7 @@ class WhisperCppBuilder(GgmlBuilder):
             CMAKE_C_VISIBILITY_PRESET="hidden",
             CMAKE_VISIBILITY_INLINES_HIDDEN=True,
             CMAKE_INSTALL_LIBDIR="lib",  # avoid lib64 on 64-bit Linux
+            **extra,
             **backend_options,
         )
         self.cmake_build(build_dir=self.build_dir, release=True)
@@ -1048,10 +1078,37 @@ class StableDiffusionCppBuilder(GgmlBuilder):
     base_libs: list[str] = ["stable-diffusion"]
     extra_libs: list[str] = []
 
-    # SD requires GGML_MAX_NAME=128 (its CMakeLists.txt:233, ggml_extend.hpp:94).
-    # llama.cpp defaults to 64. When SD shares llama.cpp's ggml
-    # (SD_USE_VENDORED_GGML=0, chimera's default), both sides must agree.
-    GGML_MAX_NAME: int = 128
+    # GGML_MAX_NAME sizes `char name[GGML_MAX_NAME]` *inside* struct
+    # ggml_tensor, so it is an ABI parameter, not a cosmetic limit: 128 ->
+    # sizeof 400, 160 -> sizeof 432. When SD shares llama.cpp's ggml
+    # (SD_USE_VENDORED_GGML=0, chimera's default) every TU that touches a
+    # ggml_tensor -- llama.cpp's ggml, whisper.cpp, SD, and chimera itself --
+    # must be compiled with the SAME value or SD writes past the end of
+    # tensors ggml allocated and corrupts the heap.
+    #
+    # SD sets the value itself in its own CMakeLists; upstream has moved it
+    # before (128 -> 160) and SD's own guard is only
+    # `static_assert(GGML_MAX_NAME >= 128)`, a minimum, so a stale pin here
+    # compiles clean and fails at runtime. Parse upstream rather than pin.
+    # The fallback only applies before the tree is cloned.
+    GGML_MAX_NAME_FALLBACK: int = 160
+
+    @classmethod
+    def ggml_max_name(cls, project: Optional["Project"] = None) -> int:
+        """GGML_MAX_NAME that upstream SD compiles itself with.
+
+        Read from SD's CMakeLists so a future upstream bump propagates to
+        llama.cpp/whisper.cpp/chimera automatically instead of silently
+        diverging.
+        """
+        proj = project or Project()
+        cmakelists = proj.src / cls.name / "CMakeLists.txt"
+        try:
+            text = cmakelists.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return cls.GGML_MAX_NAME_FALLBACK
+        m = re.search(r"GGML_MAX_NAME=(\d+)", text)
+        return int(m.group(1)) if m else cls.GGML_MAX_NAME_FALLBACK
 
     @staticmethod
     def uses_shared_ggml() -> bool:

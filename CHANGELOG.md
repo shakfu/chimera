@@ -4,6 +4,33 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.12]
+
+### Fixed
+
+- **Restore the SD path on shared-ggml builds: `GGML_MAX_NAME` had diverged across the link (heap corruption).** Any `chimera sd` run against Z-Image Turbo aborted mid-sampling with glibc's `corrupted double-linked list` (or a SIGSEGV — the manifestation was nondeterministic). The cause was not sd.cpp, the model, or VRAM: `GGML_MAX_NAME` sizes `char name[GGML_MAX_NAME]` *inside* `struct ggml_tensor`, so it sets `sizeof(ggml_tensor)` (128 -> 400 bytes, 160 -> 432) and the offset of every field after `name`. chimera links only llama.cpp's ggml (`CMakeLists.txt`, all backends) while stable-diffusion.cpp and whisper.cpp contribute their own object code, so all of them must be compiled with the same value. None were: llama.cpp's ggml and chimera's own TUs were pinned at **128**, whisper.cpp got nothing and defaulted to **64**, and sd.cpp compiles itself at **160** (its `CMakeLists.txt` sets `add_definitions(-DGGML_MAX_NAME=160)`; upstream moved it up from 128 at some point and chimera's hardcoded 128 was never updated). sd.cpp therefore wrote `tensor->extra` at offset 416 into 400-byte tensors ggml had allocated — 16 bytes past the end, into the adjacent chunk's heap metadata. The stale pins even cited sd.cpp's "CMakeLists.txt:233"; that line is now 315, which is the drift itself showing in the comment.
+
+  Nothing caught it at build time because sd.cpp's own guard is `static_assert(GGML_MAX_NAME >= 128)` (`src/core/ggml_extend.hpp`) — a *minimum*, so 128 compiled clean. And nothing caught it at runtime until a `malloc` unrelated to the overflow happened to walk the damaged free list, which is why the backtrace pointed at innocent allocation sites (`copy_data_to_backend_tensor`, `ggml_gallocr_reserve_n_impl`) that moved as soon as allocation timing changed. The attribution shortcut for this class of bug: `build/stable-diffusion.cpp/build/bin/sd-cli` is built self-consistently at 160 and succeeds on configurations chimera crashes on — when upstream's own CLI is fine, suspect the shared-ggml link rather than upstream.
+
+- **Apply `GGML_MAX_NAME` to the CUDA and HIP languages, not just C/C++.** The above fix is incomplete without this and the crash survives it. `CMAKE_C_FLAGS` / `CMAKE_CXX_FLAGS` do not reach `.cu` files — CUDA and HIP are separate CMake languages with their own flag variables — so `ggml-cuda` in both llama.cpp and whisper.cpp stayed on the 64 default while `ggml-base` and `ggml-cpu` alongside it used the pinned value. The linked ggml disagreed with *its own backend* about `sizeof(ggml_tensor)`. This predates the SD divergence: llama.cpp's ggml-cuda was at 64 against a ggml-base at 128 in prior releases too, independent of whether SD was in the link. sd.cpp's tree was never exposed because it uses `add_definitions()`, which applies to every language. `GgmlBuilder.ggml_max_name_flags()` now emits `CMAKE_C_FLAGS`, `CMAKE_CXX_FLAGS`, `CMAKE_CUDA_FLAGS` and `CMAKE_HIP_FLAGS` together, and both the llama.cpp and whisper.cpp builders consume it. The HIP leg is reasoned-correct but was not exercised on ROCm hardware.
+
+- **Pin whisper.cpp's `GGML_MAX_NAME` at all.** The whisper builder never passed the define, so every whisper TU compiled at the 64 default against a shared ggml built at 128 — the same class of mismatch as SD's, in the opposite direction (whisper read fields at *lower* offsets than reality rather than overrunning, which is why it degraded quietly instead of aborting). No whisper failure was ever observed and the whisper tests passed both before and after, so this is a latent defect closed rather than an observed one fixed.
+
+### Changed
+
+- **Derive `GGML_MAX_NAME` from stable-diffusion.cpp instead of pinning it in two places.** The value belongs to upstream SD, which has moved it before and may again, and a stale copy fails silently at runtime rather than loudly at build time — so re-pinning 160 would only reset the same trap. `StableDiffusionCppBuilder.ggml_max_name()` parses `GGML_MAX_NAME=<n>` out of SD's own `CMakeLists.txt`, and chimera's top-level `CMakeLists.txt` does the same with `file(STRINGS ...)` for its own TUs. `GGML_MAX_NAME_FALLBACK = 160` applies only before the SD tree is cloned. Configure now reports the resolved value (`-- GGML_MAX_NAME: 160 (from stable-diffusion.cpp)`), which makes a future divergence visible in the build log. Both parsers are inert when `SD_USE_VENDORED_GGML=1`, where each project keeps its own ggml and no agreement is required.
+
+  To audit agreement across a build tree, every `flags.make` must report the same number:
+
+  ```
+  find build/{llama.cpp,whisper.cpp,stable-diffusion.cpp}/build build/src \
+       -name flags.make | xargs grep -ho 'GGML_MAX_NAME=[0-9]*' | sort -u
+  ```
+
+### Testing
+
+- **Verified against the Z-Image Turbo case that exposed it.** `scripts/case/z_turbo.sh` (Z-Image Turbo Q6_K + Qwen3-4B + `--offload-to-cpu --diffusion-fa`, 1024x512, CUDA) went from a reproducible `Aborted (core dumped)` to exit 0, and was run four times to rule out the nondeterminism that makes single passes meaningless for heap corruption. The three variants that also aborted before — `--clip-on-cpu --vae-on-cpu`, without `--diffusion-fa`, and at 512x512 — all pass. Every `flags.make` across llama.cpp, whisper.cpp, stable-diffusion.cpp and chimera now reports 160 with no exceptions. `make test` is 68 pass / 0 fail / 7 skip on a CUDA build, unchanged from before the fix, with the whisper lanes passing on the 64 -> 160 move. Note that the same 8 GB card still cannot run this model *without* `--offload-to-cpu`; that path fails cleanly with a 5638 MB allocation error, which is correct behaviour and not related to this bug.
+
 ## [0.2.11]
 
 ### Changed

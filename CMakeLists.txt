@@ -205,11 +205,34 @@ endif()
 unset(_sd_probe)
 message(STATUS "stable-diffusion.cpp:   ${CHIMERA_WITH_SD} -> link=${CHIMERA_LINK_SD}")
 
-# stable-diffusion.cpp requires GGML_MAX_NAME=128 for long tensor names.
-# When SD shares llama.cpp's ggml, both must use the same value. Only
-# needed when SD is actually linked in.
+# GGML_MAX_NAME sizes `char name[GGML_MAX_NAME]` *inside* struct ggml_tensor,
+# so it changes sizeof(ggml_tensor) and every field offset after `name`. When
+# SD shares llama.cpp's ggml, chimera's own TUs, llama.cpp's ggml, whisper.cpp
+# and SD must all agree or SD writes past the end of ggml-allocated tensors and
+# corrupts the heap. SD's own guard is only `static_assert(GGML_MAX_NAME >=
+# 128)`, a minimum, so a stale pin here compiles clean and fails at runtime.
+#
+# Read the value out of SD's CMakeLists (the same source scripts/manage.py uses
+# for llama.cpp/whisper.cpp) so an upstream bump propagates instead of silently
+# diverging. Keep the fallback in sync with GGML_MAX_NAME_FALLBACK there.
 if(CHIMERA_LINK_SD AND NOT SD_USE_VENDORED_GGML)
-    add_definitions(-DGGML_MAX_NAME=128)
+    set(_sd_ggml_max_name 160)
+    set(_sd_cmakelists "${CMAKE_CURRENT_SOURCE_DIR}/build/stable-diffusion.cpp/CMakeLists.txt")
+    if(EXISTS "${_sd_cmakelists}")
+        file(STRINGS "${_sd_cmakelists}" _sd_mn_line REGEX "GGML_MAX_NAME=[0-9]+")
+        if(_sd_mn_line)
+            list(GET _sd_mn_line 0 _sd_mn_line)
+            string(REGEX MATCH "GGML_MAX_NAME=([0-9]+)" _sd_mn_match "${_sd_mn_line}")
+            if(CMAKE_MATCH_1)
+                set(_sd_ggml_max_name ${CMAKE_MATCH_1})
+            endif()
+        endif()
+    endif()
+    message(STATUS "GGML_MAX_NAME:            ${_sd_ggml_max_name} (from stable-diffusion.cpp)")
+    add_definitions(-DGGML_MAX_NAME=${_sd_ggml_max_name})
+    unset(_sd_cmakelists)
+    unset(_sd_mn_line)
+    unset(_sd_mn_match)
 endif()
 
 message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}")
