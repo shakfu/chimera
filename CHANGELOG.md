@@ -171,7 +171,7 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Added
 
-- **CI now covers the combined-archive seam, schema migrations, and the Python bindings.** The `ci.yml` matrix previously ran only `make build` + `make smoke`, which exercise the `chimera` *executable* -- not the three redistributable archives (`libchimera{,_thirdparty,_ggml}.a`). That gap is exactly why the 0.2.3 `combine_archives.py` libwebp/libwebm regression shipped silently. Three legs close it, all model-free:
+- **CI now covers the combined-archive layer, schema migrations, and the Python bindings.** The `ci.yml` matrix previously ran only `make build` + `make smoke`, which exercise the `chimera` *executable* -- not the three redistributable archives (`libchimera{,_thirdparty,_ggml}.a`). That gap is exactly why the 0.2.3 `combine_archives.py` libwebp/libwebm regression shipped silently. Three legs close it, all model-free:
 
   - **`make test-external-smoke`** (all OSes) -- builds + links `tests/external/` the way a non-CMake consumer does and asserts ggml backend self-registration (`ggml_backend_dev_count() >= 1`, the runtime whole-archive contract) plus symbol resolution. The optional inference probe stays gated on `CHIMERA_SMOKE_MODEL`, so ctest reports the cases "Skipped" while still running the link + registration assertions.
 
