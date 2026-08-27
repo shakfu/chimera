@@ -214,7 +214,7 @@ Workaround:
 2. Pre-staged `/tmp/sd-bisect-warm` as a full clone of leejet's
    stable-diffusion.cpp with all submodules (libwebm, libwebp, ggml,
    server frontend), so each bisect iteration only does a local clone
-   + SHA checkout, not a fresh upstream pull.
+   - SHA checkout, not a fresh upstream pull.
 
 Bisect ran on `sd sd_xl_turbo_1.0.q8_0.gguf` (fastest of the three
 regressing tests; ~11s good, ~31s bad on dev; threshold 20s). Range
@@ -322,7 +322,7 @@ binary, same model, same prompt:
 `--no-mmap` restores baseline. The mmap-on run also emitted hundreds
 of Metal-backend errors to stderr:
 
-```
+```text
 ggml_extend.hpp:69   - ggml_metal_buffer_get_id: error: tensor ' (reshaped)' buffer is nil
 ```
 
@@ -339,7 +339,7 @@ its input image by calling `chimera sd` first, then feeds the
 wall time is dominated by the SD synthesis step:
 
 - main: ~20-25s SD synth + ~15s mtmd ≈ **40s**.
-- dev:  ~200s mmap-degraded SD synth + ~20s mtmd ≈ **220s**.
+- dev: ~200s mmap-degraded SD synth + ~20s mtmd ≈ **220s**.
 
 So all three regressions trace to the **same single root cause**:
 sd.cpp commit `57ff2eb` introduces mmap support; chimera's dev sync
@@ -417,7 +417,7 @@ clone, per-step purge of `build/stable-diffusion.cpp` and
 Probe 1 -- pre-57ff2eb baseline (sd at `9d68341`, **main** chimera
 because pre-57ff2eb sd doesn't have the `enable_mmap` field):
 
-```
+```text
 sd img2img round-trip   12.92s   [PASS]
 ```
 
@@ -453,7 +453,7 @@ regression. Verdict is unsafe.
 
 Probe 2 -- 57ff2eb itself with mmap fix (the missing control):
 
-```
+```text
 sd img2img round-trip   23.95s   [PASS]   (build: llama=b9284, sd=master-645-645e6e9)
 ```
 
@@ -660,6 +660,6 @@ For cache-sensitive multi-invocation tests like `img2img round-trip`:
 Timing JSONs under `tests/timings/`:
 
 - `test_timings_main_{1,2,3}.json` -- N=3 on main (b9119 / sd 596).
-- `test_timings_dev_{1,2,3}.json`  -- N=3 on dev  (b9284 / sd 645).
+- `test_timings_dev_{1,2,3}.json` -- N=3 on dev (b9284 / sd 645).
 - `test_timings_main.json`, `test_timings_dev.json` -- N=1 originals,
   superseded by the N=3 sets.

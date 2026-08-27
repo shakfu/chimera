@@ -365,7 +365,8 @@ server-init plumbing. Removed from the roadmap.
 
 Steps 1–4 closed the entire per-request gap (40 fields). Steps 5a–5e
 closed the server-init gap: audio LoadParams + VAD (5a), sd LoadParams
-+ ControlNet (5b), sd split-checkpoint flags (5c, 13 flags), sd
+
+- ControlNet (5b), sd split-checkpoint flags (5c, 13 flags), sd
 perf/offload long-tail (5d, 16 flags), PhotoMaker (5e, 3 server-init
 flags + 3 per-request fields). Step 6 closed per-request LoRA via
 named aliases. The numbered roadmap is now complete.

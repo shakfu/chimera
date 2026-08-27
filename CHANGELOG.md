@@ -24,7 +24,7 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
   To audit agreement across a build tree, every `flags.make` must report the same number:
 
-  ```
+  ```text
   find build/{llama.cpp,whisper.cpp,stable-diffusion.cpp}/build build/src \
        -name flags.make | xargs grep -ho 'GGML_MAX_NAME=[0-9]*' | sort -u
   ```
@@ -69,13 +69,13 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Changed
 
-- **Update llama.cpp version to b9979** (from b9804), whisper.cpp to **v1.9.1** (from v1.8.6), and stable-diffusion.cpp to **master-775-b5d8120** (from master-721-8caa3f9). The whisper bump -- its first since v1.8.6 landed in 0.2.6 -- built clean with no chimera-side code change. The llama.cpp and sd.cpp ranges each required one adaptation (see Fixed): sd.cpp resignatured `generate_image`, and mtmd made `mtmd_input_text::text_len` load-bearing. Both breakages were caught by the build and end-to-end tests (the SD one at compile time via its function-pointer pin-check cast, the mtmd one as an empty-output vision-test failure), not by a pre-flip header audit.
+- **Update llama.cpp version to b9979** (from b9804), whisper.cpp to **v1.9.1** (from v1.8.6), and stable-diffusion.cpp to **master-775-b5d8120** (from master-721-8caa3f9). The whisper bump -- its first since v1.8.6 landed in 0.2.6 -- built clean with no chimera-side code change. The llama.cpp and sd.cpp ranges each required one adaptation (see Fixed): sd.cpp resignatured `generate_image`, and mtmd made `mtmd_input_text::text_len` structural. Both breakages were caught by the build and end-to-end tests (the SD one at compile time via its function-pointer pin-check cast, the mtmd one as an empty-output vision-test failure), not by a pre-flip header audit.
 
 ### Fixed
 
 - **Adapt to sd.cpp resignaturing `generate_image` (master-721 -> master-775).** Upstream changed the entry point from `sd_image_t* generate_image(ctx, params)` -- returning a heap array, `NULL` on failure -- to `bool generate_image(ctx, params, sd_image_t** images_out, int* num_images_out)`, where success is the return value and the image array plus its count come back through out-params. `chimera_sd.cpp::generate` was updated to the out-param form and now iterates the returned `num_images` instead of `req.batch_count`, so the copy loop matches exactly what sd.cpp produced. The `generate_image` function-pointer `static_cast` pin-check was updated to the new signature (it had already tripped the build at compile time). chimera's public SD path is unchanged; the `sd` and `sd img2img` tests pass.
 
-- **Adapt to mtmd making `mtmd_input_text::text_len` load-bearing (b9804 -> b9979).** `mtmd_tokenize` now bounds its media-marker scan with `input_text.assign(text->text, text->text_len)` (`tools/mtmd/mtmd.cpp`) rather than falling back to `strlen(text)`. chimera had never populated `text_len` in either mtmd path -- it worked only because the old code length-scanned the pointer -- so after the bump the scan string was empty, zero markers were detected, and `mtmd_tokenize` failed hard with `rc=2` ("number of media markers in text (0) does not match number of bitmaps (1)"). Both call sites now value-initialize the struct and set `text_len` to the prompt length: `chimera_llama.cpp::run_generation_mtmd` (the `gen --image` / `--video` path) and `command_chat` in `chimera.cpp` (the interactive multimodal chat path). This restores the vision pipeline -- `gen --mmproj --image` returned empty output before the fix -- verified end-to-end by `make test` (57 pass / 0 fail / 6 skip).
+- **Adapt to mtmd making `mtmd_input_text::text_len` structural (b9804 -> b9979).** `mtmd_tokenize` now bounds its media-marker scan with `input_text.assign(text->text, text->text_len)` (`tools/mtmd/mtmd.cpp`) rather than falling back to `strlen(text)`. chimera had never populated `text_len` in either mtmd path -- it worked only because the old code length-scanned the pointer -- so after the bump the scan string was empty, zero markers were detected, and `mtmd_tokenize` failed hard with `rc=2` ("number of media markers in text (0) does not match number of bitmaps (1)"). Both call sites now value-initialize the struct and set `text_len` to the prompt length: `chimera_llama.cpp::run_generation_mtmd` (the `gen --image` / `--video` path) and `command_chat` in `chimera.cpp` (the interactive multimodal chat path). This restores the vision pipeline -- `gen --mmproj --image` returned empty output before the fix -- verified end-to-end by `make test` (57 pass / 0 fail / 6 skip).
 
 ## [0.2.9]
 
@@ -132,9 +132,13 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Added
 
 - **Video input on `chimera gen` and `chimera chat`.** The b9592 llama.cpp bundles upstream's `MTMD_VIDEO` decoder (enabled by default; ffmpeg/ffprobe required at runtime), which was already compiled into chimera's vendored `libmtmd`. Wired it through:
+
   - **`gen --video <path>`** (repeatable, requires `--mmproj`), distinct from `--image`: `--image` keeps upstream's content-based auto-dispatch (image/audio/video with default decode params), while `--video` always routes through the video decoder and honors the new knobs `--video-fps` (frames/sec to sample; `<=0` = native fps, default 4), `--video-timestamp-ms` (interval for timestamp text chunks; `0` = off, default 5000), and `--ffmpeg-dir` (ffmpeg/ffprobe location; default: search `PATH`).
+
   - **chat `/video <file>`** (with help, tab-completion, and path-completion), honoring the same `--video-fps` / `--video-timestamp-ms` / `--ffmpeg-dir` session knobs.
+
   - Honoring custom decode params required a chimera-side helper (`load_video_lazy_bitmap` in `chimera_llama.cpp`) that replicates upstream's lazy frame-pump callback, because `mtmd_helper_bitmap_init_from_file` hardcodes default video params internally.
+
   - A guard rejects `--video`/`/video` when the build or mmproj lacks video support (`mtmd_helper_support_video`), and `command_prompt` rejects `--video` without `--mmproj`. A smoke test covers the latter (model-free). End-to-end decode is not yet CI-covered -- it needs a video-capable mmproj fixture (see `TODO.md`).
 
 ### Fixed
@@ -168,21 +172,33 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Added
 
 - **CI now covers the combined-archive seam, schema migrations, and the Python bindings.** The `ci.yml` matrix previously ran only `make build` + `make smoke`, which exercise the `chimera` *executable* -- not the three redistributable archives (`libchimera{,_thirdparty,_ggml}.a`). That gap is exactly why the 0.2.3 `combine_archives.py` libwebp/libwebm regression shipped silently. Three legs close it, all model-free:
+
   - **`make test-external-smoke`** (all OSes) -- builds + links `tests/external/` the way a non-CMake consumer does and asserts ggml backend self-registration (`ggml_backend_dev_count() >= 1`, the runtime whole-archive contract) plus symbol resolution. The optional inference probe stays gated on `CHIMERA_SMOKE_MODEL`, so ctest reports the cases "Skipped" while still running the link + registration assertions.
+
   - **`make test-db-migrate`** (all OSes) -- drives the v1 -> latest schema ladder on a temp DB, asserting the upgrade advances `user_version` and preserves pre-existing rows.
+
   - **`make test-bindings-pytest`** (Linux + macOS) -- provisions the build toolchain via the new `astral-sh/setup-uv` step, builds the nanobind module against the same three archives, and runs the no-model pytest suite. Gated off Windows because the `make bindings` recipe uses the POSIX `bin/python` venv layout (uv emits `Scripts/` on Windows).
+
 - **Compile-only GPU backend CI (`.github/workflows/ci-gpu.yml`).** A separate, `workflow_dispatch`-only workflow that builds the CUDA and Vulkan backends on Linux x86_64 and asserts the backend's ggml registration symbol (`ggml_backend_cuda_reg` / `ggml_backend_vk_reg`) actually linked into the binary -- catching a silently-dropped backend or a broken per-backend combine/link path at build time, without a GPU. It does *not* validate runtime backend registration or kernel correctness (no GPU on hosted runners; that needs a self-hosted GPU runner). After the link assertion each leg strips the binary and uploads it as a downloadable artifact (`chimera-linux-x86_64-{cuda,vulkan}` + `.sha256`) so users can grab a GPU build to try on their own hardware. The CUDA leg runs inside the `nvidia/cuda:12.4.1-devel-ubuntu22.04` container (nvcc/cudart/cublas preinstalled, host toolchain apt-installed on top) and pins `CMAKE_CUDA_ARCHITECTURES=75` to keep the nvcc compile within the runner budget; the Vulkan leg uses plain `ubuntu-latest` with apt `libvulkan-dev` + `glslc` and frees runner disk first. Both build with `GGML_NATIVE=OFF` (reproducible, not tuned to the runner CPU), `ccache` (compiled objects cached across runs -- the main lever on nvcc cost), and `--no-sd-examples` (skips sd-cli/sd-server, which chimera does not link). Conventions adapted from the sibling `cyllama` GPU-wheels workflow. Manual-only until it proves stable; promote to nightly/PR later (TODO.md "CI matrix for Vulkan + CUDA").
+
 - **One-shot artifact bundle in both CI workflows.** A final `collect` job in `ci.yml` and `ci-gpu.yml` merges the per-leg artifacts into a single downloadable archive (`chimera-all` across the three OS/backend legs; `chimera-gpu-all` across CUDA + Vulkan) so every platform can be pulled in one click instead of one download per matrix leg. It uses `actions/upload-artifact/merge`, which stitches the already-uploaded artifacts together over the GitHub API -- no rebuild, nothing re-downloaded into the job. The individual per-leg artifacts are kept (`delete-merged: false`) so the single-platform download path still works, and the job runs `if: always()` so a green leg is still bundled when a sibling leg fails (the merge errors only if no artifact matched at all).
+
 - **Compiler-launcher (ccache) forwarding on both the deps and chimera-side configures.** CMake does not read `CMAKE_{C,CXX,CUDA,HIP}_COMPILER_LAUNCHER` from the environment, so a `ccache` (or `sccache`) wrapper was previously ignored. Now `scripts/manage.py` passes any launcher set in the environment to the deps configure (mirroring its `GGML_NATIVE` passthrough) -- where the heavy ggml-`<backend>` / nvcc compile lives -- and the `Makefile` forwards the same vars to chimera's own `cmake` configure via a `CMAKE_LAUNCHER_FLAGS` variable, so chimera's TUs are cached too. Both expand to nothing when unset; a normal `make build` is unchanged.
+
 - **`DEPS_EXTRA` Makefile passthrough on the `deps` target.** Extra flags are forwarded verbatim to `manage.py`'s deps build and propagate into the nested `$(MAKE) deps` of `build-cuda` / `build-vulkan` / etc., so CI can inject `--no-sd-examples` without a dedicated target. Empty by default.
+
 - **pytest suite for the Python bindings (`bindings/tests/`).** Adds `conftest.py` plus `test_module.py` (11 no-model tests: module import, every core class exported, `ExitCode` members, `ChimeraError` is an `Exception`, all option structs default-construct, `Server` constructs without blocking, option read/write round-trips incl. dict/list fields, the `reference_internal` live-handle semantics, and bad-path load translating to `ChimeraError`) and `test_inference.py` (model-gated end-to-end tests for the tokenize round-trip, Llama one-shot + streaming-callback, mutable-options-between-calls, embedder dimension stability + `embed_many`, and the optional SD / Whisper modalities). `conftest.py` makes `import chimera` work from the uninstalled standalone build (`bindings/build`) -- and defends against a stale scikit-build editable hook that intercepts the import -- and resolves model paths from `CHIMERA_TEST_*` env overrides, falling back to the repo's `models/` dir; a missing model SKIPs rather than FAILs. `pytest` is a `dev` dependency group in `bindings/pyproject.toml`, which also gains a `[tool.pytest.ini_options]` block (`testpaths = ["tests"]`). Documented in a new "pytest suite" section of [`bindings/README.md`](bindings/README.md).
+
 - **`make test-bindings-pytest` target.** Builds the module (via `bindings`) then runs the pytest suite under the bindings venv interpreter (installing `pytest` into it via `uv` if absent), so the ABI matches the freshly-built `.so`. Extra args via `PYTEST_ARGS`.
+
 - **`make clean-bindings` target.** Bindings-scoped clean: removes `bindings/build`, `bindings/.venv`, the wheel output (`$(WHEEL_OUT)`), and the pytest/python caches. Complements the top-level `clean`/`reset`.
 
 ### Fixed
 
 - **`combine_archives.py` dropped object members with duplicate basenames, breaking the combined archives on Linux x86 / Windows.** A single static lib can contain multiple members with the same basename -- `libggml-cpu.a` ships two `quants.c.o` and two `repack.cpp.o` (from `ggml-cpu/quants.c` + `arch/x86/quants.c`), and `libllama.a` ships two `llama.cpp.o`. The Linux merge path used a plain `ar x`, which extracts same-named members to the same file so the later silently overwrote the earlier -- dropping `quantize_row_*`, `ggml_backend_cpu_repack_*`, `llama_split_path`, and others, surfacing as undefined-reference link failures in any consumer of the combined `libchimera*.a`. Now each member instance is extracted by index (`ar xN <k>`) and uniquely renamed. macOS was unaffected (it merges via `libtool -static`, which keeps all members) -- which is why this stayed hidden until the new Linux CI leg exercised the combine path.
+
 - **`combine_archives.py` unconditionally required `libggml-blas.a`, failing the combine on non-BLAS builds.** `with_blas` defaulted on and was ungated, but a default Linux/Windows CPU build never produces the BLAS backend archive (only macOS Metal builds pull in Accelerate). ggml-blas is now include-if-present, same as the libwebp/libwebm handling: a CPU build omits it correctly; a BLAS build (macOS Accelerate, or `GGML_BLAS` on Linux) bundles it.
+
 - **`make bindings` no longer prints a spurious `uv venv` failure on re-runs.** The recipe unconditionally ran `uv venv`, which errors when the venv already exists (the failure was non-fatal but noisy and misleading). It now creates the venv only when missing and the provisioning echo reports `reusing` vs `provisioning` accordingly.
 
 ## [0.2.3]
@@ -194,9 +210,13 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - **Update stable-diffusion.cpp version to master-650-1ceb5bd** (from master-645-645e6e9). The five upstream commits add new model support (LTX temporal latent upscaler, Longcat-Image / Longcat-Image-Edit) behind the existing API plus macOS rpath / Windows ROCm build fixes. `stable-diffusion.h` -- the only SD header chimera consumes -- is unchanged, so there is no public API drift to adopt; the new models work through the existing `sd` / `--enable-image` path with no chimera change. Verified via `make bump-check` (clean) and the GitHub compare API.
 
 - **WebUI embedding rewritten to track the llama.cpp b9318 restructure.** Upstream b9318 deleted `scripts/xxd.cmake` and the static `tools/ui/ui.h`, replacing the whole asset-embed mechanism with a host generator (`tools/ui/embed.cpp`) that emits `ui.cpp` + `ui.h`. Crucially, `server-http.cpp` (which chimera compiles itself) now `#include "ui.h"` and calls `llama_ui_find_asset()` *unconditionally*, gating its `GET /` + `/bundle.{js,css}` routes on the generated `LLAMA_UI_HAS_ASSETS` define plus the runtime `params.ui` flag -- it no longer consults `LLAMA_BUILD_WEBUI`/`LLAMA_BUILD_UI` at all. This broke even the default `WEBUI_EMBED=OFF` build (the old hard-coded `xxd.cmake` stage in `manage.py` raised, and the missing `ui.h` / undefined `llama_ui_find_asset` would not compile or link). chimera's adaptation:
+
   - `scripts/manage.py` `_copy_headers` now stages `tools/ui/embed.cpp` as `src-aux/ui-embed.cpp` (replacing the `xxd.cmake` copy) and drops the dead `ui.h` copy.
+
   - `src/chimera/CMakeLists.txt` *always* builds a `chimera_ui_embed` host helper and generates + links `ui.cpp`/`ui.h` (passing the four assets only when `CHIMERA_WEBUI_EMBED=ON`, otherwise an empty `nullptr`-returning stub), ordered before `chimera_lib` so `server-http.cpp`'s `#include "ui.h"` resolves. The old per-asset `.hpp` xxd custom-commands and the `LLAMA_BUILD_WEBUI`/`LLAMA_BUILD_UI` compile defines are gone (the define is kept only as chimera's own startup-banner gate).
+
   - `make bump-check` drift table updated: `tools/ui/embed.cpp` is now a required path and the webui-layout probe recognizes the b9318+ layout (distinct from pre-b9200 and b9200..b9317), so the next rearrangement of this area fails loudly instead of crashing `make build`.
+
   - Note: upstream no longer ships prebuilt webui assets in the source tree, so `CHIMERA_WEBUI_EMBED=ON` requires building them first (`npm install && npm run build` in `tools/ui/`); `make deps` then stages them. The default `OFF` build is unaffected. Full write-up in [`docs/dev/webui.md`](docs/dev/webui.md) sections 1, 2.1, and 10.
 
 ### Fixed
@@ -210,8 +230,11 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Added
 
 - **Field-level pin-check expansion across all three engine wrappers.** Previously only llama.cpp had a meaningful compile-time contract; the audit prompted by the b9318/SD-650 bump extended the same field-level discipline to whisper and sd so a future bump that silently *retypes* a struct field chimera assigns (e.g. an `int` widening to `int64_t`, a `float` to `double`, or an enum rename) fails at a labeled line in the relevant wrapper's pin block instead of misbehaving at runtime.
+
   - `src/chimera/chimera_pin_check.cpp` (llama.cpp): added function-pointer pins for the churn-prone adapter / memory / embedding APIs (`llama_adapter_lora_init`, `llama_set_adapters_lora`, `llama_set_adapter_cvec`, `llama_memory_seq_rm`, `llama_get_embeddings_ith`/`_seq`) and the `llama_{model,context}_default_params` factories, plus field-type `static_assert`s for every `llama_model_params` / `llama_context_params` / `llama_logit_bias` field the wrapper assigns.
+
   - `src/chimera/chimera_whisper.cpp` (whisper.cpp): 38 field-type asserts covering every `whisper_context_params` / `whisper_full_params` field the wrapper assigns, plus the `whisper_{context,full,vad}_default_params` factory pins. Kept in this TU (not the shared pin-check) per the ggml enum-collision isolation.
+
   - `src/chimera/chimera_sd.cpp` (stable-diffusion.cpp): 93 field-type asserts covering `sd_ctx_params_t`, `sd_img_gen_params_t`, and the nested `sample_params` / `pm_params` / `cache` / `hires` / `vae_tiling_params` sub-structs, plus the `sd_img_gen_params_init` factory pin -- extending the existing selective SD pins to full field-level coverage.
 
 - **Python bindings scaffold (`bindings/`) over the `chimera.hpp` OOP layer**, via [nanobind](https://github.com/wjakob/nanobind). Exposes `Llama`, `Embedder`, `Tokenizer`, `Server`, and (modality-gated) `SD` / `Whisper` as a `chimera` Python module, with `ChimeraError`/`ExitCode` exception translation, GIL release on the long compute calls + per-token re-acquire for the streaming callback, and **full field coverage** of all five option structs (every field of `chimera.hpp`'s option structs is bound; maintained by hand, with the `bindings/tests/` round-trips as the regression net -- there is no compile-time coverage check). No `nb::enum_` is needed beyond `ExitCode` -- chimera's option structs use strings, not enums, for every choice field. Links the three prebuilt archives via the same contract as `tests/external/` (ggml whole-archived). Files: `bindings/chimera_ext.cpp`, `CMakeLists.txt`, `pyproject.toml` (scikit-build-core), `smoke_test.py` (mirrors `hpp_smoke.cpp`), `README.md`. New `make bindings` / `make test-bindings` targets build the module (and run the smoke test) against the combined archives; when `uv` is available they auto-provision nanobind + scikit-build-core into a local venv (`bindings/.venv`), so no manual `pip install` is needed (override with `BINDINGS_PY=/path/to/python`). The `pyproject.toml` is set up for the **uv + scikit-build-core + nanobind** workflow: `uv pip install ./bindings` (build isolation auto-installs the toolchain), an editable dev install (`uv pip install --no-build-isolation -e ./bindings`) that recompiles on import (`editable.rebuild`), and a PEP 735 `build` dependency group. Both build paths were validated end-to-end under uv (module build + smoke test, incl. the streaming-callback GIL path, against `Llama-3.2-1B`). Documented in [`docs/bindings.md`](docs/bindings.md) (with `bindings/README.md` and the design notes in [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md)).
@@ -237,7 +260,9 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Added
 
 - **Per-run test-timing capture and diff tooling.** `scripts/test.py` gains two flags: `--timings-out FILE` writes a JSON file at end of run containing every outcome's wall-clock duration plus a metadata header (chimera + llama.cpp + whisper.cpp + sd.cpp + sqlite versions from `chimera --version`, ISO timestamp, binary path); `--timings-baseline FILE` loads a previously-captured file and annotates each test line with `Δ +N.NNs (+P%)` against the baseline, colored red for regressions, green for speedups, gray for neutral. Regression threshold is `abs > 0.5s AND rel > 20%` so trivial 0.02s → 0.04s flips don't crowd the output.
+
 - **`scripts/test_diff.py`** — standalone offline diff between two timings JSONs. Sorts by absolute wall-clock delta by default (`--by-rel` switches to %, `--by-name` for stable alpha order). `--only regressions|speedups|changed|all` filters the table. Exit code 1 if any test regressed past both thresholds, making it usable as a CI gate. Reports tests that exist on only one side as separate "only in baseline / only in current" lines.
+
 - **`make test-bench` / `make test-bench-fast` targets.** Run the suite with `--timings-out $(BENCH)`, defaulting to `build/test_timings.json`; override with `make test-bench BENCH=foo.json`. `test-bench-fast` skips the slow set per `--no-slow`. Standard workflow: capture baseline on a known-good ref, capture current on a suspect ref, run `scripts/test_diff.py baseline.json current.json` to see where wall-clock cost moved.
 
 ## [0.2.1]
@@ -245,15 +270,21 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Added
 
 - **Three chimera-specific `/v1/chimera/*` endpoints**, defined in a new `src/chimera/chimera_serve_meta.cpp` translation unit (~250 LOC) and bound unconditionally by `chimera_serve.cpp` (no opt-in flag). Forward declarations live in `chimera_serve_internal.h`. Designed as the read surface a downstream desktop wrapper (chimera-desktop) consumes for its About pane / DB footer / graceful-exit path, but useful to any HTTP client.
+
   - **`GET /v1/chimera/info`** — JSON form of `chimera info`. Returns `{ chimera: {version, platform}, llama_cpp: {version, ggml_version, ggml_commit, built_backends, loaded_backend, registries, devices, gpu_offload, mmap_support, mlock_support, rpc_support}, whisper_cpp: {linked, ...} | {linked: false}, stable_diffusion_cpp: {linked, ...} | {linked: false}, sqlite: {version, sqlite_vec}, build_flags: {...} }`. Devices are enumerated via `ggml_backend_dev_get(i)` with each entry typed via `ggml_backend_dev_type()` (CPU / GPU / ACCEL). CPU-feature strings for whisper/sd are parsed inline from each library's `system_info_raw()`; the parser is independent of the CLI's `parse_sys_info` to keep `chimera_serve_meta.cpp` free of CLI-side dependencies. Build flags (`CUDA_ARCH`, `HIP_ARCH`, `BLAS_VENDOR`, `CUDA_FORCE_MMQ`, `CUDA_FORCE_CUBLAS`, `HIP_ROCWMMA_FATTN`) are emitted only when set so the `build_flags` object is empty rather than all-empty-strings for a CPU build.
+
   - **`GET /v1/chimera/db`** — JSON form of `chimera db status`. Returns `{ path, size_bytes, sqlite_version, sqlite_vec_version, sqlite_vec_loaded_version, schema_version, latest_schema_version, tables, row_counts }`. Row counts are produced by `SELECT COUNT(*) FROM "<table>"` per entry returned from `chimera_db::list_tables`; table names are validated against `[A-Za-z0-9_]` before being spliced into SQL (defense in depth — `list_tables` already returns names from `sqlite_master`). DB path resolution mirrors the existing chat-persistence / RAG precedence: `--chat-db` override → `--rag-db` override → default (`$CHIMERA_DB` / XDG path). The endpoint opens the DB and runs `open_and_migrate` so a fresh response on a never-used host returns a populated `schema_version` and `tables` list rather than a 500.
+
   - **`POST /v1/chimera/shutdown`** — graceful exit. Returns `202 Accepted` with `{"object":"chimera.shutdown","status":"shutting_down","delay_ms":150}` and then, on a detached `std::thread`, sleeps 150 ms before invoking the same teardown the SIGINT handler runs (`emb_ctx->terminate()`, `rrk_ctx->terminate()`, `ctx_server.terminate()`). The 150 ms delay is deliberate — without it, the listener can close before cpp-httplib flushes the response, so the client sees a closed connection instead of the 202. Captured shutdown closure is passed into the handler factory by `command_serve`; the handler factory does not reach into globals so the same module is usable for tests in isolation. No request body required.
 
 ### Changed
 
 - **`chimera_serve.cpp` route registration block** gains five lines: two `ctx_http.get(...)` bindings for `info` + `db`, one `ctx_http.post(...)` binding for `shutdown`, all wrapped through `ex_wrapper`. The `shutdown` binding lives below the `clean_up` lambda so the capture closure can call `ctx_server.terminate()` directly; `info` and `db` are bound earlier with the rest of the unconditional GETs. Top-of-file route catalog gains a new "Meta — chimera-specific introspection + shutdown" section in the comment header so the route inventory stays grep-locatable.
+
 - **`src/chimera/CMakeLists.txt` source list** picks up `chimera_serve_meta.cpp` alongside the existing per-modality serve TUs (`chimera_serve_audio.cpp`, `chimera_serve_chats_read.cpp`, etc.). No new dependencies — the new TU compiles against existing headers (`ggml-backend.h`, `chimera_db.h`, `sqlite3.h`).
+
 - **`make test-fast` / `make test-slow` targets** for splitting the suite by wall-clock cost. Three tests account for most of the runtime (`gen --mmproj --image` vision pipeline at ~165s, `sd img2img round-trip` at ~75s, `sd sd_xl_turbo_1.0.q8_0.gguf` at ~30s); the others all clear in seconds. `test-fast` runs the rest (use during tight inner-loop iteration on the LLM / embed / RAG / chat paths). `test-slow` runs only those three (use when iterating on the SD pipeline or the mtmd vision integration). `make test` keeps the original behavior of running everything. Centralised in `SLOW_TEST_RE` at the top of `scripts/test.py`; update there when a new test crosses the ~20-second mark.
+
 - **`scripts/test.py --slow-only` / `--no-slow` / `--exclude` flags**. `--exclude REGEX` is a general "skip tests matching this regex" complement to the existing `--filter`; the two compose (a test must match `--filter` AND not match `--exclude`). `--slow-only` and `--no-slow` are convenience aliases that wire `SLOW_TEST_RE` into `--filter` and `--exclude` respectively; mutually exclusive at the argparse level. Back the new Makefile targets above.
 
 ## [0.2.0]
@@ -263,29 +294,43 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - **CTest registration for external smoke tests.** `tests/external/CMakeLists.txt` now calls `enable_testing()` and registers `chimera_smoke` + `chimera_hpp_smoke` via `add_test(...)` with labels `EXTERNAL` / `PROCEDURAL` / `OOP` / `MODEL_GATED`. `make test-external-smoke` runs both via `ctest --output-on-failure`; new `make test-external-oop` filters to the OOP lane via `-L OOP`. The binaries' "inference probe: SKIP" line is mapped to ctest's `Skipped` outcome via `SKIP_REGULAR_EXPRESSION` so CI dashboards can distinguish "passed with fixture" from "ran without fixture available". Working directory set to the repo root so env-var-supplied paths (`CHIMERA_SMOKE_MODEL`, `CHIMERA_SMOKE_WHISPER_*`) are repo-relative and match the shell invocations users copy from `docs/dev/combine_archives.md`.
 
 - **`src/chimera/chimera_llama.{h,cpp}`** — moves the llama.cpp glue (model + context loaders, generation, sampler, LoRA, decode helpers) plus the `command_prompt` / `command_embed` / `command_tokenize` entrypoints out of `src/chimera_cli/chimera.cpp` and into the library. Before this, `libchimera.a` had no direct llama.cpp text-generation entrypoint — only `command_serve` and the lower-level `Embedder`. CLI shell drops ~1000 lines and `#include`s the new header. `command_chat` deliberately stays in `chimera_cli/` because it owns terminal I/O, signal handling, linenoise, and color streaming.
+
 - **`src/chimera/chimera.hpp`** — optional header-only OOP layer over the procedural surface. Persistent-handle classes (`chimera::Llama`, `Embedder`, `Tokenizer`) load the model once in the ctor and reuse it across calls; options-in-ctor wrappers (`Whisper`, `SD`, `Server`) mirror the CLI subcommand lifecycle. Header is not compiled into the archive; consumers `#include` it at their call site. See [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md).
+
 - **`tests/external/hpp_smoke.cpp`** — parallel external smoke test that goes through `chimera.hpp` instead of the procedural API. Instantiates every wrapper class (compile/link proof) and, when `CHIMERA_SMOKE_MODEL` is set, round-trips `Tokenizer::encode`/`decode` plus drives a two-call `Llama::generate` to confirm persistent-handle behavior. Asserts the cached `llama_context` pointer is stable across calls, that `reset()` preserves it, and that `reset(rebuild=true)` drops and rebuilds it. Runs alongside the existing `chimera_smoke` under `make test-external-smoke`.
 
 ### Changed (OOP)
 
 - **`chimera::Llama` now caches the `llama_context`** across `generate()` calls (text path; the vision path still uses a fresh ctx per call inside `run_generation_mtmd`). Semantics remain single-shot - the KV cache is cleared at the start of each `generate()` via `llama_memory_clear`, so the persistent ctx is an internal optimization rather than a behavior change. LoRA adapters and the sampler are rebuilt per call so mutations to sampler / LoRA knobs in `options()` take effect immediately. Mutations to context-creation fields (`n_ctx`, `cache_type_k/v`, `flash_attn`, `rope_*`, `yarn_*`, `swa_full`, `control_vector*`) silently no-op until `reset(/*rebuild=*/true)` drops the cached ctx. New methods: `Llama::reset(bool rebuild=false)` and `Llama::ctx()`. `sample_loop` was moved out of `chimera_llama.cpp`'s anonymous namespace and declared in `chimera_llama.h` so the OOP layer can drive its own prompt-decode + sample cycle.
+
 - **Streaming callback on `chimera::Llama::generate`.** New overload `generate(prompt, const chimera::TokenCallback & on_token)` where `TokenCallback = std::function<void(std::string_view)>`. The callback is invoked once per sampled token with the detokenized UTF-8 piece; the full text is still returned. Library consumers feeding a WebSocket / notebook cell / log file now have a clean hook instead of inheriting stdout streaming. The existing `generate(prompt, bool stream)` overload is preserved for CLI-style convenience and routes through the callback path internally. Library-side, `sample_loop`, `run_generation`, and `run_generation_mtmd` swapped their `bool stream_output` parameter for `const TokenCallback &`; existing callers were updated. `command_prompt` (the CLI's `gen` driver) now owns the trailing-newline policy that `sample_loop` used to handle implicitly.
+
 - **Path-only convenience constructors** on every persistent-handle wrapper: `chimera::Llama(model_path)`, `chimera::Embedder(model_path)`, `chimera::Whisper(model_path)`, `chimera::SD(model_path)`. Each delegates to the full-options constructor with everything else defaulted. The lazy-context design means callers can still `.options().foo = bar` between the ctor and the first call to override defaults. `chimera::Tokenizer` already had a path-only ctor.
+
 - **`chimera::Whisper` and `chimera::SD` are now persistent-handle.** Both ctors call the existing lower-level `chimera_whisper::load_model` / `chimera_sd::load_model` and cache the handle. `run()` and the new structured-API methods (`Whisper::transcribe`, `SD::generate`) both reuse the cached ctx -- no model reload between calls. Library-side, `command_whisper` and `command_sd` were split into a load shim (builds LoadParams from opts and constructs the ctx) and a post-load helper `run_whisper(whisper_context *ctx, const WhisperOptions & opts)` / `run_sd(sd_ctx_t *ctx, const SdOptions & opts)`. The CLI and OOP paths share these helpers so behavior is identical between `chimera whisper -m foo.bin -i x.wav` and `chimera::Whisper(opts).run()`. Dirty-options policy mirrors `chimera::Llama`: load-time fields (`model`, `flash_attn`, `gpu_device` for whisper; the entire split-checkpoint surface, all `*_on_cpu` / `*_conv_direct` knobs, and crucially `init_image` for SD) silently no-op after construction; call `reset(/*reload=*/true)` to honor new values on the next call.
 
 ### Changed
 
 - stable-diffusion.cpp pin: `master-596-90e87bc` → `master-637-ef92a00` (~41 commits). Bump-check via the just-landed multi-repo `make bump-check` flagged 1 header change with 1 removed symbol (`generate_video` — different signature now) + 1 added (`free_sd_audio`); the SD pin-check static_asserts all held. None of the renamed / re-signatured functions are called by chimera.
+
   - **API surface drift (additive on chimera's call path):** 3 new `sample_method_t` values (`EULER_CFG_PP`, `EULER_A_CFG_PP`, `EULER_GE`), 1 new `scheduler_t` (`LTX2`), 1 new `sd_type_t` (`Q1_0`, count 41 → 42). `sd_ctx_params_t` gained `embeddings_connectors_path`, `audio_vae_path`, `backend`, `params_backend`. `sd_sample_params_t` gained `extra_sample_args`. `sd_hires_params_t` gained `custom_sigmas` + `custom_sigmas_count`. `sd_vid_gen_params_t` gained `fps` + `hires`. New struct `sd_audio_t` for video-gen-with-audio. chimera initializes via `_init` and sets named fields, so layout additions are transparent.
+
   - **API surface drift (breaking, but unused by chimera):** `generate_video` signature changed from `sd_image_t* generate_video(sd_ctx_t*, const sd_vid_gen_params_t*, int*)` to `bool generate_video(sd_ctx_t*, const sd_vid_gen_params_t*, sd_image_t**, int*, sd_audio_t**)`. `new_upscaler_ctx` gained `const char* backend, const char* params_backend` parameters. chimera is image-gen only — neither function is in our call surface; both verified clean via `grep -rn 'new_upscaler_ctx\|generate_video' src/chimera/` (zero hits).
+
   - **Build-system drift:** upstream added a `libwebp` dependency (under `thirdparty/libwebp/`). Builds cleanly out of the box on macOS; just adds a few minutes to the cold-cache SD build. Not flagged by bump-check today (the build-system probe is llama-side only); worth a follow-up to extend the probe to the SD repo's `thirdparty/` layout if more deps land.
+
   - **Runtime slowdown (known, accepted on the dev branch).** SD-touching tests are ~4–8× slower on the new pin: `sd <model>` 8.7s → 40.5s, `sd img2img round-trip` 12.4s → 95.5s, `gen --mmproj --image` 38.5s → 236.1s (the last runs SD twice — once to synthesize the input image, once for the VL pipeline). Root cause is **a ggml/Metal ABI mismatch in the shared-ggml build path**, not graph-cut offload (`max_vram` defaults to 0 → graph-cut is disabled; verified by reading the upstream `apply_max_vram_budget` short-circuit). Every leaf tensor in SD's graph fails Metal buffer-id lookup with `ggml_metal_buffer_get_id: error: tensor 'leaf_N' buffer is nil` and falls through to a slow path, multiplied across thousands of tensors per inference step. Output is still correct — `make test` 56/56 PASS — just slow. Caused by chimera building SD with `SD_USE_VENDORED_GGML=0` so both modalities share llama.cpp's ggml, and SD master-637 having updated the Metal buffer-id contract for graph leaves between b596 and b637 in a way llama.cpp b9264 doesn't yet supply. Tracked here as expected dev-branch state; will resolve once one of: upstream llama.cpp ships a matching ggml-Metal change; SD reverts the offending commit; chimera flips `SD_USE_VENDORED_GGML=1` permanently (~3 MB binary cost from two ggml flavors). Main branch is unaffected.
+
   - **Verified:** `make build` clean. `make test` 56 PASS + 6 SKIP (same outcomes as the b596 pin — slowdown is wall-clock only, not behavioral). `chimera info` reports `stable-diffusion.cpp: master-637-ef92a00`.
 
 - Upstream-drift defenses widened to cover stable-diffusion.cpp and the post-b9200 `webui` → `ui` rename. Three follow-ups landed after the llama.cpp b9264 bump:
+
   - **`make bump-check` covers two repos in one run.** `do_bump_check` in `scripts/manage.py` refactored from single-repo (llama only) to multi-repo (llama + stable-diffusion.cpp). New `--sd-version` flag defaults to `SDCPP_VERSION`; `master-<count>-<sha>` format is auto-extracted to the trailing SHA that raw.githubusercontent.com expects. New `--skip-llama` / `--skip-sd` flags scope a run to one repo. SD's main header lives at upstream's `include/stable-diffusion.h` (vs llama's flatter layout); the comparison table tracks the per-repo path remapping.
+
   - **SD pin-check assertions in `chimera_sd.cpp`.** Mirror of the llama.cpp block in `chimera_pin_check.cpp`. Asserts struct field types chimera reads (`sd_image_t` width/height/channel/data, `sd_lora_t::path` const-char-ness + multiplier + is_high_noise, `sd_pm_params_t` shape, `sd_sample_params_t` field types), sentinel enum values chimera relies on (`SAMPLE_METHOD_COUNT`, `SCHEDULER_COUNT`, `PREDICTION_COUNT`), and 7 function signatures chimera calls (`new_sd_ctx`, `free_sd_ctx`, `generate_image`, `sd_ctx_params_init`, `str_to_sample_method`, `str_to_scheduler`, `sd_ctx_supports_image_generation`). Lives in `chimera_sd.cpp` rather than the central `chimera_pin_check.cpp` because SD's ggml.h enums collide with llama's; the per-modality TU isolation pattern is unchanged. ~90 LOC.
+
   - **`common_params::ui` pin-check.** Single static_assert in `chimera_pin_check.cpp` for the new canonical field. Upstream b9200+ has `bool webui = ui;` — the existing `decltype(common_params::webui) == bool` assertion still holds, but when upstream eventually drops the deprecated alias, the new `ui` assertion makes the failure point at the right replacement field instead of just at the disappearing one.
+
   - **Smoke:** `make bump-check` against the pinned llama.cpp + SD refs prints both comparisons + the llama build-system probe + a clean exit. `make build` clean, `make test` 56 PASS + 6 SKIP unchanged. `docs/dev/maintenance.md` §§ 2 and 3 updated to retire the "whisper.h and stable-diffusion.h aren't covered yet" footnote and rewrite the pin-check coverage paragraph.
 
 - `.github/workflows/release.yml` — fail-fast tag-existence guard. Added a step that runs **before** `actions/checkout@v6` and calls `git ls-remote --tags --exit-code "$REMOTE" "refs/tags/$TAG"` to verify the tag the workflow was triggered with actually exists on origin. On a miss it surfaces `::error::tag '<name>' does not exist on origin.` plus a copy-pasteable `git tag … && git push origin …` fix and a sorted listing of the tags that *do* exist (catches typos like `0.17` vs `0.1.7` or a missing `v` prefix). Replaces the previous failure mode of three opaque retries of "git failed with exit code 1" from inside actions/checkout. Triggered by an earlier `workflow_dispatch` run against `tag: 0.1.7` before the tag was pushed.
@@ -293,21 +338,35 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - `scripts/test.py` — distinguish subprocess timeouts from wrong-exit-code in smoke test diagnostics, and bump the cold-start budget on backend-init-traversing tests. Introduced `TIMED_OUT = -1000` sentinel returned by `run_silent` on `subprocess.TimeoutExpired` (no real process produces that value, so it's unambiguously a timeout vs a signal-killed `-9`). New `_check_rc()` helper reports `timed out after Xs (expected exit code N)` separately from `want N, got M`. Bumped the timeout on `gen without prompt exits 2 (BadInput)` and `gen with missing model exits 3 (Load)` from 10–15s → 60s — both run backend init before reaching their respective check paths, and CI macos-metal runners (no real GPU; Metal probe falls through over 5–10s) exceeded the old budget. The CLI-parse-only `gen without -m` test stayed at 15s since it short-circuits before backend init. Caught when macOS-metal smoke leg of the 0.1.7 release CI hit a 10s timeout that masqueraded as `got -1`.
 
 - llama.cpp pin: `b9119` → `b9264` (145 versions). Bump-check found header drift in 6 files (llama.h, common.h, arg.h, chat.h, mtmd.h, server-context.h) plus build-system drift not visible in headers. None of the renames hit chimera's call surface; pin-check assertions all held. Three follow-ups landed alongside the bump:
+
   - **`scripts/manage.py` — graceful webui staging across upstream layouts.** Around b9200 upstream moved the webui from prebuilt assets at `tools/server/public/` to a Vite project at `tools/ui/` (no prebuilt assets in source tree). The original hard-coded `glob_copy("tools/server/public", ...)` raised `IOError: src dir not found` on the new pin. Now probes three candidate dirs in order: `tools/server/public/` (pre-b9200), `build/tools/ui/dist/` (post-b9200 upstream-built), `tools/ui/dist/` (post-b9200 in-tree-built). First with all four expected assets wins; absent → log and skip (default builds unaffected). Also added `tools/ui/ui.h` to the vendored-header list since `server-http.cpp` `#includes` it unconditionally on post-b9200 pins (gating only the actual extern usages behind `LLAMA_BUILD_UI`).
+
   - **`src/chimera/CMakeLists.txt` — define both `LLAMA_BUILD_WEBUI` and `LLAMA_BUILD_UI`.** Upstream renamed the macro that gates the route-binding block in `server-http.cpp` around b9200. Defining both keeps `CHIMERA_WEBUI_EMBED=ON` working on either upstream generation; the unused define is a harmless no-op on the other side.
+
   - **`scripts/manage.py` — `make bump-check` extended with a build-system drift probe.** After the header diff, probes a handful of named paths (vendored sources + both webui layouts) and reports which webui layout the target ref uses (pre-b9200 / post-b9200 with assets / post-b9200 without). Catches drift in non-header files that header diffs miss — exactly the failure mode that bit this bump (the webui asset directory disappeared without any header change). A missing **required** path (e.g. `tools/server/server-http.cpp` going away) now fails bump-check with a clear `BUILD-SYSTEM ERROR` instead of surfacing as an opaque `make build` failure later.
+
   - **`docs/dev/webui.md` — post-b9200 procedure.** New § 2.1 documents the manual `npm install && npm run build` step inside `tools/ui/` that's now required for `CHIMERA_WEBUI_EMBED=ON` on post-b9200 pins, plus the three candidate-dir probe order in `manage.py`. Calls out that requiring Node as a hard chimera build dependency would be a regression, so the npm step stays opt-in.
+
   - **Smoke:** `make build` clean, `make test` 56 PASS + 6 SKIP on b9264 (same as on b9119). `make bump-check` against b9264 now exits 0 with the build-system probe printing the post-b9200 webui-layout diagnosis.
 
 - Sweep through the documentation set addressing a comprehensive audit. 11 doc files touched, +185/-152 lines net. No code changed; `make smoke` still 11/11 PASS. Specific fixes:
+
   - **Staleness.** `README.md:94` `scripts/test.sh` → `scripts/test.py`; `docs/dev/maintenance.md:37` test count `55 e2e cases` → `62 tests (56 PASS + 6 SKIP)`; `docs/dev/combine_archives.md` two `44/44` → "test count has grown" (with pointer to CHANGELOG); README.md + cheatsheet `db` row stopped advertising backup/vacuum as future since they shipped in 0.1.5; `TODO.md` lost the same shipped item.
+
   - **Path label sweep.** `doc/` → `docs/` in README.md (source-layout block), docs/dev/{webui,server-router-mode,server,maintenance}.md (~12 occurrences). The label text was previously lying — the relative links happened to resolve because the path *suffixes* were correct.
+
   - **`docs/serve.md` image-generation orphan.** The `### Image generation` heading at L101 was followed by a config command and then jumped straight to `### Persistent chats`; the actual prose ("This loads a stable-diffusion.cpp model alongside the LLM…") was stranded ~100 lines later between the vector-store section and ControlNet with no header. Moved up under its rightful heading.
+
   - **`docs/serve.md` endpoint table.** Added the missing `/v1/rerank` row (was documented in the cheatsheet but absent from serve.md's reference table). Now under a new "Bound when `--reranking <model>` is set" mini-section.
+
   - **`docs/dev/server.md` § 4.4 reconciliation.** Removed `/slots`, `/lora-adapters` GET+POST, and `/v1/rerank` from the "deliberately NOT bound" list — all three shipped in 0.1.5. § 4.1 "Always exposed" table gained the slots/lora-adapters rows. New § 4.1a documents the `--reranking` opt-in. § 8 list renumbered from 1→9 jump down to 1–5. Item 14 ("reorganize chimera_serve.cpp if it crosses ~1000 LOC") was already shipped in 0.1.5; replaced with a parenthetical noting the split. § 6 subsections tagged `[resolved]` / `[open, upstream]` so the mix of post-mortems and live issues is scannable.
+
   - **`docs/dev/sqlite.md` § 7 vs § 9 contradiction.** Routes table claimed `DELETE /v1/vector_stores/{name}` but § 9 Phase 4 (and the actual code) use `POST :name/delete` — server-http exposes only GET/POST. Fixed the table. § 9 Phase 6+ items (embedding cache, smarter chunking, hybrid search, db backup helpers) marked `[shipped]`; only the audit-table item remains genuinely open. Added a top-of-file status banner since the doc began as a planning doc but is now mostly retrospective.
+
   - **`docs/dev/server-api-coverage.md` TL;DR.** Was still narrating from the 2026-05-20 vantage point ("After the 2026-05-20 audit cycle…") despite the roadmap closing on 2026-05-21 with step 5e + 6 + detect-language landing. Rewrote as: status (closed) → background → what's left (Tier-2 design-open).
+
   - **`README.md` docs table.** Grew from 5 rows to 12 — was missing maintenance.md, webui.md, server-router-mode.md, server-api-coverage.md, cli-api-coverage.md, combine_archives.md, and TODO.md. Added a "New contributor reading order" paragraph pointing at the cheatsheet + serve.md → server.md + maintenance.md path.
+
   - **Explicitly left alone:** CHANGELOG history entries for 0.1.5/0.1.6 (the `scripts/test.sh` references inside them are accurate for their time); `docs/dev/webui.md` Variant B post-mortem; `docs/dev/server-router-mode.md` decision record; `TODO.md` "Out of scope (wontfix)" block. These are institutional memory artifacts — pruning them is a regression in discoverability for the next maintainer asking "why did we not do X?"
 
 ## [0.1.7]
@@ -315,122 +374,211 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Changed
 
 - Converted `scripts/test.sh` to `scripts/test.py`. Bash → Python rewrite; same 62-test coverage (56 PASS + 6 SKIP-when-fixture-missing on a fresh checkout). `make test` and `make smoke` now invoke `python3 scripts/test.py` and `python3 scripts/test.py --smoke`. ~1100 LOC, down from ~1500 LOC of bash, despite gaining real argparse + per-test timing.
+
   - **Why Python:** cross-platform (Windows-friendly), stdlib `argparse`/`urllib`/`subprocess`/`sqlite3` cover everything the bash used `curl`/`python3 -c`/`sqlite3` for, so the test runner no longer requires those binaries to be on PATH. Per-test wall-clock timing is collected and printed in a slowest-first table after the summary; useful for spotting the heavy hitters (today: `gen --mmproj --image` at ~38s and `sd img2img` at ~12s dominate).
+
   - **New CLI flags:** `--smoke` (matches old behavior), `--filter REGEX` (Python regex over test names), `--no-color`, `--verbose` (stream subprocess output for debugging), `--no-timing` (drop the timing table). The `CHIMERA=/path/to/binary` env var still picks a non-default binary.
+
   - **Refactor win:** the bash version had 5 nearly-identical spawn/poll/teardown blocks (chat-id-header, /v1/chats, /slots, image-gating ×2, detect-language) plus 3 conditional spawns for the fixture-driven success-path tests. All eight now route through one `chimera_serve()` context manager that handles port selection, readiness polling (`/health` for LLM-only servers, `POST /v1/images/generations` for SD-bearing ones), graceful teardown (terminate + 5 s + kill), and log capture. ~250 lines of bash boilerplate became ~50 lines of Python.
+
   - **Behavior change:** the SKIP path now honors `--filter` — filter-excluded tests don't emit SKIP-when-fixture-missing noise. The bash version had no filter so this wasn't a question.
+
   - **Behavior change:** the SD CLI block (`sd <model>` and `sd img2img round-trip`) used to share the txt2img output as the img2img init image. The Python rewrite runs SD twice (once per test) — ~10 s slower but the two tests are no longer coupled, so a regression in one doesn't cascade into a SKIP of the other.
+
   - **Equivalence verified:** same 56 PASS + 6 SKIP on a fresh `make test` run, same test names, same FAIL diagnostics when intentionally broken (regression caught during the port: `combined=True` in `run_capture` puts combined output in `out`, not `err`).
 
 ### Added
 
 - `scripts/test_fixtures.py` — local convenience runner for the six adapter / aux-model success-path tests left as SKIPs in `make test` (LoRA, ControlNet, PhotoMaker). Probes the env vars, validates the supplied paths up-front, and forwards to `scripts/test.py --filter` with the right regex. ~120 LOC.
+
   - **Behavior:**
+
     - All env vars unset → "nothing to do" message, exit 0.
+
     - At least one fixture set fully present → forward to `scripts/test.py` and exit with its code.
+
     - Partial config (e.g. `CHIMERA_TEST_CONTROLNET` without `CHIMERA_TEST_CONTROL_IMAGE`) or invalid path → exit 2 with a clear "partial or invalid configuration" message. Same misuse-not-SKIP contract `scripts/test.py` already uses internally.
+
   - **Why local, not CI:** this replaces a draft `.github/workflows/fixture-tests.yml` that was deleted. Adapter / aux-model fixtures are individually licensed, mirrors come and go (the original SD-1.5 default URL was gated within weeks of being chosen), and the runs are gigabytes long. Chasing moving HF availability for hosted CI didn't pay off; a local probe-and-run script is honest about where the fixtures actually live.
+
   - **Extra args forward:** unknown args after the script's own pass through to `scripts/test.py` — e.g. `python3 scripts/test_fixtures.py --no-color --verbose`.
 
 - `POST /v1/audio/detect-language` — chimera-specific exit-after-detect probe on the audio surface. Was the cheapest of the Tier-2 audio design-open items in `docs/dev/server-api-coverage.md`; ~90 LOC.
+
   - **Why a separate endpoint, not a query parameter:** OpenAI's audio surface doesn't define a detect-only concept (their endpoints always transcribe). Conflating detect + transcribe under one route via a query flag would force every transcription client to handle a "transcription silently suppressed" code path. Separate endpoint = unambiguous response contract.
+
   - **Request:** same multipart `file` field as `/v1/audio/transcriptions`. Other transcription knobs (response_format, language, prompt, vad, decoder thresholds) are intentionally not honored — they're irrelevant for detect-only.
+
   - **Response:** `{"language": "<2-letter code>", "duration": <seconds>}`. The `language` field is whisper's top-1 detection (e.g. "en", "fr", "ja"); when detection itself failed for some reason the field is "?". `duration` is the audio length in seconds (post-resample to 16 kHz), provided so callers can use this endpoint as a single round trip for both "what is this?" and "how long is it?".
+
   - **Path naming:** `/v1/audio/detect-language` (kebab-case) for visual symmetry with `/v1/images/lora-adapters`. Plural `/v1/audio/detections` was considered and rejected — this is a verb action, not a resource listing.
+
   - **Engine integration:** sets `chimera_whisper::TranscribeRequest::detect_language = true`. Whisper's `whisper_full` short-circuits before any decode pass when this flag is set; `whisper_full_lang_id` then returns the detected language id, which `transcribe()` resolves to the two-letter code via `whisper_lang_str`. Existing path — no engine-side changes needed.
+
   - **Integration test:** new POST against `/v1/audio/detect-language` with the bundled jfk.wav. Bar: HTTP 200 + well-formed `{language, duration}` with a 2-letter alphabetic language code and positive duration. The test does NOT assert `language=="en"` because the test fixture is `ggml-base.en.bin` (English-only fine-tune) — its lang-id pass is noise (no non-English language tokens in its vocab to score against). Verifying detection correctness would need a multilingual fixture chimera doesn't ship; the endpoint *wiring* is what gets caught here. Same first-integration-test-for-audio-routes pattern as the new image-serve gating tests from step 5b/5e.
+
   - **Smoke:** `make test` 56/56 + 6 SKIP.
 
 - Opt-in fixture-driven success-path tests for the SD adapter / aux-model surfaces. ~250 LOC across `scripts/test.sh` + `docs/dev/maintenance.md`. Closes the engineering-debt item flagged in `docs/dev/server-api-coverage.md` after step 6 landed: gating tests covered the 400-class responses, but actual ControlNet / PhotoMaker / LoRA generation output went unverified because chimera intentionally doesn't ship adapter / aux-model fixtures.
+
   - **Six new tests, three each on CLI + serve.** CLI (`chimera sd`): `--lora`, `--control-net` + `--control-image`, `--photo-maker` + `--pm-id-images-dir`. Serve (`POST /v1/images/*`): `loras: [{name, scale}]` against a server started with `--sd-lora <name>=<path>`, multipart `control_image` against `--sd-control-net`, JSON `pm_id_image_set` against `--sd-photo-maker` + `--sd-pm-id-dir`. Each test is independent — neither side blocks the other on a missing fixture.
+
   - **Env-var gated:** `CHIMERA_TEST_LORA`, `CHIMERA_TEST_CONTROLNET` + `CHIMERA_TEST_CONTROL_IMAGE`, `CHIMERA_TEST_PHOTOMAKER` + `CHIMERA_TEST_PM_ID_DIR`. Unset → `SKIP`; set but path missing → `FAIL` (partial config is a misuse, not a SKIP). Default `make test` stays self-contained and fast on a fresh checkout.
+
   - **Bar:** CLI tests assert exit 0 + non-empty output PNG; serve tests assert HTTP 200 + non-empty `b64_json` in the response (`>100` bytes after base64-decode — any real PNG clears that easily). No perceptual diff against checked-in goldens — the value is catching wiring regressions in the engine integration, not validating LoRA/CN/PM math.
+
   - **Each serve test spawns its own server** with the matching `--sd-*` flag(s). Slower than reusing one instance, but the alternative — coupling four orthogonal opt-ins behind one big "all env vars" gate — would mean partial fixture coverage silently skips everything. Three spawns is honest about the orthogonality.
+
   - **PM identity-set selection:** the serve-side PM test picks the first subdirectory of `CHIMERA_TEST_PM_ID_DIR` alphabetically via `find ... -mindepth 1 -maxdepth 1 -type d ... | sort | head -n1`. The server scans the same dir at startup, so the chosen name is guaranteed to resolve. Less brittle than requiring a separate `CHIMERA_TEST_PM_ID_SET_NAME` env var.
+
   - **Smoke:** `make test` 55/55 + 6 SKIP (3 CLI + 3 serve, all six env vars unset by default). Documented in `docs/dev/maintenance.md` under "Opt-in fixture-driven tests" with the full env-var table and a copy-pasteable invocation.
 
 - `chimera serve` per-request LoRA selection — step 6 of the server CLI/HTTP parity work in `docs/dev/server-api-coverage.md`, the final numbered roadmap item. The server-side parity audit is now closed. ~140 LOC. Available on all three image endpoints (`/v1/images/generations`, `/v1/images/edits`, `/v1/images/variations`), plus a new `GET /v1/images/lora-adapters` introspection route.
+
   - **Server-init:** new repeatable `--sd-lora <name>=<path>` flag registers a closed allowlist of adapter aliases. SD reloads LoRA tensors per-generate (unlike the LLM side, which pre-loads at startup), so the alias map is pure metadata — no files open at server start. Malformed specs (`name=` with empty path, missing `=`, duplicate `name`) fail fast at startup with `BadInput`, not on first request.
+
   - **Closed-set by design.** Request bodies reference adapters by **name** only — they cannot supply raw filesystem paths. This is the safer default for any deployment beyond `localhost`-personal-use; the path is server-side state, never reflected back to the client. If a future need for path-mode emerges, a `--sd-allow-lora-paths` opt-in flag would gate it; today's behavior is "names only."
+
   - **Per-request shape: array of objects, not CLI-string microformat.** `loras: [{"name":"foo","scale":0.7}, ...]` on the JSON body. `scale` is optional (default 1.0). Chosen over the `["foo:0.7"]` CLI-string form because adding future per-adapter fields (e.g. `apply_mode`, phase masks) won't require inventing parsing rules — array-of-objects extends cleanly.
+
   - **`GET /v1/images/lora-adapters`** returns `[{"name": "..."}, ...]` of registered aliases. Names only, no paths — paths are server-side state and not part of the public surface. Empty array when no `--sd-lora` was supplied. Mirrors the LLM-side `/lora-adapters` GET in spirit even though the implementation differs (LLM pre-loads adapters; SD does not, so the SD list is the registered allowlist rather than the loaded set). The new endpoint is announced in the startup routes-listing diagnostic alongside `/v1/images/generations` and friends.
+
   - **Gating with precise 400s.** New `maybe_attach_loras()` helper in `chimera_serve_images.cpp`, parallel to `maybe_attach_control` / `maybe_attach_pm`. `loras` against a server with no `--sd-lora` registered returns 400 with the missing-flag hint. Non-array `loras` returns 400. An element that isn't an object → 400 naming the offending index. A missing or non-string `name` → 400 naming the index. An unknown alias name → 400 listing the known aliases so the client can self-correct. A non-numeric `scale` → 400 naming the index. Same opt-in shape as 5a (VAD), 5b (ControlNet), and 5e (PhotoMaker).
+
   - **Factory signature change:** all three `make_image_*_handler()` factories gained a `const LoraAliasMap * lora_aliases` parameter. The pointer is borrowed (lifetime: `command_serve`), not copied, because std::function captures should stay cheap. The shared helper means /edits and /variations get the feature for free alongside /generations.
+
   - **Integration tests (4 new in `scripts/test.sh`):**
+
     - `loras` against a server with no `--sd-lora` → 400 + named-flag hint
+
     - `GET /v1/images/lora-adapters` with no `--sd-lora` → 200 + `[]`
+
     - `GET /v1/images/lora-adapters` after `--sd-lora alpha=...` `--sd-lora beta=...` → 200 + `[{"name":"alpha"},{"name":"beta"}]` (order-independent, paths absent)
+
     - `loras: [{"name":"gamma"}]` against the same server → 400 listing known names (`alpha`, `beta`). The second pass uses two nonexistent adapter paths — server-start doesn't stat them since SD reloads per-generate, so the alias-resolution surface is exercised without needing real LoRA fixtures. Existing 51 tests + 4 new = 55/55 passing.
+
   - **Smoke:** `make test` 55/55. `chimera serve --help` lists `--sd-lora`; startup banner advertises `/v1/images/lora-adapters`.
 
 - `chimera serve` per-request PhotoMaker — step 5e of the server CLI/HTTP parity work in `docs/dev/server-api-coverage.md`. Closes the last server-init gap on the SD side; only step 6 (per-request LoRA) remains. ~250 LOC. Available on all three image endpoints (`/v1/images/generations`, `/v1/images/edits`, `/v1/images/variations`).
+
   - **Server-init:** three new flags. `--sd-photo-maker <path>` is the PM model file, fed into `chimera_sd::LoadParams::photo_maker` at startup. `--sd-pm-id-dir <dir>` is the root of named identity sets — each subdirectory becomes one set, addressable per-request as `pm_id_image_set: "<subdir-name>"`. The directory is scanned **eagerly at startup** (not lazily on first request) so a misconfigured set fails fast with `BadInput`; non-image files inside subdirs are skipped silently (README.md, .DS_Store) while an empty subdir is treated as configuration error. `--sd-pm-id-embed-path <file>` is an optional precomputed-embedding default applied to every PM request.
+
   - **JSON-base64 shape sidesteps the multipart-plural design question.** OpenAI's body shape has no precedent for repeatable image uploads. Rather than invent a multipart convention, identity images travel as a JSON base64 array under `pm_id_images`. Each element accepts a raw base64 payload **or** a `data:<mime>;base64,...` URI prefix (the prefix is stripped before decode). A self-contained `base64_decode()` lives in `chimera_serve_images.cpp` with a constant-table decoder — no third-party dependency.
+
   - **Two complementary request shapes, with explicit precedence.** `pm_id_images: ["<base64>", ...]` (option C, fully per-request) and `pm_id_image_set: "<name>"` (option E, references a `--sd-pm-id-dir` subdir). If both are supplied, **`pm_id_images` wins** — explicit per-request overrides admin-curated default, same precedence as elsewhere in chimera. The named-set form copies cached `PixelImage` buffers into the per-request `GenerateRequest` (~8 MiB for ten 512²×3 RGB crops — fine for a server doing identity work) rather than borrowing, so the request's owning-vector lifetime contract is preserved.
+
   - **Gating with precise 400s.** Any PM field against a server without `--sd-photo-maker` returns 400 naming the missing flag. `pm_id_image_set` against a server without `--sd-pm-id-dir` returns 400 with the missing-flag hint. An unknown set name returns 400 **listing the known names** so the client can self-correct. A non-array `pm_id_images` returns 400; an array element that isn't a string returns 400 naming the offending index; a base64-decode failure returns 400 naming the offset; an undecodable image returns 415 with the underlying error. Same opt-in shape as VAD (5a) and ControlNet (5b).
+
   - **Factory signature change:** all three `make_image_*_handler()` factories gained a `PmServeState pm` parameter — a small struct holding `model_loaded`, the default ID-embed path, and a pointer to the `PmIdSetCache`. The shared helper (`maybe_attach_pm()`) means /edits and /variations pick up the feature for free alongside /generations.
+
   - **Smoke:** `make test` 44/44. `chimera serve --help` lists the three new `--sd-*` flags.
 
 - `chimera serve` SD perf/offload long-tail flag family — step 5d of the server CLI/HTTP parity work. 16 new `--sd-*` flags, same mechanical pattern as 5c (one line each in three places: `ServeOptions`, the LoadParams build, the CLI binding). ~50 LOC. With this landing, **the full `chimera_sd::LoadParams` surface is exposed on serve** — 30 `--sd-*` flags total across 5b/5c/5d.
+
   - **Flags:** `--sd-fa` (global flash-attn — distinct from `--sd-diffusion-fa` which only flips the diffusion model), `--sd-diffusion-fa`, `--sd-diffusion-conv-direct`, `--sd-vae-conv-direct`, `--sd-no-mmap`, `--sd-max-vram <GiB>`, `--sd-offload-to-cpu`, `--sd-clip-on-cpu`, `--sd-vae-on-cpu`, `--sd-control-net-cpu`, `--sd-force-sdxl-vae-conv-scale`, `--sd-rng <type>`, `--sd-sampler-rng <type>`, `--sd-prediction <enum>`, `--sd-lora-apply-mode <enum>`, `--sd-threads <N>`. Each mirrors a `chimera sd` CLI flag with `--sd-` prefix.
+
   - **Inverted-polarity flag:** `--sd-no-mmap` — chimera defaults `enable_mmap=true` (sd's upstream default is off), so the CLI's "opt-out of mmap" semantic carries over. The `LoadParams` field is set to `!opts.sd_no_mmap` at the build site.
+
   - **CLI11 enum validation** on the four enum-string flags. Bogus values exit before model load with the accepted-set listed in the error: e.g. `--sd-rng bogus` → "not in {std_default,cuda,cpu}"; `--sd-prediction bogus` → "not in {eps,v,edm_v,flow,flux_flow,flux2_flow}"; same shape for `--sd-sampler-rng` and `--sd-lora-apply-mode`.
+
   - **`--sd-threads` uses a `> 0` guard** at the build site rather than copying the value unconditionally — passing `-1` (the chimera-side sentinel for "leave default") would override `sd_ctx_params_init`'s thread auto-pick. Mirrors how the CLI side handles `threads = -1`.
+
   - **Smoke:** `make test` 44/44. Manual: all four enum validators fire on bogus inputs; `chimera serve --help` lists 30 `--sd-*` flags (1 from 5b + 13 from 5c + 16 from 5d).
 
 - `chimera serve` SD split-checkpoint flag family — step 5c of the server CLI/HTTP parity work. 13 new `--sd-*` flags route through the `chimera_sd::LoadParams` build that phase 5b plumbed, so each one was a one-line addition in three places (`ServeOptions`, the LoadParams build site in `command_serve`, the CLI binding). ~50 LOC.
+
   - **Flags:** `--sd-diffusion-model`, `--sd-vae`, `--sd-clip-l`, `--sd-clip-g`, `--sd-t5xxl`, `--sd-llm`, `--sd-llm-vision`, `--sd-clip-vision`, `--sd-taesd`, `--sd-embd-dir`, `--sd-type`, `--sd-tensor-type-rules`, `--sd-high-noise-diffusion-model`. Each one mirrors a `chimera sd` CLI flag with `--sd-` prefix, so command lines port 1:1.
+
   - **Gating broadened.** `chimera serve` was previously hard-gated on `--enable-image <path>` (combined checkpoint required). The condition is now `!opts.sd_model.empty() || !opts.sd_diffusion_model.empty()` — same combined-or-split allowance the CLI uses (see `chimera_sd.cpp:740`). `--enable-image` is now optional when `--sd-diffusion-model` is set; either flag triggers the image-model load path. The startup log line and the failure-mode error message both show whichever path the user actually supplied.
+
   - **Unlocks serving split-checkpoint models:** Flux, SD3, Z-Image, Qwen-Image. The existing per-request fields from image waves 1+2 (`guidance`, `flow_shift`, `img_cfg_scale`, etc.) Just Work for Flux/SD3-class models because the engine path is shared — no additional handler wiring needed. Example: a `chimera sd -p ... --diffusion-model flux.gguf --vae ae.safetensors --t5xxl t5.safetensors --clip-l clip.safetensors` invocation ports verbatim to serve by prefixing each path flag with `--sd-`.
+
   - **Smoke:** `make test` 44/44. `chimera serve --help` lists all 14 `--sd-*` flags (13 new from 5c + the existing `--sd-control-net` from 5b).
 
 - `chimera serve --sd-control-net <path>` + per-request `control_image` / `control_strength` — step 5b of the server CLI/HTTP parity work in `docs/dev/server-api-coverage.md`. Closes the highest-impact server-init gap on the SD side: per-request ControlNet conditioning, available on all three image endpoints (`/v1/images/generations`, `/v1/images/edits`, `/v1/images/variations`). ~70 LOC.
+
   - **Server-init:** `--sd-control-net <path>` is a new `ServeOptions` field. `command_serve` now builds a `chimera_sd::LoadParams` (with `vae_decode_only=false` for the encode path that /edits and /variations need) and calls the `LoadParams` overload of `chimera_sd::load_model()`. The simple `load_model(path, vae_decode_only)` overload remains for back-compat but is no longer called from the serve path. **The full `chimera_sd::LoadParams` is now wired through** — phases 5c (split-checkpoint flags) and 5d (perf/offload long-tail) become one-line-per-flag additions.
+
   - **Per-request:** new `maybe_attach_control()` helper in `chimera_serve_images.cpp`. Reads `control_image` from multipart files (3-channel RGB decode via `chimera_sd::decode_image_bytes`) and `control_strength` from the JSON body. Gates on `control_net_loaded` — a request that supplies `control_image` without `--sd-control-net <path>` at server start returns HTTP 400 with a precise message pointing at the missing flag. Same opt-in shape as VAD on audio (step 5a).
+
   - **Factory signature change:** all three `make_image_*_handler()` factories gained a `bool control_net_loaded` parameter. The shared helper means /edits and /variations get the feature for free alongside /generations.
+
   - **Honest correction:** the original roadmap framed step 5b as an "unblocking trio" (`--sd-control-net`, `--sd-photo-maker`, `--sd-upscale-model`). On closer reading, only `--sd-control-net` was actually a blocker:
+
     - `--sd-upscale-model` doesn't unblock anything. `sd_hires_params_t.model_path` is per-request and `stable-diffusion.cpp:3459` loads the upscale model fresh on each `generate_image()` call when `hires_upscaler == SD_HIRES_UPSCALER_MODEL`. Image wave 2's `hires_upscale_model` per-request field already covers this. **Removed from the roadmap.**
+
     - `--sd-photo-maker` is half a feature without the per-request PM bundle (multipart `pm_id_images[]` + `pm_id_embed_path` + `pm_style_strength`). The plural-multipart-files shape has no OpenAI precedent and needs its own design pass. **Split out as phase 5e.**
+
   - **Smoke:** `make test` 44/44. Manual against a live server without `--sd-control-net`: posting `control_image` multipart file → HTTP 400 with "control_image was supplied but the server has no ControlNet loaded; restart chimera serve with --sd-control-net <path> ..."; existing JSON-only generation flow → HTTP 200 + b64 PNG (back-compat preserved).
 
 - `chimera serve --audio-flash-attn` / `--audio-no-gpu` / `--audio-device N` / `--audio-vad-model <path>` + per-request VAD bundle — step 5a of the server CLI/HTTP parity work in `docs/dev/server-api-coverage.md`. Plumbs `chimera_whisper::LoadParams` through the serve path (replacing the simple `load_model(path)` overload) and unblocks per-request `vad=true` on `/v1/audio/transcriptions` and `/v1/audio/translations`. ~50 LOC.
+
   - **Server-init:** four new fields on `ServeOptions` — `audio_flash_attn`, `audio_no_gpu`, `audio_gpu_device`, `audio_vad_model`. The first three populate `whisper_context_params`; the VAD-model path is server-init-only (deliberately not accepted from clients, to avoid letting external callers direct the server to read arbitrary filesystem paths). `command_serve` now builds a `chimera_whisper::LoadParams` and calls the `LoadParams` overload of `chimera_whisper::load_model()`.
+
   - **Per-request VAD bundle:** the audio handler gained six per-request fields — `vad` (toggle), `vad_threshold`, `vad_min_speech_duration_ms`, `vad_min_silence_duration_ms`, `vad_max_speech_duration_s`, `vad_speech_pad_ms`, `vad_samples_overlap`. When `vad=true` arrives, the handler injects the server-configured VAD-model path into `treq.vad_model_path` and propagates the tuning knobs. A request with `vad=true` against a server that wasn't started with `--audio-vad-model` returns HTTP 400 with a precise message.
+
   - **Factory signature change:** `make_audio_transcribe_handler()` gained a `const std::string & vad_model_path` parameter so the closure captures it.
+
   - **Backwards-compat preserved:** existing `--enable-audio` deployments without any `--audio-*` flags get whisper's prior defaults (`flash_attn=false`, `use_gpu=true`, `gpu_device=0`) and unchanged transcription behavior. VAD is opt-in on both the server-init and per-request sides.
+
   - **Smoke:** `make test` 44/44. Manual: `vad=true` without `--audio-vad-model` → HTTP 400 with the gating message; standard transcription without `vad` → HTTP 200 with expected transcript (back-compat preserved).
 
 - `POST /v1/audio/transcriptions` / `/v1/audio/translations` audio wave 2 — four decoder-fail thresholds added to the existing field-reading block in `chimera_serve_audio.cpp`. ~8 LOC. All four map to existing `chimera_whisper::TranscribeRequest` fields that already use NaN-sentinel defaults; omitted keys preserve whisper's upstream defaults exactly.
+
   - **Fields:** `temperature_inc`, `entropy_thold`, `logprob_thold`, `no_speech_thold`.
+
   - **Sentinel scheme:** NaN-on-omit, not negative-on-omit. `logprob_thold`'s own upstream default is negative (typically `-1.0`), so a negative-as-sentinel scheme wouldn't distinguish "user wants to leave the default in place" from "user explicitly asked for the default value". NaN is unambiguous; the engine layer checks via `std::isnan()` before applying.
+
   - **`no_fallback=true` precedence preserved.** When both `no_fallback=true` and an explicit `temperature_inc` arrive, `no_fallback` wins (clamps `temperature_inc` negative at the engine layer). Mirrors the CLI behavior exactly.
+
   - **Smoke:** `make test` 44/44. Manual: posting JFK with both a sensible threshold set (`temperature_inc=0.2 entropy_thold=2.4 logprob_thold=-1.0 no_speech_thold=0.6`) and an aggressive one (`entropy_thold=0.5 logprob_thold=-0.2`) both produce HTTP 200 with the expected transcript.
+
   - **Per-request audio surface is now closed.** Remaining audio CLI flags (VAD bundle, grammar family, `--detect-language` probe) are all step-5-blocked because they need either a model loaded at startup (`--vad-model`) or a dedicated endpoint design (`--detect-language` should be `POST /v1/audio/detect_language`, not a query parameter).
 
 - `POST /v1/images/*` image wave 2 — hires-fix + cache/SCM bundles (13 new fields). All into the shared `fill_common_image_fields()` so `/generations`, `/edits`, and `/variations` pick them up at once. ~50 LOC added to `chimera_serve_images.cpp`.
+
   - **Hires-fix bundle:** `hires` (toggle), `hires_upscaler` (enum string matching sd's `hires_upscaler_to_str` — `None` / `Latent` / `Latent (nearest)` / `Latent (nearest-exact)` / `Latent (antialiased)` / `Latent (bicubic)` / `Latent (bicubic antialiased)` / `Lanczos` / `Nearest` / `Model`), `hires_upscale_model` (path for `Model` upscaler), `hires_width` / `hires_height` (`0` → derive from `hires_scale`), `hires_scale` (`-1` → upstream default 2.0), `hires_steps` (`0` → use main `steps`), `hires_denoising_strength` (`-1` → upstream default 0.7), `hires_upscale_tile_size` (`0` → upstream default 128). The `Model` upscaler accepts the field but **fails downstream in `generate()`** because the serve path doesn't plumb an upscale model through `LoadParams` at server start — this is blocked on the step-5 server-init routing in `docs/dev/server-api-coverage.md`. The `Latent*` upscalers work out of the box.
+
   - **Cache/SCM bundle:** `cache_mode` (one of `disabled` / `easycache` / `ucache` / `dbcache` / `taylorseer` / `cache-dit` / `spectrum`), `cache_option` (per-mode `key=value,...` overrides — same 15-key grammar as the CLI), `scm_mask` (path for sampler-cached-memory mask), `scm_policy` (`static` or `dynamic`). Validation runs through the same `chimera_sd::parse_cache_options()` helper the CLI uses, so HTTP errors are byte-identical: bad mode / unknown key / non-numeric value / wrong policy all return 400 with the parser's own message. Validation fires before generate(), so a typo doesn't waste a sd inference pass.
+
   - **Smoke:** `make test` 44/44. Manual against a live server: all four validation paths fire on bad inputs (mode `"bogus"`, key `"wat"`, value `"abc"`, policy `"bogus"`) and return HTTP 400 with the documented messages.
+
   - **Off-brand error wording (low-priority cleanup):** because `parse_cache_options` was authored for the CLI, HTTP error messages currently say things like "unknown --cache-mode value" rather than "unknown cache_mode value". Technically accurate (it's the same field) but slightly off-brand. Worth rephrasing the parser's messages to refer to the field without the `--` prefix so the same error reads correctly from both call sites.
+
   - **Wave 3 candidate `control_image`** (multipart file) + `control_strength` — **blocked on server-init routing** (step 5). Today's serve path uses the simple `chimera_sd::load_model(path, vae_decode_only)` overload which doesn't accept a `--control-net` path; a per-request `control_image` would arrive into a context with no ControlNet loaded. Defer until `LoadParams` routing lands.
 
 - `POST /v1/images/generations` / `/v1/images/edits` / `/v1/images/variations` — image wave 1 of the server CLI/HTTP parity work tracked in `docs/dev/server-api-coverage.md`. Fourteen per-request fields wired into the shared `fill_common_image_fields()` helper, so all three endpoints pick them up at once. All map to existing `chimera_sd::GenerateRequest` fields — engine unchanged.
+
   - **Sampler / generation core:** `clip_skip`, `guidance` (Flux/SD3 distilled guidance), `flow_shift` (Flux/SD3 timestep shift), `img_cfg_scale` (separate img-cond CFG), `eta` (DDIM stochasticity), `timestep_shift`. Sentinel defaults on `GenerateRequest` (`-1.0f` for the floats, `0` for `shifted_timestep`) preserve upstream behavior for omitted keys.
+
   - **VRAM-safety toggle:** `vae_tiling` plus `vae_tile_size`, `vae_relative_tile_size`, `vae_tile_overlap`. Toggle accepts bool / number / string — multipart fields arrive as strings, JSON bodies as bool. Uses the shared `coerce_bool` helper.
+
   - **Skip-layer guidance:** `skip_layers` (JSON array of ints `[7,8,9]` or comma-separated string `"7,8,9"` — matches the CLI's `--skip-layers` shape) plus `slg_scale`, `skip_layer_start`, `skip_layer_end`. Non-integer entries → HTTP 400 with the offending token in the message; wrong-shape value (e.g. a bare number instead of array/string) → 400 with an explicit message naming both accepted forms.
+
   - **Custom sigma schedule:** `sigmas` — same array-or-CSV shape as `skip_layers`, validates the same way.
+
   - **`coerce_bool` promoted to the shared header.** Audio wave 1 had inlined it as a lambda; with image wave 1 needing it for `vae_tiling`, it now lives in `chimera_serve_internal.h` alongside the other coerce helpers. Implementation accepts JSON bool, numeric (0 = false, non-zero = true), and the strings `"true"/"1"/"yes"/"on"` (truthy) — anything else falls through to the default. The audio handler was updated to use the shared symbol.
+
   - **Array-or-CSV parsing pattern is open-coded twice** (skip_layers and sigmas, ~25 LOC each). Promoted lazily — if a third caller wants the same shape, factor into `parse_int_csv_or_array()` / `parse_float_csv_or_array()` helpers. For now the small differences (int vs float, error-message field naming) and the cost of the abstraction don't justify it.
+
   - **Smoke:** `make test` 44/44. Manual against a live `chimera serve --enable-image sd_xl_turbo_1.0.q8_0.gguf`: successful generation with `clip_skip + cfg_scale + seed` returned a base64 PNG (HTTP 200); validation paths return 400 with chimera-shaped errors for `sigmas: "foo,bar"`, `skip_layers: [1,"oops",3]`, and `skip_layers: 42` (wrong type).
+
   - **Unrelated:** a Metal-side crash surfaced when running two image generations back-to-back on the same server context (deep in `ggml_metal_graph_compute` during CLIP text-model compute). Reproduces without wave-1 fields set — this is pre-existing sd-cpp/Metal behavior with consecutive requests, not caused by wave-1 wiring. Worth a separate bug ticket.
 
 - `POST /v1/audio/transcriptions` / `/v1/audio/translations` — audio wave 1 of the server CLI/HTTP parity work tracked in `docs/dev/server-api-coverage.md`. Nine per-request fields are now read from the multipart body; all map to existing `chimera_whisper::TranscribeRequest` fields, so the engine is unchanged and the gain is purely handler-side (~70 LOC in `chimera_serve_audio.cpp`).
+
   - **Decoding strategy:** `temperature` (was previously parsed and discarded — now wired through to `treq.temperature`), `beam_size`, `best_of`, `no_fallback`.
+
   - **Region of audio:** `offset_ms`, `duration_ms` — slice a long upload without re-encoding the source. Verified end-to-end: posting JFK (11 s) with `offset_ms=4000 duration_ms=4000` returns only the 4–8 s fragment.
+
   - **Segment shaping:** `max_len`, `split_on_word` — pair naturally with `response_format=srt`/`vtt`.
+
   - **Stereo speaker diarization:** `diarize=true`. Mono uploads return HTTP 400 with a chimera-shaped error before transcription runs. Stereo uploads get an energy-ratio classifier (matching the CLI's algorithm: per-segment sum of `|amplitude|` for each 16 kHz channel; 1.1× ratio threshold picks the label) applied as a post-transcribe walk over `result.segments` — each segment gets `Segment.speaker` set (structured) and `Segment.text` prefixed with `(speaker N)`. Joined `result.text` is rebuilt from the stamped segments so `response_format=text` reflects speakers too, not just SRT/VTT/verbose_json.
+
   - **`coerce_bool` inlined locally** at first — promoted to `chimera_serve_internal.h` once image wave 1 needed it (see entry above). Audio handler now uses the shared symbol.
+
   - **Diarize classifier is duplicated** between `command_whisper` and `make_audio_transcribe_handler` (~25 LOC each). Two callers isn't enough to justify promoting it to `chimera_whisper::estimate_diarization_speaker` — the code is small, mechanical, self-contained, and a future third caller can drive the refactor.
+
   - Smoke: `make test` 44/44. Manual: stereo (L=2×, R=0.1×) of JFK → response prefixed with `(speaker 0)`; mono → 400; offset/duration slice returns the expected fragment.
 
 ## [0.1.6]
@@ -438,40 +586,67 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Added
 
 - `chimera whisper --detect-language` — exit-after-detect language identification. Sets `whisper_full_params.detect_language = true`; whisper.cpp itself short-circuits before any decode pass (see `src/whisper.cpp` ~line 6815 — it runs `whisper_lang_auto_detect_with_state` then `return 0`). chimera then reads the detected language via `whisper_full_lang_id(ctx)` → `whisper_lang_str(...)` and writes just the ISO code (e.g. `en`) to the output sink before returning success. Format-file flags are silently no-op'd because `result.segments` is empty after the short-circuit — no SRT/VTT/JSON/CSV/LRC file gets written, which is the desired behavior for a probe.
+
   - **API:** new `bool detect_language` field on both `WhisperOptions` and `TranscribeRequest`. Transcribe-side: `params.detect_language = req.detect_language` and the post-call `result.detected_language` population condition now reads `req.language == "auto" || req.detect_language`. CLI side: `--detect-language` flag, short-circuit branch at the top of the result-handling block in `command_whisper`.
+
   - **Limitation worth flagging:** English-only models (`*.en.bin`) don't really do language detection; whisper returns whatever the single-language head emits, which can be a wrong ISO code. This is a model-side artifact (mirrors whisper-cli behavior) — use a multilingual model (`ggml-base.bin`, `ggml-small.bin`, etc.) for meaningful detection. Documented in the coverage table.
+
   - **Closes the last whisper gap.** With this and the diarize entry below, the 2026-05-20 audit cycle has zero residual open items across gen/chat/embed/whisper/sd. `make test` 44/44.
 
 - `chimera whisper --diarize` — stereo speaker diarization (wrapper-logic feature, no underlying `whisper_full_params` field). Mirrors whisper-cli's algorithm exactly: per finalized segment, sum `|amplitude|` over the segment's `[t0, t1]` for both 16 kHz channels; if `energy[L] > 1.1 * energy[R]` label `(speaker 0)`, mirror case `(speaker 1)`, otherwise `(speaker ?)`. The energy threshold (1.1×) matches upstream.
+
   - **WAV reader extended.** `chimera_whisper::WavData` now carries a `std::vector<std::vector<float>> per_channel` view alongside the downmixed `samples` so the stereo data is available without a second pass over the file. Populated only when `channels > 1`; mono inputs leave it empty (the downmixed `samples` already is the lone channel). One extra alloc of `channels × frames` floats on multi-channel inputs; mono cost is unchanged.
+
   - **Failure mode is precise.** Mono input + `--diarize` exits with `BadInput` before model load: `"--diarize requires a 2-channel (stereo) WAV input; got 1-channel (mono) audio"`. A defensive `Runtime` branch covers the should-never-happen case of `channels=2` but missing `per_channel` (e.g. someone edits the parser later and forgets the population path).
+
   - **Two ways the label flows out:** stamped on `Segment.speaker` (structured field, new) AND prefixed onto `Segment.text` so the existing format writers (SRT/VTT/JSON/CSV/LRC) render it verbatim without code changes. The streaming `on_segment` lambda also injects the label between the timestamp and the text so the inline output matches the file output exactly.
+
   - **Verified end-to-end** on synthetic stereo derived from the JFK sample (`pan=stereo|c0=2*c0|c1=0.1*c0` → speaker 0; mirror → speaker 1; equal-gain → `?`) including SRT writer output. `make test` 44/44.
 
 - `chimera whisper` constrained decoding: `--grammar`, `--grammar-file`, `--grammar-rule`, `--grammar-penalty`. Vendored `examples/grammar-parser.{h,cpp}` from whisper.cpp v1.8.4 (~450 LOC, MIT) as `src/chimera/chimera_whisper_grammar.{h,cpp}` — whisper ships the parser in `examples/` rather than `libwhisper`, so reuse meant copying. Added `// Vendored verbatim from whisper.cpp v1.8.4` header so the next pin bump can diff cleanly. `--grammar-rule` defaults to `"root"` (mirrors whisper-cli's convention) and `--grammar-penalty` defaults to `100.0`. `--grammar-file` is a chimera-side ergonomic — whisper-cli doesn't have it.
+
   - **Mutual exclusion + bad-rule validation fires before WAV load.** Detailed GBNF parse errors and rule-lookup failures both come back with chimera-shaped messages.
+
   - **Lifetime contract:** the GBNF parser returns a `grammar_parser::parse_state` whose `rules` vector backs the `c_rules()` pointer view that `whisper_full_params.grammar_rules` borrows. Both live on `command_whisper`'s stack frame for the duration of `transcribe()`. Subtle: `c_rules()` builds a `std::vector<const whisper_grammar_element *>` by taking the address of each `rules[i]` row — a realloc on `rules` after `c_rules()` would silently dangle every pointer, but the parse is one-shot so no rebuild happens.
+
   - **`const_cast` at the borrow site:** `whisper_full_params.grammar_rules` is typed `const whisper_grammar_element **` (mutable outer pointer), while our vector's `.data()` yields `const whisper_grammar_element * const *`. Stripped the outer const at the assignment; whisper.cpp only reads through the pointer.
+
   - Closes the last non-wrapper-logic gap in the whisper coverage table. Smoke: end-to-end transcription of the JFK sample with a literal-string grammar (`'root ::= "yes" | "no" | "ask not what your country can do for you, ask what you can do for your country."'`) returns exactly the constrained string. `make test` 44/44.
 
 - `chimera gen` / `chimera chat` long-tail closer — 19 new flags landed, closing every documented not-implemented row in the gen/chat coverage table (`docs/dev/cli-api-coverage.md`) and reclassifying four as architecturally out-of-scope.
+
   - **Extra samplers** (`make_sampler` → `common_params_sampling`): `--typical` (typ_p, 1.0 disables), `--top-nsigma` (-1 disables), `--xtc-probability` + `--xtc-threshold` (XTC; >0.5 threshold also disables), `--dynatemp-range` + `--dynatemp-exp` (dynamic temperature; 0 range disables).
+
   - **Sampler chain ordering** (`--samplers`): ';'-separated name list parsed via `common_sampler_types_from_names(names, allow_alt_names=true)` — exact same shape as llama-cli's flag. Empty values exit with `BadInput`. `--sampler-seq` (single-char form) not added separately because it's redundant with the name form.
+
   - **Perf knobs**: `--threads-batch` (`n_threads_batch`; -1 mirrors `--threads`), `--swa-full` (`llama_context_params.swa_full` — sliding-window full cache).
+
   - **Vision-token budget** (`mtmd_context_params`): `--image-min-tokens`, `--image-max-tokens` wired on both gen and chat mtmd paths. -1/0 leaves the model's metadata default.
+
   - **MoE expert offload**: `--cpu-moe` (keeps ALL MoE experts on CPU; appends `llm_ffn_exps_cpu_override()` to `tensor_buft_overrides`), `--n-cpu-moe N` (first N layers; uses `llm_ffn_exps_block_regex(i)` per layer). Both stack with `--override-tensor`.
+
   - **Manual overrides**: `--override-tensor <pattern>=<buft_name>` (parser mirrors upstream `parse_tensor_buffer_overrides`, which is `static` so couldn't be reused; buffer-type lookup enumerates `ggml_backend_dev_buffer_type` across all registered devices and reports the available names on a typo). `--override-kv KEY=TYPE:VALUE` reuses upstream's `string_parse_kv_override` so the grammar is exact. Both flags repeatable; each entry may itself be comma-separated. The new `ModelExtras` fields hold the backing storage so the `const char *` pointers in `llama_model_tensor_buft_override` / `llama_model_kv_override` stay valid until `llama_model_load_from_file` returns.
+
   - **Activation steering / control vectors**: `--control-vector PATH` (scale=1.0), `--control-vector-scaled PATH:SCALE`, `--control-vector-layer-start N`, `--control-vector-layer-end N`. Loaded via `common_control_vector_load`, applied after context creation via `llama_set_adapter_cvec`. Layer defaults mirror `common_init_from_params`: start=1, end=`llama_model_n_layer(model)`. Both load flags repeatable and accept comma-separated entries; malformed `path:scale` exits with `BadInput`.
+
   - **Reclassified out-of-scope** — these are documented in-place rather than silently skipped:
+
     - `--keep` is architecture-mismatched. Upstream uses it inside the sliding-window context-shift loop when the prompt+generation exceeds n_ctx; chimera's `chat` reuses KV-prefix across turns and doesn't run that shift loop, so the field has no effect in chimera's code path.
+
     - `--ctx-checkpoints`, `--checkpoint-every-n-tokens`, `--cache-ram` are server-only fields (server params block in `common_params`), never read by the CLI subcommand path.
+
   - Smoke verified: `make test` 44/44; manual `gen` with eight Wave-1 flags stacked (`--typical 0.95 --top-nsigma 1.0 --xtc-probability 0.1 --xtc-threshold 0.15 --dynatemp-range 0.2 --dynatemp-exp 1.2 --samplers "top_k;typ_p;top_p;min_p;temperature" --threads-batch 4 --swa-full`) produces coherent output on Llama-3.2-1B.
 
 - `chimera chat --reasoning-budget N` now enforces the cap at the sampler level (previously parsed but emitted a "not yet enforced" warning on every invocation). The audit's earlier comment claimed this required restructuring `chat_sample_loop` to apply samplers directly to a token-data array — that turned out to be wrong on inspection: `common_sampler_init` itself chains `common_reasoning_budget_init` into the sampler whenever `sampling.reasoning_budget_tokens >= 0` and `sampling.reasoning_budget_{start,end,forced}` are non-empty. The integration point is purely upstream of `common_sampler_init`, not inside the sample loop, and the existing `common_sampler_sample` path automatically applies the budget sampler when the params are populated correctly.
+
   - **How tags are resolved:** the active chat template's `thinking_start_tag` / `thinking_end_tag` (e.g. `<think>` / `</think>` for DeepSeek and Qwen3-thinking, `[THINK]` / `[/THINK]` for some, `<|channel>thought` for gpt-oss) are template-fixed, not message-dependent. `command_chat` probes the template once at startup via a dummy `common_chat_templates_apply` (one user message, `add_generation_prompt=true`) to extract them, then tokenizes via `common_tokenize` with `parse_special=true` so the special-token IDs survive.
+
   - **Forced termination sequence:** `--reasoning-budget-message` is tokenized into `sampling.reasoning_budget_forced` as `<message> + <end_tag>`, mirroring llama-cli's `tools/cli/cli.cpp` construction. When the budget expires inside the reasoning block, the sampler forces this sequence token-by-token (all other logits → −inf) so generation ends cleanly inside the block instead of cutting mid-thought.
+
   - **Non-thinking templates:** if the user sets `--reasoning-budget` on a model whose chat template advertises no thinking tags (e.g. plain Llama-3.2-Instruct), a one-line warning is printed at startup and the budget is silently ignored. Choice — warn but don't fail — matches chimera's "don't error on something that's only marginally wrong" pattern.
+
   - **API shape:** new `ReasoningBudgetParams` struct in `chimera_cli/chimera.cpp` (POD; vocab + tags + budget + message). `make_sampler()` gains an optional trailing arg defaulted to `{}` so the `gen` / `embed` call sites are unchanged — they pass nothing and get the previous behavior. `command_chat` is the only caller that populates the struct.
+
   - Removed the "parsed but not yet enforced" stderr warning that fired on every chat invocation with `--reasoning-budget`. Smoke: `make test` 44/44; manual: Llama-3.2-1B (no thinking template) → new warning fires once, generation normal at 41 t/s.
 
 - **Doc-only:** `--disable-image-metadata` reclassified out-of-scope in `docs/dev/cli-api-coverage.md`. sd-cli's flag disables a Civitai/A1111-style `parameters` tEXt chunk written by a **patched** `stbi_write_png` overload in sd's vendored fork of `stb_image_write.h`. Chimera links stock `stb_image_write`, which writes no tEXt/EXIF/text chunks at all — so chimera's PNGs are already metadata-free and there is nothing for the flag to disable. The reverse direction (embedding generation params, for parity with sd-cli's default behaviour) is net-new functionality, not a port, and is not on the current roadmap. Closes the last sd not-implemented row.
@@ -479,52 +654,87 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - `chimera sd --embd-dir <dir>` — textual-inversion / embeddings directory. Mirrors sd-cli's behaviour: non-recursive scan of the directory for `.gguf` / `.safetensors` / `.pt` files; the filename stem becomes the prompt token, the full path is the load source. Non-existent or non-directory paths exit with `BadInput` before `new_sd_ctx`. Implementation detail worth flagging: the `std::vector<std::pair<std::string,std::string>>` owns the backing strings and the `std::vector<sd_embedding_t>` borrows `const char*` pointers into them, so the embedding-pointer vector is built **after** the pair vector is fully sized — otherwise an `emplace_back` realloc on the pair vector would silently dangle every `e.name` / `e.path` we'd already stored. Both vectors live on `load_model`'s stack; sd copies the strings into its own `std::map` inside `new_sd_ctx`, so stack lifetime is sufficient. Smoke: invalid `--embd-dir` exits before model load with a chimera-shaped error; `make test` 44/44.
 
 - `chimera sd` cache / SCM bundle (Round 7 of the audit closer). Mirrors sd-cli's two-flag surface exactly so command lines port 1:1.
+
   - `--cache-mode <algo>` selects the inference cache algorithm: `disabled` (default) | `easycache` | `ucache` (UNet variant) | `dbcache` | `taylorseer` | `cache-dit` | `spectrum`. Maps to `sd_cache_mode_t` via a chimera-side string→int table; the integer flows through `GenerateRequest.cache_mode_id` and is converted to the enum inside `generate()` so chimera_sd.h doesn't have to expose `sd_cache_mode_t`. Unknown values exit with `BadInput`. CLI11-validated.
+
   - `--cache-option <kv,kv,...>` overrides per-mode tunables using sd-cli's `key=value` grammar. Accepted keys (same per-mode branching as sd-cli's `parse_named_params`): `threshold` (maps to `reuse_threshold` for easycache/ucache, `residual_diff_threshold` for dbcache/taylorseer/cache-dit), `start`, `end`, `decay`, `relative`, `reset`, `Fn`/`fn`, `Bn`/`bn`, `warmup` (maps to `spectrum_warmup_steps` for spectrum, `max_warmup_steps` for the others), `w`, `m`, `lam`, `window`, `flex`, `stop`. Missing-`=`, unknown-key, and non-numeric-value all exit with `BadInput`. Validation runs in a throwaway `GenerateRequest` at the top of `command_sd` (before `load_model`) so a typo doesn't waste a model load.
+
   - `--scm-mask <path>` borrows into `sd_cache_params_t.scm_mask` for the duration of `generate_image` (the request outlives the call).
+
   - `--scm-policy <static|dynamic>` flips `sd_cache_params_t.scm_policy_dynamic`. Empty leaves sd's default (`dynamic`). CLI11-validated.
+
   - New `chimera_sd::parse_cache_options()` helper does the parse + validation in one place; `generate()` then mechanically copies the populated fields onto `sd_cache_params_t` only where the request set them (NaN / `-1` sentinels skip the field). Smoke: `make test` 44/44 pass; invalid `--cache-mode`, `--cache-option` key, `--cache-option` value, and `--scm-policy` all exit before model load with chimera-shaped error messages.
 
 - `chimera sd` coverage closer — 33 new flags landed across six rounds, closing all remaining unforced gaps in `docs/dev/cli-api-coverage.md` except the deferred `--embd-dir` and `--disable-image-metadata` (cache/SCM was deferred from this entry, then landed in the entry above). All defaults preserve existing behavior; floats use `< 0` sentinels because the upstream defaults are `INFINITY` (img_cfg, eta, flow_shift) or specific positive numbers (hires.scale=2.0, hires.denoising_strength=0.7), and ints use `0` because every relevant field uses 0 as "leave default" upstream.
+
   - **Round 1 — perf / offload (`sd_ctx_params_t` one-liners):** `--fa` (global flash-attn, distinct from `--diffusion-fa` which only flips the diffusion path), `--no-mmap` (chimera defaults mmap=ON for sd; this flips it off — same semantic as the llama-side flag), `--max-vram` (soft VRAM cap in GiB; `0` leaves the upstream default), `--clip-on-cpu`, `--vae-on-cpu`, `--control-net-cpu` (per-component CPU offload — more surgical than `--offload-to-cpu`), `--force-sdxl-vae-conv-scale` (SDXL VAE conv-scale numerics fix).
+
   - **Round 2 — sampler / generation core (`sd_sample_params_t` + ctx enums):** `--img-cfg-scale` (separate img-cond CFG; sentinel `-1` keeps sd's INFINITY default so it falls back to `--cfg-scale`), `--eta` (DDIM-style stochasticity), `--timestep-shift` (`sd_sample_params_t.shifted_timestep`; 0 = no shift), `--sigmas` (custom sigma schedule, comma-separated floats; non-float entries exit with `BadInput`; the parsed vector is borrowed into `sd_sample_params_t.custom_sigmas` for the duration of the call), `--prediction` (enum string resolved via `str_to_prediction`: `eps`/`v`/`edm_v`/`flow`/`flux_flow`/`flux2_flow`), `--lora-apply-mode` (enum via `str_to_lora_apply_mode`: `auto`/`immediately`/`at_runtime`). Both enum flags are CLI11-validated.
+
   - **Round 3 — model-loading completers (`sd_ctx_params_t` paths):** `--taesd` (Tiny AutoEncoder for fast preview decode), `--clip-vision` (CLIP-Vision encoder), `--llm-vision` (LLM-Vision encoder, e.g. Qwen-Image vision-conditioning), `--tensor-type-rules` (per-tensor wtype override), `--photo-maker` (bare PhotoMaker model path; pairs with the Round 4 generation-side bundle below).
+
   - **Round 4 — PhotoMaker generation bundle (`sd_pm_params_t`):** `--pm-id-images-dir` (non-recursive scan of the directory in alphabetical order; non-image entries are skipped silently; an empty result is an error so a typo doesn't silently disable PM), `--pm-id-embed-path` (precomputed ID embedding `.bin`), `--pm-style-strength` (`-1` leaves the upstream default). Each scanned image is decoded to RGB via `decode_image_file` (3 channels) and borrowed into `sd_pm_params_t.id_images` as a `sd_image_t*` for the duration of `generate_image`.
+
   - **Round 5 — reference images (`sd_img_gen_params_t.ref_images`):** `--ref-image <path>` (repeatable — repeat the flag once per file), `--increase-ref-index` (increment ref-image index across batch positions), `--no-auto-resize-ref-image` (sd defaults auto-resize ON; this flips it off). Same lifetime contract as the PM images.
+
   - **Round 6 — hires-fix bundle (`sd_hires_params_t`):** `--hires` (toggle), `--hires-upscaler` (enum string matching sd's `hires_upscaler_to_str` table — values: `None`, `Latent`, `Latent (nearest)`, `Latent (nearest-exact)`, `Latent (antialiased)`, `Latent (bicubic)`, `Latent (bicubic antialiased)`, `Lanczos`, `Nearest`, `Model`; entries with spaces/parens must be quoted at the shell), `--upscale-model` (file path for `--hires-upscaler Model`), `--hires-width` / `--hires-height` (`0` = derive from `--hires-scale`), `--hires-scale` (`-1` = upstream default 2.0), `--hires-steps` (`0` = use main `--steps`), `--hires-denoising-strength` (`-1` = upstream default 0.7), `--hires-upscale-tile-size` (`0` = upstream default 128).
+
   - **Deliberately deferred (do not re-flag from this closer):** the cache/SCM family (`--cache-mode`, `--cache-option`, `--scm-mask`, `--scm-policy` plus ~20 sub-knobs in `sd_cache_params_t` — needs a CLI-shape design choice rather than a mechanical port), `--embd-dir` (textual-inversion directory; needs the `sd_embedding_t[]` build path), and `--disable-image-metadata` (controls chimera's PNG writer, not an `sd_*` param).
+
   - **Out of scope, already documented:** video-only flags (full `--high-noise-*` sampler family, `--end-img`, `--moe-boundary`, `--video-frames`/`--fps`/`--vace-strength`, `--control-video`), standalone-mode flags (`--upscale-repeats`, `--upscale-tile-size`, `--mode {convert,metadata,...}`), shell features (`--preview*`, `--metadata-*`, `--canny`, `--circular*`, `--hires-upscalers-dir`), and chroma/qwen-specific tuning.
+
   - Smoke verified via `make test` (44/44 pass) after each round.
 
 - `chimera whisper` coverage closer — 22 new flags spanning the remaining unforced gaps in `docs/dev/cli-api-coverage.md`. Defaults are all chosen so existing invocations are byte-identical; every numeric knob uses a sentinel (0, `-1.0f`, or `NaN`) that leaves the upstream `whisper_full_params` / `whisper_context_params` / `whisper_vad_params` field untouched. Groups:
+
   - Region of audio: `--offset <ms>`, `--duration <ms>` (whisper-cli `-ot` / `-d`). The sample-offset form `-on` is not exposed by `whisper_full_params` (it's internal to whisper-cli's WAV reader) so only the ms-based forms are wired.
+
   - Voice activity detection: `--vad` (toggle) plus `--vad-model <path>` (required when `--vad` is set; chimera fails with `BadInput` otherwise), `--vad-threshold`, `--vad-min-speech-duration-ms`, `--vad-min-silence-duration-ms`, `--vad-max-speech-duration-s`, `--vad-speech-pad-ms`, `--vad-samples-overlap`. The tuning knobs map 1:1 to `whisper_vad_params` and inherit `whisper_vad_default_params()` when not provided.
+
   - Segment shaping (pairs naturally with `--output-srt` / `--output-vtt` already landed): `--max-len <chars>`, `--max-tokens <N>`, `--split-on-word`.
+
   - Decoder-fail fallback thresholds: `--temperature-inc`, `--entropy-thold`, `--logprob-thold`, `--no-speech-thold`. Sentinel is `NaN` (not negative-one) because `logprob_thold`'s upstream default is itself negative. `--no-fallback` still wins — it reasserts `temperature_inc<0` after the explicit-value override.
+
   - Perf / advanced: `--audio-ctx <N>` (halve for tiny.en speedups), `--tinydiarize` (`tdrz_enable`; requires a tdrz-trained model).
+
   - Token suppression: `--suppress-regex <re>` (matched against token strings) and `--suppress-nst` (suppress non-speech tokens).
+
   - Context-params (applied at `whisper_init_from_file_with_params`): `--flash-attn`, `--no-gpu` (inverts whisper's default of GPU on), `--device <N>` (CUDA device index). Plumbed via a new `chimera_whisper::LoadParams` struct + `load_model(LoadParams)` overload; the original `load_model(std::string)` is kept as a delegate so `chimera_serve.cpp`'s audio wire-up is untouched.
+
   - Parallel decode: `--processors <N>`. `N=1` keeps the serial path (`whisper_full`); `N>1` routes through `whisper_full_parallel`, which splits the input into N independent decoder states. Upstream warns this can degrade accuracy at chunk seams, so default 1 is intentional.
+
   - Leaves the doc's bigger lifts as follow-ups: `--grammar` family (constrained decoding — needs the same grammar parser as `gen`/`chat`), exit-after-detect `--detect-language` (whisper-cli wrapper logic, not just a param), stereo `--diarize` (also wrapper logic), and `--dtw` token-level DTW (niche). All 44 tests still pass.
 
 - `chimera sd` skip-layer guidance + high-noise model loading slot:
+
   - `--skip-layers <csv>`, `--slg-scale <f>`, `--skip-layer-start <f>`, `--skip-layer-end <f>` — comma-separated layer indices feed `sd_slg_params_t.layers` (e.g. `--skip-layers 7,8,9`); empty disables SLG regardless of the scalar knobs; non-integer entries fail with `BadInput` so a typo isn't silently dropped. Scalars use `-1.0f` sentinels to leave the upstream defaults in place.
+
   - `--high-noise-diffusion-model <path>` — second diffusion model for two-stage workflows; maps to `sd_ctx_params_t.high_noise_diffusion_model_path`. The full `--high-noise-*` sampler family (per-stage cfg/guidance/scheduler/etc.) is video-only in sd.cpp's `vid_gen` mode and chimera-sd is img_gen-only today, so only the model-loading slot is exposed here — the rest is intentionally out of scope. Documented in `--help`.
 
 - `chimera sd` perf + RNG knobs (Tier 2 of the audit in `docs/dev/cli-api-coverage.md`):
+
   - `--diffusion-conv-direct` and `--vae-conv-direct`: wire `sd_ctx_params_t.diffusion_conv_direct` / `vae_conv_direct`. Measurable perf win on modern dGPUs.
+
   - `--rng <std_default|cuda|cpu>` and `--sampler-rng <std_default|cuda|cpu>`: map to `sd_ctx_params_t.rng_type` / `sampler_rng_type` via `str_to_rng_type`; unknown values exit with `BadInput`. `--sampler-rng cpu` is what matches ComfyUI seeds across implementations.
 
 - `chimera embed` output-shape gaps (Tier 2 of the audit):
+
   - `--embd-output-format <fmt>` with values `''` (default; current space-separated-floats output, byte-for-byte preserved), `array` (JSON array — single `[..]` for one vector, `[[..],[..]]` for multiple), `json` (OpenAI-style `{"object":"list","data":[{"object":"embedding","index":N,"embedding":[...]},...],"model":"..."}` envelope), `raw` (one float per line, blank line between vectors). Unknown values exit with `BadInput` before model load.
+
   - `--embd-separator <str>` literal-string splitter: when set, the input is split on the separator and one vector is emitted per piece. Mirrors `llama-embedding --embd-separator`.
+
   - `--attention <causal|non-causal>` pins `llama_context_params.attention_type` for the embedding pass. Empty (default) leaves the model's training-time choice in place. Required override for some encoder checkpoints.
+
   - `--pooling rank` now accepted (in addition to `mean|cls|last|none`), so the existing `embed` subcommand can drive cross-encoder reranker checkpoints (`LLAMA_POOLING_TYPE_RANK`).
 
 - `chimera sd` ControlNet + VAE tiling + finish-the-model-loading-story bundle (Tier 1 of the audit in `docs/dev/cli-api-coverage.md`):
+
   - ControlNet: `--control-net <model>` (loads the ControlNet alongside the diffusion model), `--control-image <path>` (conditioning image; must match `-W`/`-H`), `--control-strength <f>` (default 0.9). `--control-image` requires `--control-net` and fails at parse time otherwise.
+
   - VAE tiling: `--vae-tiling` (toggle) plus `--vae-tile-size <px>` (absolute, both axes), `--vae-relative-tile-size <f>` (fraction of canvas, both axes), `--vae-tile-overlap <f>` (fractional overlap). All three knobs are optional sentinels; unset values leave `sd_tiling_params_t` defaults in place. Lets large outputs render without OOM at a small quality cost.
+
   - Model-loading completers: `--clip-g <path>` (CLIP-G text encoder for SDXL split layouts — paired with the existing `--clip-l`), `--type <wtype>` (weights type override, e.g. `f16`/`q8_0`/`bf16`; unknown values exit with `BadInput`), `--lora <path[:scale]>` (repeatable, scale defaults to 1.0; mirrors the `serve`/`gen`/`chat` parser), `--lora-model-dir <dir>` (base directory used to resolve relative `--lora` paths so prompt-style names work without per-file absolute paths).
+
   - Closes the asymmetry where `--lora` had landed on `serve`/`gen`/`chat` but not on `sd`. Smoke verified via `make test` (44/44 pass).
 
 - `chimera sd` `--guidance` and `--flow-shift`. Both map to `sd_sample_params_t` (`guidance.distilled_guidance`, `flow_shift`). Sentinel `-1` leaves the upstream default in place, so existing invocations are unchanged. Closes the Flux/SD3 generation-side gap that paralleled the earlier Z-Image model-loading fix.
@@ -538,15 +748,25 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - Whisper output formats on `chimera whisper`. New flags: `--output-file <base>` (default: input WAV stem), `--output-txt`, `--output-srt`, `--output-vtt`, `--output-json`, `--output-json-full`, `--output-csv`, `--output-lrc`. Multiple may be combined; each writes `<base>.<ext>`. SRT/VTT use canonical timestamp separators (`,` vs `.`), CSV header is `start_ms,end_ms,text` with proper quoting, LRC uses `[MM:SS.cc]`, JSON is minimal `{language?, text, duration, segments[]}` with `--output-json-full` adding per-word timing. Whisper's segment-level timestamps are auto-enabled whenever any format file is requested (independent of `--timestamps`, which still controls inline streaming) so format writers don't emit garbage `t0`/`t1`. CLI11 forbids multi-char short flags, so the upstream `-osrt` / `-of` etc. aliases are long-only here. Smoke-validated on `ggml-base.en` + JFK sample: all six format files parse cleanly with correct timestamps.
 
 - Broad llama.cpp CLI coverage uplift on `gen` / `chat` / `embed`. 20 flag groups landed (~40 new options total), driven by the audit in `docs/dev/cli-api-coverage.md`. Highlights:
+
   - Sampler: `--grammar` / `--grammar-file`, `--json-schema` / `--json-schema-file` (converted via `json_schema_to_grammar`), `--repeat-last-n`, `--presence-penalty`, `--frequency-penalty`, `--mirostat` + `--mirostat-ent` / `--mirostat-lr`, full `--dry-*` family (`--dry-multiplier`, `--dry-base`, `--dry-allowed-length`, `--dry-penalty-last-n`, `--dry-sequence-breaker` repeatable), `--logit-bias` (repeatable, `"<id>(+|-|=)<bias>"`), `--ignore-eos`.
+
   - Performance / context: `--flash-attn`, `--cache-type-k` / `--cache-type-v` (f32/f16/bf16/q8_0/q5_0/q5_1/q4_0/q4_1/iq4_nl), `--ubatch-size`.
+
   - Adapters: `--lora <path[:scale]>` (repeatable), attached via `llama_set_adapters_lora`. Closes the asymmetry with `serve` which already had this.
+
   - RoPE / YaRN: `--rope-freq-base`, `--rope-freq-scale`, `--rope-scale` (alias), `--rope-scaling` (none/linear/yarn/longrope), `--yarn-orig-ctx`, `--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-fast`, `--yarn-beta-slow`.
+
   - Multi-GPU / device: `--main-gpu`, `--tensor-split` (comma-separated floats), `--split-mode` (none/layer/row/tensor), `--device` (comma-separated device list).
+
   - Memory: `--no-mmap`, `--mlock`. `use_mmap` was previously hard-coded.
+
   - `chat`-only: `--chat-template-file` (mutually exclusive with `--chat-template`), `--chat-template-kwargs`, `--no-jinja` (jinja default ON to preserve behavior), `--reasoning` / `--reasoning-format` / `--reasoning-budget` / `--reasoning-budget-message`. Note: `--reasoning-budget` is parsed but not yet enforced at sampler level (upstream requires manual tokenization of reasoning start/end tags — follow-up).
+
   - mmproj: `--no-mmproj-offload`. `--mmproj-auto` is not modeled by `mtmd_context_params` at b9119, so skipped.
+
   - `--list-devices` skipped — fits more naturally as a `chimera info` extension; tracked separately.
+
   - End-to-end smoke validated on Llama-3.2-1B-Instruct: `--flash-attn --cache-type-k q8_0 --cache-type-v q8_0` produces output cleanly, and `--grammar 'root ::= "apple" | "banana" | "cherry"'` correctly constrains output to one of the three literals.
 
 - Vulkan build validated end-to-end via `make build-vulkan`. `chimera info` reports llama/whisper/sd all built and loaded on the Vulkan backend; both an AMD iGPU (Radeon 610M, RADV) and an NVIDIA RTX 4060 enumerate as Vulkan devices on the same host, so dispatch is not vendor-locked. Resulting binary is 92M on Linux x86_64 — roughly half the CUDA build (169M) because Vulkan ships compact SPIR-V shaders rather than per-arch CUDA cubins, making it the smaller-footprint option when raw CUDA perf isn't required.
@@ -556,7 +776,9 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Fixed
 
 - Windows build now works end-to-end on Ryzen 7940HX + RTX 4060 across CPU, CUDA, and Vulkan backends, validated via `chimera info` showing `built/loaded` matching the configured backend and `chimera chat` exercising token generation. Two regressions were blocking it:
+
   - `src/chimera/CMakeLists.txt`'s Windows/MSVC `target_link_libraries(chimera_lib …)` branch (the `else()` after the UNIX-non-APPLE and APPLE branches) only linked `LIB_GGML` / `LIB_GGML_BASE` / `LIB_GGML_CPU` and stopped — the GGML backend libs (`LIB_GGML_CUDA`, `LIB_GGML_VULKAN`, `LIB_GGML_SYCL`, `LIB_GGML_HIP`, `LIB_GGML_OPENCL`) were never added. With any GPU backend enabled, `ggml-backend-reg.obj` (compiled by the deps step with the matching `GGML_USE_<BACKEND>` define) issued a direct `extern` call to e.g. `ggml_backend_cuda_reg`, which the linker then couldn't resolve. Symptom on `make build-cuda`: `LNK2019: unresolved external symbol ggml_backend_cuda_reg referenced in function "public: __cdecl ggml_backend_registry::ggml_backend_registry(void)"`. Fixed by appending the configured backend libs to the Windows branch's link list, mirroring the structure of the Linux branch (the UNIX-non-APPLE block already had the per-backend `if(GGML_…)` append). MSVC's linker is multi-pass for static libs, so no start-group/end-group equivalent is needed; whole-archive isn't required either because the unresolved symbol is referenced directly, not pulled in via a static initializer.
+
   - `Makefile`'s `PYTHON` autodetect (`if command -v python3 >/dev/null 2>&1; …`) picked the Microsoft Store `python3.exe` shim on Windows. The shim exists on PATH as a real file (so `command -v` finds it) but prints "Python was not found; run without arguments to install from the Microsoft Store" and exits non-zero, so `make deps` failed before doing any work even when a working Python (`C:\Program Files\Python312\python.exe`, or `py -3`) was installed. Fixed by probing each candidate with `--version` instead of `command -v`, so the shim is rejected and detection falls through to a working interpreter. `make PYTHON=<cmd>` override is unchanged.
 
 ## [0.1.5]
@@ -564,9 +786,13 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Added
 
 - KV-cache slot snapshots and LoRA hot-swap routes. Four upstream `server_routes` handlers bound that were previously called out as "deliberately not exposed":
+
   - `GET /slots` — per-slot status (id, state, prompt, n_past, ...). Always available; gated upstream by `params.endpoint_slots`, which chimera leaves at its default `true`.
+
   - `POST /slots/:id_slot?action={save,restore,erase}` — KV-cache snapshot I/O. `save` and `restore` require the new `--slot-save-path <dir>` flag (501 `not_supported` otherwise, with the upstream hint pointing at the flag); `erase` works without it. Skipping prefill on a multi-thousand-token system prompt / RAG context turns a multi-second first-token latency into a sub-second restore.
+
   - `GET /lora-adapters` — lists adapters loaded via `--lora` with current scales.
+
   - `POST /lora-adapters` — accepts a JSON array of `{"id": <index>, "scale": <float>}` and changes which adapters apply to subsequent requests without a model reload. Adapters must be on the startup `--lora` list; the route can re-weight (scale 0 effectively disables) but cannot register new files at runtime.
 
 - `--slot-save-path <dir>` and repeatable `--lora <path[:scale]>` flags on `chimera serve`. Scale defaults to 1.0 when omitted. The `path[:scale]` parser uses the rightmost colon and falls back to "treat the whole string as a path" when the suffix doesn't parse as a float, so Windows drive-letter paths with no scale (`C:\foo.gguf`) round-trip cleanly. `--slot-save-path` is normalized to end with a directory separator inside `build_common_params` — common/arg.cpp does this when `slot_save_path` is set through the upstream parser, but chimera bypasses that path and was previously concatenating `<dir><filename>` without a separator.
@@ -574,8 +800,11 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - Pin-check asserts in `chimera_pin_check.cpp` for `get_slots` / `post_slots` / `get_lora_adapters` / `post_lora_adapters` so a llama.cpp bump that renames or retypes any of the four fails this TU first instead of cascading through `chimera_serve.cpp`.
 
 - Chat history read endpoints over HTTP, paired with `--persist-chats`. Bound only when persistence is on (no orphan endpoint without a write path producing data). Three routes, all `GET`, all returning JSON with the same `{"error":{"message","code","type":"invalid_request_error"}}` shape on failure that the vector store handlers use:
+
   - `GET /v1/chats?limit=N` — list persisted chats sorted by `updated_at` desc; default 50, capped at 500. Returns `{"object":"list","data":[{id, object:"chimera.chat", created_at, updated_at, title, model_path, model_alias, system_prompt, source, message_count, partial_count}, ...]}`.
+
   - `GET /v1/chats/:id` — chat metadata + ordered `messages[]` (including `partial=true` interrupted turns recorded by the Ctrl-C-during-chat path). Returns 400 (not 404) for an unknown id because cpp-httplib's default error handler overwrites 404 bodies with the generic "File Not Found" — same workaround already used in the vector store handlers.
+
   - `GET /v1/chats/search?q=...&limit=N` — FTS5 search over the `messages_fts` virtual table; hits include `chat_id`, `message_id`, `seq`, `role`, and a `[word]`-highlighted `snippet` from SQLite's `snippet()` function. Default 20, capped at 200. Missing `q` → 400.
 
   Closes the read-side gap: until now `--persist-chats` was a write-only path, and CLI (`chimera chat --list/--search`) was the only consumer. A web UI can now browse and search persisted conversations over plain HTTP.
@@ -587,7 +816,9 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - `chimera db vacuum` — defragment + reclaim free pages in place via plain `VACUUM`. Wraps the new `chimera_db::vacuum(db)` helper. The error message names the `SQLITE_LOCKED` failure mode explicitly ("close any other chimera processes that have this DB open and retry") because that's the only realistic failure once the migration ran.
 
 - Build-time modularity for whisper.cpp and stable-diffusion.cpp. Two new CMake options follow the existing `CHIMERA_LINENOISE` / `CHIMERA_WEBUI_EMBED` tri-state pattern:
+
   - `CHIMERA_WITH_WHISPER` (default `AUTO`): ON requires `thirdparty/whisper.cpp/lib/libwhisper.a` (configure fails otherwise); OFF drops the modality completely; AUTO links if the static lib is present.
+
   - `CHIMERA_WITH_SD` (default `AUTO`): same shape, probes `thirdparty/stable-diffusion.cpp/lib/libstable-diffusion.a`.
 
   When OFF, the corresponding modality disappears completely: the `whisper` / `sd` subcommand is removed from the CLI, `chimera serve --enable-audio` / `--enable-image` are removed from `serve --help`, `/v1/audio/*` / `/v1/images/*` routes are not bound, `chimera info` reports "not linked", and the matching translation units (`chimera_whisper.cpp`, `chimera_sd.cpp`, `chimera_serve_audio.cpp`, `chimera_serve_images.cpp`, `stb_impl.cpp` follows SD) are dropped from the chimera target source list. Two compile defines (`CHIMERA_HAS_WHISPER`, `CHIMERA_HAS_SD`) gate the related code in `chimera.h`, `chimera.cpp`, `chimera_serve.cpp`, and `chimera_serve_internal.h`.
@@ -611,19 +842,29 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - **`src/` layout split** along the library / CLI boundary that the `chimera_lib` and `chimera` CMake targets already enforced. `chimera.cpp` (the CLI shell — CLI11 wiring, REPL, signal handlers, subcommand dispatch) moved from `src/chimera/chimera.cpp` to `src/chimera_cli/chimera.cpp`. Every other TU (13 .cpp + .h pairs covering chat store, db, embed, vector store, serve_*, sd, whisper, sqlite/sqlite-vec amalgamations, server-http frontend, stb impl, build-info shim) stayed in `src/chimera/`, which now contains library code only. The slice's CMakeLists.txt similarly split: `src/chimera/CMakeLists.txt` defines `chimera_lib`; the new `src/chimera_cli/CMakeLists.txt` defines the `chimera` executable (linked against `chimera_lib`). The top-level `CMakeLists.txt` adds both subdirectories in order (library first so the dependency is available when the executable links). The `CHIMERA_BUILD_EXECUTABLE` option moved from the library slice to the CLI slice — passing `-DCHIMERA_BUILD_EXECUTABLE=OFF` now elides the entire `src/chimera_cli/` subdirectory from configure. Naming convention: `src/chimera/` keeps the project name because it produces `libchimera.a` (the artifact users link); the CLI is the late addition. This closes the open question §6.1 in `docs/dev/combine_archives.md`. Pure structural refactor — no source edits to any moved file, no behavior change. Verified: full 44/44 test suite passes + external smoke test passes after the move.
 
 - `chimera_serve.cpp` split into per-modality translation units (2249 LOC -> 871). The per-modality handler factories now live in sibling TUs and only `command_serve`, `ex_wrapper`, signal handling, `build_common_params`, and the `SecondaryServerCtx` / `bring_up_secondary` helpers for `--enable-embeddings` / `--reranking` stay in `chimera_serve.cpp`. The split is mechanical (no behaviour change; all 43 end-to-end tests still pass, all 8/9 golden routes byte-identical aside from a date-injection diff in `apply_template`):
+
   - `chimera_serve_audio.cpp` (256 LOC) — `make_audio_transcribe_handler` + the SRT/VTT/verbose-JSON formatters.
+
   - `chimera_serve_images.cpp` (367 LOC) — three `make_image_*_handler` factories + the `coerce_{int,int64,float,string}` JSON-field helpers (also linked from the RAG search handler) + the inline base64 encoder.
+
   - `chimera_serve_rag.cpp` (317 LOC) — six `make_vs_*_handler` factories + the `RagContext`-bound DB-open helper.
+
   - `chimera_serve_chat_persist.cpp` (356 LOC) — `make_persisting_chat_handler` and its streaming/non-streaming SSE-parse + DB-write helpers, plus the case-insensitive header lookup.
+
   - `chimera_serve_chats_read.cpp` (156 LOC) — three `make_chats_*_handler` factories for the `GET /v1/chats*` read endpoints.
+
   - `chimera_serve_internal.h` (134 LOC) — declares the seams: `ex_wrapper`, the `coerce_*` helpers, the three context structs (`RagContext`, `ChatPersistContext`, `ChatHistoryContext`), the `X_CHAT_ID_HEADER` constant, and every `make_*_handler` factory, all in `namespace chimera_serve`. Per-TU internal helpers stay in nested anonymous namespaces.
 
   Closes the self-prescribed TODO from earlier releases (which had a stale "currently ~600 LOC" estimate that was actually 2249 by this release). File naming follows the existing `chimera_*` convention used by every other TU in `src/chimera/`.
 
 - `chimera.cpp::main()` extracted from 475 LOC inline CLI11 wiring to a 46-LOC parse-and-dispatch driver. The new shape:
+
   - A `ParsedCli` struct holds every subcommand's CLI11 pointer + every option block + every cross-cutting local (prompt text, chat resume id, db path overrides, ...).
+
   - Eleven `bind_*_cmd(app, p)` helpers (`bind_gen_cmd`, `bind_chat_cmd`, `bind_tokenize_cmd`, ..., `bind_search_cmd`) each create one subcommand and add its options. `bind_subcommands(app, p)` calls all eleven in order.
+
   - `dispatch_cli(p)` runs the if-elseif chain that maps the activated subcommand to its `command_*` entry point, and contains the `--resume` model-resolution + system-prompt-file logic that was previously inlined.
+
   - `main()` itself is now `silence_all_logging` -> CLI11 app setup -> `bind_subcommands` -> `app.parse` -> `llama_backend_init` -> `dispatch_cli` -> three-arm catch.
 
   Mechanical; no behaviour or `--help` change.
@@ -671,16 +912,23 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - Sentence-aware chunking for `chimera index ingest` and the equivalent serve route. The previous fixed token-window splitter (with overlap measured in tokens) is replaced by `chimera_embed::chunk_by_sentences`: text is split on sentence terminators (`.`, `?`, `!`) and paragraph breaks (blank lines), then greedy-packed into chunks bounded by the collection's `chunk_tokens` budget. Overlap is carried as whole-sentence tails of the previous chunk re-prepended to the next. Pathological inputs (run-on sentences longer than the budget, source code, base64) fall back to `chunk_by_tokens` for the offending span, so ingestion never refuses input. Empirically this improves retrieval quality on prose because the embedded text now corresponds to complete thoughts rather than arbitrary mid-sentence cuts; for structured/non-prose input the behavior degenerates to the old splitter via the fallback.
 
 - Hybrid retrieval with reciprocal-rank fusion. New `documents_fts` virtual table (FTS5 over `documents.text`) is created in schema v5 and back-populated from existing rows via `INSERT INTO documents_fts(documents_fts) VALUES('rebuild')`; insert/delete/update triggers keep it in sync with `documents`. `chimera_vector_store::SearchMode` selects between three retrieval paths:
+
   - `Semantic` — vec0 KNN on the collection's chosen distance metric (unchanged behavior).
+
   - `Lexical` — FTS5 BM25 over the chunk text. Falls back to phrase-quoted form on FTS5 syntax errors (e.g. user-typed queries with stray parens or quotes) so search never returns HTTP 500 for input it could otherwise tolerate.
+
   - `Hybrid` *(default)* — pulls top-`max(k, 30)` from each leg and merges by `rrf_score = Σ 1 / (60 + rank_i)`. Hits gain `semantic_rank`, `lexical_rank`, and `rrf_score` fields; output sorted by RRF score descending.
 
   Surface area: `chimera search --mode {semantic|lexical|hybrid}` (default `hybrid`); `POST /v1/vector_stores/:name/search` body accepts `"mode"` with the same values and echoes the chosen mode on the response. Lexical-only mode short-circuits the embedding model load — a 100+ MB GGUF doesn't need to be paged in to do a BM25 lookup. The choice to make `hybrid` the default changes search results for existing collections; collections created before this release continue to work because the FTS5 table is rebuilt from existing rows during the v5 migration.
 
 - `X-Chimera-Chat-Id` request/response header on `/v1/chat/completions` for multi-turn server clients. Closes the gap where `--persist-chats` previously produced one chat row per request (because the OpenAI API has no chat id). Behavior:
+
   - Request without the header: the wrapper creates a chats row *before* delegating to the inner handler so its id is known in time to be set on the streaming response. Response echoes `X-Chimera-Chat-Id: <new-id>`. All messages in the request plus the assistant reply are appended (unchanged).
+
   - Request with `X-Chimera-Chat-Id: <existing-id>`: only the **last** message in the body plus the assistant reply are appended; prior turns are assumed to already be on disk from earlier calls. Response echoes the same id.
+
   - Request with an unknown id: HTTP 404, inner handler not invoked.
+
   - Request with a non-integer id: HTTP 400.
 
   Header lookup is case-insensitive (HTTP semantics). Persistence still runs *after* the stream finishes, so a failed persist never breaks the user's request. New helpers in `chimera_serve.cpp`: `create_chat_row_for_request`, `chat_id_exists`, plus a case-insensitive header-map lookup.
@@ -698,8 +946,11 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - Default retrieval mode flipped from semantic-only to hybrid. Pre-hybrid behavior is recoverable via `--mode semantic` (CLI) or `"mode": "semantic"` (HTTP). Justified because hybrid is a superset of semantic for prose: keyword recall is added (helping proper nouns and rare-term queries) without losing the conceptual matches that semantic-only delivered. Cost is one additional FTS5 SELECT per request.
 
 - `scripts/test.sh` end-to-end suite is now 32 tests (was 23). New coverage:
+
   - Hybrid retrieval (4 tests): a small corpus with a deliberately rare proper-noun-like token asserts that `--mode lexical` surfaces it via BM25, `--mode hybrid` produces `rrf=`-annotated output, omitting `--mode` falls through to hybrid (default-mode regression guard), and `--mode <bogus>` exits with BadInput.
+
   - `X-Chimera-Chat-Id` header (5 tests): spawns `serve --persist-chats` on a free port, asserts the response header on a no-header request, echo-id-reuse, unknown id → 404, malformed id → 400, and a final DB-state check (1 chats row + 4 messages rows after the four-case sequence — proving the unknown/malformed cases never invoked the inner handler).
+
   - Skipped on CI containers without `python3` + `curl` + `sqlite3` (SKIP, not FAIL).
 
 - Privacy documentation for persistence features. New "Privacy / data on disk" section in `docs/serve.md` enumerating exactly what `serve --persist-chats` and `chat --persist` record (message content, reasoning spans, model path, token counts, timestamps, media paths; explicitly *not* client IPs, headers, API keys, or HTTP bodies), where the DB lives per platform, and how to wipe persisted state. A matching summary table in `docs/cheatsheet.md` covers all five write-to-disk surfaces (chat persist, serve persist-chats, RAG ingest, embedding cache, linenoise history). Closes the gap where opt-in persistence shipped without a user-facing privacy note.
@@ -707,9 +958,13 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Removed
 
 - `TODO.md` pruned of items that have shipped (sentence-aware chunking, hybrid search, `X-Chimera-Chat-Id`, Ctrl-C partial-turn persistence, privacy notes). Four items moved to a new "Out of scope (wontfix)" section with brief rationale rather than silently deleted, so the same proposals aren't re-litigated from scratch:
+
   - `POST /props` runtime config mutation (conflicts with "CLI is the config").
+
   - Multi-tenancy / `is_router_server` (wrong deployment shape — one process = one model is core to the busybox identity; users needing multi-model routing should run one chimera per model behind a reverse proxy).
+
   - HTTPS direct serving via `--ssl-cert-file` / `--ssl-key-file` (reverse-proxy territory).
+
   - Auth beyond `--api-key` — JWT, per-key rate limiting, multi-tenant auth (reverse-proxy / API-gateway territory).
 
   The web chat UI item remains in TODO but was restructured as two independent opt-in variants (`CHIMERA_WEBUI_EMBED` = xxd-baked single binary; `CHIMERA_WEBUI_PATH` = `--public-path` static-file serving). Both gated on a new `manage.py build --webui` step that pulls in the Node toolchain only when requested.
@@ -731,16 +986,22 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - Token-based chunking for `chimera index ingest` + `POST /v1/vector_stores/:name/files`. The previous character-window splitter (with sentence-boundary nudge) is gone; chunks are now sized in tokens of the loaded embedding model's vocab via `chimera_embed::chunk_by_tokens`. Default 512 tokens with 64-token overlap — matches the input limit of common encoders (bge-small, gte-small). Tokens are decoded once per source via `llama_tokenize`; each chunk is `detokenize`'d back to text. Eliminates the 400–800-token variance of the old proxy and ensures chunks always fit through `embed()` without truncation.
 
 - Per-collection chunk + distance knobs. `collections` gains three new columns (`distance`, `chunk_tokens`, `chunk_overlap`) in schema v3, set at `chimera index create` time and read by `chimera index ingest` / the equivalent serve route unless the caller overrides on the command line. New flags:
+
   - `chimera index create --distance cosine|l2|l1` — picks the sqlite-vec `distance_metric` baked into the per-collection `vec_<id>` virtual table. Default cosine (right for L2-normalized embeddings, which is also the default `chimera embed --normalize=true`). Validated at create time; invalid values get a `BadInput` error.
+
   - `chimera index create --chunk-tokens N --chunk-overlap N` — collection-wide defaults.
+
   - `chimera index ingest --chunk-tokens N --chunk-overlap N` — per-call overrides; otherwise use whatever the collection row recorded.
+
   - `POST /v1/vector_stores` body now accepts `distance`, `chunk_tokens`, `chunk_overlap`; `/v1/vector_stores/:name` and `GET /v1/vector_stores` surface them under `meta`.
 
   Schema v3 backfills existing rows with cosine/512/64 via `ALTER TABLE … ADD COLUMN … NOT NULL DEFAULT …`, so users upgrading from v1 / v2 DBs get sensible defaults without touching the DB.
 
   New public API:
   - `chimera_embed::Embedder::tokenize / detokenize / n_ctx`
+
   - `chimera_embed::TokenChunk` + `chunk_by_tokens(text, embedder, chunk_tokens, overlap_tokens)`
+
   - `chimera_vector_store::CreateOptions`, `is_valid_distance`
 
 - Persistent embedding cache. New `--cache-embeddings` flag on `chimera embed`, `chimera index ingest`, `chimera search`, and `chimera serve` memoizes `embed(text) -> vector` to SQLite (the `embedding_cache` table added in schema v2) so repeated work skips the model. Key: `(model_id, sha256(text))`. `model_id` is a fast fingerprint of the embedding model file (SHA-256 of `size || first 64 KB || last 64 KB`); GGUFs store metadata in the header, so this catches re-quantization, re-training, and architecture swaps without our code tracking model names. Vectors are stored as raw little-endian float32 blobs and round-trip bit-identical. Default OFF — cache rows take real disk (`dim*4 + 32` per row; 384-dim float32 ≈ 1.5 kB; 100k entries ≈ 150 MB) so users opt in.
@@ -782,9 +1043,13 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Added
 
 - `chimera info` subcommand: prints chimera version + platform tag, then one block per bundled component:
+
   - **llama.cpp**: version, ggml version + commit, the primary backend chimera was built with, the full list of registered ggml backends, enumerated ggml devices with type tags (`GPU` / `CPU` / `ACCEL` / `IGPU`), and the four `llama_supports_*` capability flags (GPU offload, MMAP, MLOCK, RPC).
+
   - **whisper.cpp**: version, ggml version, parsed CPU features from `whisper_print_system_info()`.
+
   - **stable-diffusion.cpp**: version, ggml version, parsed CPU features from `sd_get_system_info()`.
+
   - **sqlite + sqlite-vec**: versions.
 
   Output shape matches cyllama's `info` subcommand so users hopping between the native binary and the Python sibling see one familiar format. Useful artifact for bug reports — a single command captures every version and backend chimera saw at link time and at startup.
@@ -792,90 +1057,141 @@ All notable changes to chimera will be documented in this file. Format is loosel
   Two new helper headers (`chimera_whisper.h::whispercpp_version` etc., `chimera_sd.h::sdcpp_version` etc.) expose the per-library accessors through the per-modality TUs, avoiding the ggml.h cross-library collision. `chimera_sd.cpp` forward-declares `ggml_version` rather than including ggml.h.
 
 - `chimera serve` phase 5: server-side chat persistence + the OpenAI Responses API.
+
   - `--persist-chats` opts the chat-completions endpoint into per-request DB writes. Implementation is a wrapper around `routes.post_chat_completions` (`make_persisting_chat_handler`) that doesn't change the response — clients see exactly the same bytes as before — but saves a copy to the `chats` + `messages` tables after each successful exchange.
+
   - **Streaming SSE is handled**, not just non-streaming JSON. The wrapper replaces `res->next` with a closure that mirrors each chunk into a `shared_ptr<std::string>` buffer while still returning it to the client. When `next` returns false (stream end) the buffered SSE is parsed event-by-event, `delta.content` + `delta.reasoning_content` are concatenated, and the result is persisted.
+
   - Errors in the persistence path are caught + logged to stderr; they never break the client's HTTP response.
+
   - The DB is shared with the CLI's `chat --persist` and with `--enable-rag` — same `$CHIMERA_DB` / platform default; override with `--chat-db`.
+
   - **`POST /v1/responses` is now bound** (`routes.post_responses_oai`). This was deferred in the original "group A" server work because chimera serve was stateless across requests; phase 5 partially lifts that constraint. The Responses API itself is still stateful *within a single chimera serve invocation* — server-context holds thread state in-process and loses it on restart — but the underlying chat-completions traffic is persisted when `--persist-chats` is on, so audit-log use cases work.
+
   - One chat row per request, by design. The OpenAI API has no chat id concept, so multi-turn clients (which resend the full conversation each request) produce N overlapping rows. The duplication is the cost of staying API-compatible; phase 6+ may add an `X-Chimera-Chat-Id` header.
 
 - `chimera serve` phase 4: OpenAI-shaped vector-store / RAG routes backed by the SQLite + sqlite-vec layer from phases 1–2. Opt-in via `--enable-rag <embedding.gguf>`; the SQLite DB is shared with the CLI (`$CHIMERA_DB` or the platform default; override with `--rag-db`). Six new routes on the same `server_http_context` that hosts the LLM + audio + image endpoints:
+
   - `GET  /v1/vector_stores` — list
+
   - `POST /v1/vector_stores` — create. Body: `{"name": "..."}`.
+
   - `GET  /v1/vector_stores/:name` — stats (doc count, dim, embedding model, created_at).
+
   - `POST /v1/vector_stores/:name/delete` — drop. **POST**, not DELETE — see below.
+
   - `POST /v1/vector_stores/:name/files` — ingest. Accepts either a multipart `file` upload (treated as UTF-8 text; `filename` becomes the `source_uri`) or a JSON body `{"text": "...", "source_uri": "..."}`. Chunks via the same character-window splitter the CLI uses (2048/256 default), embeds each chunk through the shared `Embedder`, inserts into `documents` + the per-collection `vec_<id>` virtual table.
+
   - `POST /v1/vector_stores/:name/search` — KNN. Body `{"query": "...", "k": 5}`. Returns top-k hits with `text`, `source_uri`, `chunk_index`, `distance`.
 
   Implementation:
   - One `Embedder` per server, serialized on `RagContext::embedder_mutex` (same pattern as whisper / SD). SQLite connections are **opened per request** rather than pooled — open is microseconds in WAL mode, so the pool ceremony isn't worth it.
+
   - One embedding model per server in this cut. If a collection's recorded `embedding_model` doesn't match what `--enable-rag` loaded, ingest and search return a clear 400 pointing at the flag. Multi-model would be Phase 4.1.
+
   - `chimera_serve.cpp` got a `RagContext` struct, six handler factories (`make_vs_*_handler`), and a local `serve_chunk_text` duplicating the CLI's chunker (one extra call site isn't worth promoting the helper to a shared header).
 
   **Two server-http warts surfaced and worked around:**
   - `server_http_context` only exposes `get()` and `post()` (the wrapped subset of cpp-httplib). Adding DELETE would mean patching our vendored `server-http.cpp`, which becomes a per-llama.cpp-version maintenance burden. So drop is `POST :name/delete`. OpenAI SDK clients sending `DELETE /v1/vector_stores/{id}` need to be reconfigured; documented in `docs/dev/server.md` § 4.3a and `docs/serve.md`.
+
   - Upstream's `server-http.cpp:140` `set_error_handler` unconditionally overwrites response bodies on status 404 with a generic `"File Not Found"` payload. To keep our specific error messages visible ("no such collection: 'missing'"), those errors return **400** (`invalid_request_error`) instead. Defensible semantically — the URL pattern matched, the named resource inside it didn't.
 
 - Persistent chat history (phase 3 of `docs/dev/sqlite.md`). The secondary driver for embedding SQLite — `chimera chat` sessions can now be saved, listed, searched, and resumed across invocations. The data lives in the same `chimera.db` as the vector store from phase 2.
 
   New flags on the `chat` subcommand:
   - `--persist` opts a session into per-turn DB writes. Off by default so existing users see no behavior change. Each turn (user, then assistant) becomes one row in `messages`, with reasoning content (text between `<think>...</think>`) captured into the `messages.reasoning` column. The chat row is created on session start with `model_path`, `model_alias`, and the system prompt.
+
   - `--resume <id|last>` loads a previously-saved chat by id or grabs the most recently-updated one. The full message history is replayed into the in-memory `history` vector before the main loop, so the first turn after resume picks up where the previous session ended. If `-m` is omitted, the model path is taken from the saved chat row.
+
   - `--list` (print-and-exit) shows recently-active chats with message counts and model aliases. No model load required.
+
   - `--search QUERY` (print-and-exit) runs FTS5 over `messages_fts` with `[word]`-marked snippet highlights. No model load required.
+
   - `--db <path>` overrides the default DB location for any of the above; otherwise `$CHIMERA_DB` or the XDG default applies.
 
   Slash-command interactions in persistent mode:
   - `/clear` starts a fresh chat row instead of wiping the active one. The old chat stays in the DB; you can find it via `--list`.
+
   - `/regen` deletes the trailing assistant message(s) from the DB so the next attempt replaces them cleanly.
 
   Implementation:
   - New `src/chimera/chimera_chat_store.{h,cpp}` is the SQL layer: `create_chat`, `append_message`, `delete_last_message`, `load_chat`, `load_messages`, `list_chats`, `latest_chat`, `set_chat_title`, `touch_chat`, `search_messages`. Each multi-statement write is wrapped in a transaction.
+
   - `chat_sample_loop` gained an optional `std::string * out_reasoning` output parameter so reasoning can be persisted; existing callers that don't pass it are unaffected.
+
   - `chimera chat -m` is no longer marked `required()`; the print-and-exit and `--resume` paths fill the gap with their own validation.
+
   - `scripts/test.sh` exercises `--persist` → `--list` → `--search` in one go with a unique-token query.
 
   Phase 3 scope limits (also listed in `docs/dev/sqlite.md` § 11):
   - **Ctrl-C mid-stream**: interrupted assistant turns are not saved. The DB stays consistent (no partial-message row), but the in-flight text is lost.
+
   - **Media on resume**: attached image / audio paths are serialized into `messages.media_json` for forensics, but `--resume` does not auto-reattach them. The replayed conversation has the text
+
     - media-marker placeholders; the model sees only the text.
+
   - **Cross-model resume**: warned, not blocked. If you resume a chat under a different model than it was saved with, a `note:` line prints and the session continues anyway. The chat template is taken from the *new* model.
+
   - **Reasoning tokens count toward the next turn**: chat history stores only `content` for replay (`messages.reasoning` is for record-keeping, not for re-priming the KV cache).
 
 - Vector store / RAG (phase 2 of `docs/dev/sqlite.md`). The primary driver feature for embedding SQLite — chimera can now build a personal RAG index entirely against local models, no server required. New CLI surface:
+
   - `chimera index create -n <name> -e <embedding.gguf>` loads the embedding model briefly to discover its `n_embd` and records a collection with that dim plus the model path. Creates a per-collection `vec_<id>` virtual table at the right size.
+
   - `chimera index ingest -n <name> -f <file>` (repeatable) or `-g <glob>` chunks each input with a character-window fixed-overlap chunker (defaults: 2048/256, configurable via `--chunk-chars` / `--chunk-overlap`; sentence-boundary nudge picks pleasant split points). One `Embedder` is reused across the whole batch so model load happens once, not per file. Each chunk lands as one row in `documents` and one row in the `vec_<id>` virtual table, with the same rowid so KNN results join trivially.
+
   - `chimera index list / stats / drop` for browsing and teardown. Drop is FK-cascading on documents + explicit DROP for the vec0 table inside one transaction.
+
   - `chimera search -n <name> -q <text> -k <n>` loads the collection's recorded embedding model, embeds the query, runs the vec0 KNN query, and prints top-k chunks with distance + source URI + chunk index.
+
   - `scripts/test.sh` ingests a three-passage corpus and confirms the top-1 hit on a targeted query — verifies end-to-end that sqlite-vec
+
     - the embedding model + the chunker + the SQL plumbing all line up.
 
   Refactors under the hood:
   - `src/chimera/chimera_embed.{h,cpp}` extracts the embedding loop from `command_embed`'s inline implementation into a reusable `Embedder` class. The CLI `embed` subcommand still passes its existing test; the new code path runs the same inference logic via the new class. Per-call `llama_memory_seq_rm(... 0, -1)` clears the previous sequence so reusing an `Embedder` across many chunks doesn't accumulate state.
+
   - `src/chimera/chimera_vector_store.{h,cpp}` is the SQL layer: create/drop/find/list/insert_document/search. Each function finalizes prepared statements via a tiny `StmtGuard` RAII helper, wraps multi-statement work in transactions, and binds vectors as raw float blobs (cheaper than the JSON-string form sqlite-vec also accepts).
 
   Phase 2 scope limits, all in `docs/dev/sqlite.md`:
   - Chunking is character-based, not token-based. The 2048-char default lands at ~500 tokens for English; bigger if your text is code-heavy. Token-based chunking deferred (§ 11.4).
+
   - One embedding model per collection — recorded at create time and enforced at ingest. Re-indexing with a different model means dropping and recreating; the dim mismatch is caught with a clear error.
+
   - No re-ingest deduplication — running `ingest` twice on the same file produces duplicate chunks. Caller-managed.
 
 - Embedded SQLite + sqlite-vec (phase 1 of the plan in `docs/dev/sqlite.md`). No user-visible behavior change yet beyond a new diagnostic subcommand; this phase lays the rails for the vector-store + RAG features (phase 2) and the cross-session chat history feature (phase 3).
+
   - `scripts/manage.py` learns two new builders (`SqliteBuilder`, `SqliteVecBuilder`) that vendor the SQLite amalgamation (pinned `3.47.0`, downloaded from sqlite.org) and sqlite-vec's single-translation-unit source (pinned `v0.1.6`, fetched from asg017/sqlite-vec). Both land under `thirdparty/<name>/{include,src-aux}/` following the same pattern used for `server-http.cpp`; neither is built as a separate library — chimera compiles `sqlite3.c` and `sqlite-vec.c` directly into its own target.
+
   - CMakeLists adds SQLite compile-time tuning flags (`SQLITE_DQS=0`, `SQLITE_THREADSAFE=2`, `SQLITE_ENABLE_FTS5`, etc. — full list with rationale in `docs/dev/sqlite.md` § 2). `SQLITE_CORE` is set so sqlite-vec.h uses the in-process-API include path rather than the loadable-extension function-pointer routing.
+
   - `target_compile_options(chimera PRIVATE ${CXX_COMPILE_OPTIONS})` was gated to `$<COMPILE_LANGUAGE:CXX>` — `-std=c++17` is now applied only to .cpp sources so the .c files (sqlite3, sqlite-vec) build cleanly.
+
   - New `src/chimera/chimera_db.{h,cpp}` exposes a small public API: `Connection` (RAII wrapper), `default_path()` (XDG-compliant resolver honoring `$CHIMERA_DB`, `$XDG_DATA_HOME`, then `~/Library/Application Support/chimera/` on macOS, `~/.local/share/chimera/` on Linux, `%LOCALAPPDATA%\chimera\` on Windows), `open_and_migrate()` (opens with WAL + foreign keys + sqlite-vec auto-extension and walks `PRAGMA user_version` forward), `latest_schema_version()`, `list_tables()`, and version-string accessors.
+
   - V1 schema lands: `chats` + `messages` + `messages_fts` (FTS5 mirror with INSERT/UPDATE/DELETE triggers) + `collections` + `documents`. Per-collection `vec0` tables are deliberately *not* created in this migration — they're created on demand in phase 2 when collections are first declared via `chimera index create`.
+
   - New `chimera db status` subcommand opens the DB, runs migrations, and prints a human-readable summary: path, compile-time vs runtime sqlite-vec version (the runtime check actually executes `SELECT vec_version()` to verify the extension loaded — proves `sqlite3_auto_extension(sqlite3_vec_init)` worked, not just that the symbol linked), schema version, table list.
+
   - `chimera --version` adds two lines for sqlite + sqlite-vec versions next to the existing llama.cpp / whisper.cpp / sd.cpp lines.
+
   - Binary size grows ~1.5 MB (sqlite3.c) + ~60 KB (sqlite-vec.c).
 
 - `chimera serve`: bind the "group A" server-context routes that were previously deferred. All are pre-built lambdas on `server_routes`; this is a route-registration change with no new handler logic. Newly always available, regardless of `--enable-*` flags:
+
   - `GET /metrics` — Prometheus-style telemetry. `params.endpoint_metrics` is forced to `true` in `build_common_params` so the route works without extra flags.
+
   - `GET /props` — read-only introspection (chat template, mmproj caps, default sampling params). `POST /props` deliberately *not* bound — runtime mutation of server state conflicts with chimera's "the CLI is the config" stance.
+
   - `POST /chat/completions` — legacy unprefixed path, same handler as `/v1/chat/completions`. Free compat for older OpenAI clients.
+
   - `POST /v1/messages`, `POST /v1/messages/count_tokens` — Anthropic Messages API compat. Lets the Anthropic Python SDK and claude-code-shaped clients point at chimera serve unchanged.
+
   - `POST /infill` — fill-in-the-middle for code models (continue.dev, llama.vim). Returns 501 on chat models without FIM tokens, which is the right behavior.
+
   - `POST /tokenize`, `POST /detokenize` — vocab helpers. Useful for clients that don't bundle a tokenizer (token counting before send) and for general debugging.
+
   - `POST /apply-template` — render the chat template against a `messages[]` array without generating. Pure debugging value.
 
   The "deliberately NOT bound" list in `docs/dev/server.md` § 4.4 now contains only the routes that have a real reason to be skipped: legacy non-`/v1` completion/embedding variants (redundant), `POST /props` (stateful), `POST /v1/responses` (stateful by design), `/rerank`, `/slots*`, `/lora-adapters*` (niche; bind on request).
@@ -884,14 +1200,18 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
   **Routes:**
   - `POST /v1/images/generations` — txt2img. Application/json body with `prompt` (required), `n`, `size` (`"<W>x<H>"`), `response_format`, plus SD-specific fields (`negative_prompt`, `steps`, `cfg_scale`, `seed`, `sample_method`, `scheduler`).
+
   - `POST /v1/images/edits` — img2img / inpaint. Multipart upload with `image` (required) and optional `mask`; same JSON fields as `generations` plus `strength`.
+
   - `POST /v1/images/variations` — img2img with no prompt. Multipart upload with `image` only.
 
   **Architecture note**: like phase 2 (audio), this does NOT bind a server-context handler — there isn't one for image generation upstream. We register chimera-owned handlers on the shared `server_http_context` alongside the LLM routes, the same way llama-server registers its own non-LLM routes (CORS proxy, /tools, GCP compat).
 
   **Phase 3 scope limits**:
   - **response_format**: `b64_json` only (the default). `url` returns HTTP 400 with a clear message — chimera serve has no static-file backend to host generated PNGs from.
+
   - **Request fields ignored**: `model` (we have one loaded, no selection), `user` (OpenAI uses this for abuse tracking; we don't), `quality`/`style` (DALL-E-3 fields without obvious SD analogs).
+
   - **No prompt streaming**: SD step-by-step progress goes to stderr (as in the CLI), not to the HTTP client. The OpenAI spec doesn't define SSE for images either.
 
   **Refactor under the hood**: same shape as the phase-2 whisper refactor. `src/chimera/chimera_sd.h` (new) exposes a public API in the `chimera_sd::` namespace: `load_model`, `decode_image_bytes`, `decode_image_file`, `encode_png`, `save_png_file`, plus `GenerateRequest`/`PixelImage` types and the `generate` entry point. `chimera_sd.cpp` was rewritten as the implementation of those helpers; `command_sd` is now a thin caller of `chimera_sd::generate` that adds the CLI-only conveniences (numbered output paths, stderr progress). CLI behavior is preserved — both `sd` and `sd img2img round-trip` tests still pass.
@@ -904,7 +1224,9 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
   **Phase 2 scope limits**:
   - **Audio formats**: WAV (RIFF/WAVE) only. OpenAI's spec also accepts mp3, mp4, mpeg, mpga, m4a, webm — those need a real decoder (libsndfile + libavcodec, or single-header dr_mp3/dr_flac). Requests with non-WAV uploads return HTTP 415 with a descriptive error.
+
   - **Request fields ignored**: `model` (we have one loaded, no selection), `temperature` (whisper doesn't expose a comparable knob), `timestamp_granularities[]` (segment-level timing is always returned in `verbose_json`; word-level would require enabling `params.token_timestamps`).
+
   - **Translation route**: `POST /v1/audio/translations` is not yet bound. Trivial follow-up — set `translate=true` in the `TranscribeRequest`. Currently the only way to translate is via the CLI's `chimera whisper --translate`.
 
   **Refactor under the hood**: `chimera_whisper.cpp` now exposes a public API in the new `chimera_whisper.h` (`load_model`, `load_wav_file`, `load_wav_bytes`, `resample_linear`, `transcribe`, `format_timestamp_10ms`) inside the `chimera_whisper::` namespace. `command_whisper` was rewritten as a thin caller of those helpers, preserving its existing streaming output behavior under `--timestamps`. While extracting the transcribe loop I noticed and fixed a latent bug: setting `whisper_full_params.detect_language = true` puts whisper into a language-id-only mode that returns without transcribing — `language="auto"` now correctly resolves via `params.language = "auto"` alone. The bug was unreachable from the CLI's default `language="en"`, so no existing test caught it; the HTTP handler exercises it by default.
@@ -913,9 +1235,13 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
   **Exposed routes:**
   - `GET /health`, `GET /v1/health` — liveness probe
+
   - `GET /v1/models` — list loaded model + aliases
+
   - `POST /v1/chat/completions` — Chat Completions, streaming + non-streaming SSE
+
   - `POST /v1/completions` — legacy OpenAI text completions
+
   - `POST /v1/embeddings` — embeddings (requires `--embeddings`)
 
   **Deliberately NOT exposed in phase 1** (all live on `server_routes` and could be enabled with a one-line `ctx_http.post(...)` call — the omission is a scope choice, not a missing capability): `GET /metrics`, `GET/POST /props`, `POST /completion`/`/completions` (legacy non-/v1 variants), `POST /chat/completions` (non-/v1), `POST /v1/responses`, `POST /v1/audio/transcriptions`, `POST /v1/messages` + `/count_tokens` (Anthropic compat), `POST /infill`, `POST /embedding`/`/embeddings` (non- /v1 variants), `POST /rerank` + `/v1/rerank`, `POST /tokenize` + `/detokenize`, `POST /apply-template`, `GET/POST /slots*`, `GET/POST /lora-adapters`. Server-mode features also skipped: router/multi-model mode, built-in tools (EXPERIMENTAL upstream), MCP CORS proxy (EXPERIMENTAL), GCP/Vertex AI compat, embedded Web UI (manage.py passes `LLAMA_BUILD_WEBUI=OFF` to skip baking the ~11 MB asset bundle), child-server sleeping notifications, SSL/TLS (run behind a reverse proxy).
@@ -924,7 +1250,9 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
   **Build-system changes** to support this:
   - `scripts/manage.py` now passes `LLAMA_BUILD_SERVER=ON`, `LLAMA_BUILD_WEBUI=OFF` so the `server-context` static lib target is defined without baking the Web UI. Builds the new `server-context` + `cpp-httplib` targets, copies `libserver-context.a` + `libcpp-httplib.a` to `thirdparty/llama.cpp/lib/`, copies `tools/server/server-*.h` headers to `thirdparty/llama.cpp/include/`, copies cpp-httplib's single header into `thirdparty/llama.cpp/include/cpp-httplib/` (server-http.cpp includes it as `<cpp-httplib/httplib.h>`), and stashes `server-http.cpp` under a new `thirdparty/llama.cpp/src-aux/` directory that chimera's CMake compiles into its own target.
+
   - Top-level `CMakeLists.txt` adds `find_package(OpenSSL REQUIRED)` (cpp-httplib is built with TLS support) and links `OpenSSL::SSL OpenSSL::Crypto`. On macOS the Security and CoreFoundation frameworks are linked alongside (cpp-httplib reads trust anchors from the system keychain via `SecCertificateCopyData` / `SecTrustCopyAnchorCertificates`).
+
   - `src/chimera/llama_build_info_shim.cpp` gains `llama_build_info()` (returns `"chimera"`); previously only the `llama_build_number` / `llama_commit` / `llama_compiler` / `llama_build_target` symbols were stubbed. server-context and llama-common both reference it.
 
 ## [0.1.1]
@@ -932,39 +1260,65 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Added
 
 - `chat`: slash commands, multimodal input, tab completion, color, and a background spinner during model load. New commands: `/help` (lists available commands), `/regen` (drops trailing assistant turns and re-samples), `/clear` (resets history + KV + attached media), `/read <file>` and `/glob <pattern>` (attach text to the next user message), and `/image <file>` / `/audio <file>` (attach media when `--mmproj` is provided). `/exit` and `/quit` remain. Banner at startup prints `build`, `model`, and `modalities`, then a hint pointing at `/help`.
+
 - `chat`: tab completion via linenoise's completion callback. Completes the slash-command word; for `/read`, `/glob`, `/image`, `/audio` it falls through to filesystem completion against the partial path. `/image` and `/audio` are only listed and completed when the loaded mmproj advertises the corresponding modality (`mtmd_support_vision` / `mtmd_support_audio`).
+
 - `chat`: multimodal turns. `--mmproj <gguf>` enables `/image` and `/audio`; pending media markers (one `mtmd_default_marker()` per attachment) are inserted before the next user line. Once any media is attached, the loop switches from the text-only KV-prefix-reuse path to a "rebuild every turn" mtmd path (the entire templated conversation is re-tokenized as `mtmd_input_chunks` and re-evaluated via `mtmd_helper_eval_chunks` on each turn — correct but O(history)).
+
 - `chat`: ANSI color via the new [rang](https://github.com/agauniyal/rang) single-header dep at `thirdparty/rang.hpp`. Controlled by `--color {auto,always,never}` (default `auto`, falls through to `rang::setControlMode`). Concrete colors are routed through a semantic-tag layer (`enum class Sem { Reset, User, Cmd, Think, Stats, Info, Err }` plus one `operator<<` switch), so re-skinning chat is a single-site edit. The `>` prompt and user-typed input render green (SGR emitted around `linenoise_read`, not inside the prompt string — ANSI bytes in the prompt break linenoise's `utf8_str_width` math and corrupt the cursor under multi-line edits), `/help` references are cyan, info notices dim, errors bold red. Per-turn `[ Prompt: X t/s | Generation: Y t/s ]` line in magenta, timed with `std::chrono::steady_clock` around the prompt decode and the sample loop.
+
 - `chat`: thinking-text rendered grey. Replies stream through `common_chat_parse` with `reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK`; after each sampled token the running text is re-parsed and diffed via `common_chat_msg_diff::compute_diffs`, so `reasoning_content_delta` (text inside `<think>...</think>`) prints grey while `content_delta` prints in the default color. Only the content portion is stored in chat history — the next turn's templating does not reinject the model's prior thinking. Matches llama-cli's behavior.
+
 - `chat`: background spinner on stderr during `load_llama_model` and optional `mtmd_init_from_file`. Auto-disables when stderr is not a TTY so piped logs stay clean.
+
 - Optional [linenoise](https://github.com/shakfu/linenoise) integration for `chat`. When `liblinenoise.a` is present under `thirdparty/`, interactive sessions get readline-style line editing, history (↑/↓, `Ctrl-R`), and basic editing keys (`Ctrl-A`/`Ctrl-E`/word jumps). History persists at `$CHIMERA_HISTORY` (override) or `$HOME/.chimera_chat_history`. Engaged only on a TTY — piped/redirected stdin falls back to `getline`, so scripts and the test suite are unaffected. Controlled by CMake option `CHIMERA_LINENOISE` (`AUTO` / `ON` / `OFF`; default `AUTO`); when ON and the lib is missing, configure fails with a pointer to `manage.py build -L`. Linenoise source is pinned at `master` (commit `06552a1de6` at integration time).
+
 - `gen` multimodal input via `--mmproj <path>` + `--image <path>` (repeatable). Uses `mtmd_init_from_file` + `mtmd_helper_eval_chunks` to evaluate text + image chunks into the llama context, then runs the existing sample loop. Auto-prepends the default media marker once per `--image` if the user did not place it themselves; auto-wraps the prompt in the model's chat template (VL models are typically instruct-tuned and stall without it). The vision encoder runs on the default backend (Metal on macOS) -- ~16 s end-to-end for a 512x512 image on gemma-4-E4B + its mmproj.
+
 - `chat`: persistent KV cache across turns. The llama_context and sampler are now built once at session start; each turn re-templates the conversation, finds the longest common prefix against what's already resident in the KV cache, rewinds via `llama_memory_seq_rm`, and only decodes the tail. The previous implementation rebuilt the context per turn, paying full prompt re-decoding cost each time.
+
 - `sd` img2img and inpainting via stable-diffusion.cpp's existing `init_image` / `mask_image` fields. New flags: `--init-image <path>`, `--mask-image <path>` (requires --init-image), `--strength` (default 0.75). When `--init-image` is supplied, the SD context is built with `vae_decode_only=false` so the encode path is available. Image dimensions must match `-W,-H` (no internal resizing). Verified via a test that round-trips a freshly-generated image through img2img.
+
 - `make install` / `make uninstall` targets honoring `PREFIX` (default `/usr/local`) and `DESTDIR` (for staged packaging). `make rebuild` added as a `--target chimera` shortcut that skips `make deps`.
+
 - CI workflow (`.github/workflows/ci.yml`): builds + smokes on `macos-14` (arm64, Metal), `ubuntu-latest` (x86_64, CPU), and `windows-latest` (x86_64, MSVC; marked `continue-on-error: true` while the path is shaken out) on every push and PR to `main`. Uploads per-platform binaries + `.sha256` companion files as workflow artifacts. Caches `thirdparty/` keyed on `scripts/manage.py` + top-level CMake files. Default shell is bash on every leg so the Makefile / `scripts/test.sh` work uniformly via git-bash on Windows.
+
 - Release workflow (`.github/workflows/release.yml`): triggered on `v*` tags (or manual `workflow_dispatch`). Rebuilds the same matrix and attaches `chimera-macos-arm64`, `chimera-linux-x86_64`, plus `.sha256` checksums to a GitHub Release.
+
 - `tokenize` subcommand: emit token ids for a prompt (one per line, or `--pieces` for `id<TAB>piece` rows). Reads prompt from `-p`, `-f <file>`, or `-f -` (stdin). Useful for debugging vocab and template behavior without running generation.
+
 - `embed` subcommand: emit a single embedding vector (space-separated floats) for a prompt via a GGUF embedding model. Options: `--pooling` (mean/cls/last/none, default mean), `--no-normalize`, `-c/--ctx-size`, `-b/--batch-size`, `-t/--threads`, `--gpu-layers`. Verified against `bge-small-en-v1.5-q8_0.gguf`.
+
 - `-f, --prompt-file <path>` on `gen` and `tokenize` / `embed`. Reads the prompt from a file; `-` reads stdin. Mutually exclusive with `-p`.
+
 - `--system-prompt-file <path>` on `chat`. Reads the system prompt from a file; mutually exclusive with `--system`.
+
 - Structured exit codes (`ExitCode` enum + `ChimeraError`): `1` runtime, `2` bad input, `3` model-load failure, `4` generation failure. CLI11 parse errors still return CLI11's own codes (>= 100). Documented at the top of `chimera.h`.
+
 - Whisper streaming: each finalized segment is printed as whisper.cpp produces it (via `new_segment_callback` + `whisper_full_*_from_state` accessors), instead of buffering until `whisper_full` returns.
+
 - SD progress callback: prints `sd: step N/M` to stderr (one carriage return per update, newline on completion). Stdout still receives only the produced PNG paths, so pipelines stay clean.
+
 - `make test` / `make smoke` targets backed by `scripts/test.sh`. Smoke tier exercises `--version`, `--help` on the root and every subcommand, and confirms that `gen` without `-m` exits non-zero. End-to-end tier runs `gen` (Llama-3.2-1B), `whisper` (ggml-base.en + whisper.cpp's bundled `jfk.wav`), and `sd` (sd_xl_turbo) when those model files are present under `models/`; missing models are reported as SKIP, not FAIL.
+
 - `REVIEW.md`: architecture / feature / usability / best-practices review of the 0.1.0 baseline.
 
 ### Fixed
 
 - `whisper` defaulted `language = nullptr` + `detect_language = true` when `-l` was omitted, which sometimes mis-detected English-only `.en` models as Azerbaijani (p < 0.02) and produced empty output. Now leave whisper.cpp's default (`"en"`) in place unless the user passes `--language auto` or an explicit code.
+
 - `whisper` crashed with `error: vector` when `--threads` was left at its default of `-1`. The value was forwarded to `params.n_threads`, which whisper.cpp then cast to `size_t` to size an internal `std::vector`, triggering `std::length_error("vector")`. Now leave `params.n_threads` at `whisper_full_default_params`'s value unless the user passed a positive override.
 
 ### Changed
 
 - `stb_impl.cpp` no longer defines `STB_IMAGE_IMPLEMENTATION`. Reason: libmtmd's `mtmd-helper.o` ships its own non-static `stbi_load`, which would duplicate-symbol on link the moment any `mtmd_helper_*` is referenced. `chimera_sd.cpp`'s `stbi_load` / `stbi_image_free` calls now resolve against libmtmd's copy (libmtmd is unconditionally linked for the `gen` mtmd path). `stb_image_write` is still ours.
+
 - `fail()` and `trim()` were duplicated across `chimera.cpp`, `chimera_whisper.cpp`, and `chimera_sd.cpp`. Pulled into `chimera.h` as inline helpers so all three TUs share one definition. The helpers don't pull in `ggml.h`, so the three-TU isolation is preserved.
+
 - `scripts/manage.py` trimmed of cyllama-specific code (wheel building, Cython artifact cleanup, `profile` / `bench` / `bump` / `bins` / `check-vendor` / `fix-macos-vulkan-wheel` / `write-build-config` / `status` / `test` subcommands, dynamic-wheel `build_shared` / `download_release` / macOS dylib rpath sanitization / MSVC import-lib generation, dynamic-lib path machinery, `pip_install` / `apt_install` / `brew_install` helpers, `STABLE_BUILD` env split). ~3170 -> ~1210 lines. Retained subcommands: `build`, `info`, `clean`, `download`. `-D/--deps-only` kept as a no-op for Makefile compatibility.
+
 - `--help` output: compact spacing (short + long flags packed together via `long_option_alignment_ratio(0.0f)`; explicit `usage()` string and a `CompactFormatter` that trims `make_usage`'s trailing `"\n\n"` to `"\n"` so section breaks are single blank lines).
+
 - Top-level description tightened to `chimera - {llama,whisper,stable-diffusion}.cpp multitool`.
 
 ## [0.1.0]
@@ -972,16 +1326,25 @@ All notable changes to chimera will be documented in this file. Format is loosel
 ### Added
 
 - Initial repository, extracted from [cyllama](https://github.com/shakfu/cyllama).
+
 - Static multitool executable bundling llama.cpp, whisper.cpp, and stable-diffusion.cpp against a single shared ggml backend set.
+
 - Subcommands: `gen` (one-shot completion), `chat` (interactive), `whisper` (WAV transcription), `sd` (text-to-image).
+
 - Top-level `-v,--verbose` flag; native backend logging silenced by default.
+
 - Three-TU layout (`chimera.cpp` / `chimera_whisper.cpp` / `chimera_sd.cpp`) to isolate the colliding `ggml.h` headers shipped by llama.cpp and whisper.cpp.
+
 - Late `llama_backend_init()`: deferred until after CLI parsing so `--help` and parse errors do not trigger `ggml_load_backends`.
+
 - `scripts/manage.py` build driver (forked from cyllama, trimmed of Python-binding-specific code paths).
+
 - `make deps` / `make build` / `make clean` / `make reset` wrappers.
+
 - Verified end-to-end on macOS arm64 with Metal backend (Llama-3.2-1B Q8_0 model).
 
 ### Known issues
 
 - Only macOS arm64 + Metal is verified. Linux, Windows, and non-Metal backends are believed to work via the inherited cyllama build matrix but have not been re-validated post-split.
+
 - `whisper` and `sd` subcommands build cleanly but have not been exercised end-to-end in this repo yet.

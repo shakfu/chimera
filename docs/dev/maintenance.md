@@ -9,7 +9,7 @@ missing.
 
 ## Source layout
 
-```
+```text
 CMakeLists.txt                  Top-level: defines LIB_*, SYSTEM_LIBS, etc.,
                                 then add_subdirectory(src/chimera).
 Makefile                        deps + cmake wrapper.
@@ -155,6 +155,7 @@ CHIMERA_TEST_LORA=/models/loras/pixelart.safetensors \
 ```
 
 Behavior:
+
 - All env vars unset → prints a "nothing to do" line and exits 0.
 - A fixture set's env vars are partially set, or point at a missing
   path → exits 2 with a clear "partial or invalid configuration"
@@ -310,6 +311,7 @@ of that.
 Useful when triaging "is this our bug or theirs":
 
 **Vendored (upstream owns the code)**
+
 - llama.cpp: text LLM engine, chat templating, mtmd, OpenAI-API
   handlers in `server_routes`.
 - whisper.cpp: ASR.
@@ -321,6 +323,7 @@ Useful when triaging "is this our bug or theirs":
 - Header-only: nlohmann/json, CLI11, rang, linenoise, stb_image.
 
 **Bespoke (chimera owns)**
+
 - CLI surface: every subcommand and its flags.
 - `chimera serve` wiring: which upstream routes get bound, with what
   overrides, all the per-modality handler factories

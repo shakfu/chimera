@@ -2,6 +2,7 @@
 
 Report date: 2026-05-20
 Upstream versions compared against:
+
 - llama.cpp `b9119` (flag definitions in `common/arg.cpp`, CLI binary in `tools/cli/cli.cpp`)
 - whisper.cpp `v1.8.4` (`examples/cli/cli.cpp`)
 - stable-diffusion.cpp `master-596-90e87bc` (CLI shell in `examples/cli/main.cpp`, model/gen flags in `examples/common/common.cpp`)
@@ -128,7 +129,6 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 All five priorities from the original audit landed on 2026-05-20 (`--flash-attn`, grammar/json-schema, DRY + repeat-last-n, `--lora` in gen/chat, reasoning family). Residual items:
 
 0. ~~**Long-tail gen/chat closer** — 19 flags landed: `--typical`, `--top-nsigma`, `--xtc-probability`/`--xtc-threshold`, `--dynatemp-range`/`--dynatemp-exp`, `--samplers`, `--threads-batch`, `--swa-full`, `--image-min-tokens`/`--image-max-tokens`, `--cpu-moe`/`--n-cpu-moe`, `--override-tensor`/`--override-kv`, full `--control-vector*` family.~~ ✅ Landed 2026-05-20. Four upstream flags (`--keep`, `--ctx-checkpoints`, `--checkpoint-every-n-tokens`, `--cache-ram`) reclassified 🚫 — `--keep` is upstream's context-shift loop (chimera uses KV-prefix reuse; no shift), the other three are server-only `common_params` fields not consumed by the CLI subcommands.
-
 1. ~~**`--reasoning-budget` enforcement**.~~ ✅ Landed 2026-05-20. The earlier "needs `chat_sample_loop` restructure" comment turned out to be wrong on closer reading: `common_sampler_init` itself chains `common_reasoning_budget_init` into the sampler whenever the `sampling.reasoning_budget_{tokens,start,end,forced}` fields are populated, so the integration is entirely upstream of `common_sampler_init` — no sample-loop changes needed. Implementation: `command_chat` probes the active chat template once at startup via a dummy `common_chat_templates_apply`, reads `thinking_{start,end}_tag`, tokenizes with `parse_special=true`, and stuffs the result into the sampling params before `make_sampler`. Forced-termination sequence = `--reasoning-budget-message + thinking_end_tag`. Templates without thinking tags warn and ignore the budget.
 2. ~~**`--list-devices`**~~ ✅ Landed 2026-05-20 as `chimera info --list-devices`.
 3. **`--mmproj-auto`** — not modeled by `mtmd_context_params` at llama.cpp `b9119`. Revisit on next pin bump.

@@ -120,7 +120,7 @@ CHANGELOG `[Unreleased]` for the full design rationale.
 
 ## 4. Architecture
 
-```
+```text
 +--- chimera-desktop (Tauri app) ---------------------------+
 |                                                            |
 |  +----------------------+     +-------------------------+  |
@@ -270,7 +270,7 @@ SvelteKit migration is a multi-quarter event with public signal.
 
 ### 6.3. Shell wraps chat; chimera-specific panels are native shell
 
-```
+```text
 +------------------------------------------------------------+
 | chimera-desktop                                  [_][o][x] |
 +------+-----------------------------------------------+-----+
@@ -337,7 +337,7 @@ it automated is a chimera-side ask.
 Lives in a separate repo (`chimera-desktop`), not under
 `shakfu/chimera`. Sketch:
 
-```
+```text
 chimera-desktop/
   src-tauri/                 Rust shell
     src/

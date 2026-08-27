@@ -14,7 +14,7 @@ work that is still on the table.
 
 ## 1. Architecture at a glance
 
-```
+```text
                                   ┌───────────────────────────────────────┐
 HTTP request                      │ command_serve() in chimera_serve.cpp  │
 ─────────────────────────────────▶│                                       │
@@ -240,10 +240,11 @@ chat-completions handler. `make_persisting_chat_handler` decorates the
 saved to the SQLite `chats` + `messages` tables.
 
 Mechanics:
+
 - The wrapper captures `ChatPersistContext *` (per-server state with
   the DB path + a write mutex) and a copy of the inner handler.
 - On each request it parses the request body for the `messages` array
-  + system prompt + model alias.
+  - system prompt + model alias.
 - For **non-streaming** responses, after the inner handler returns it
   parses `choices[0].message.{content,reasoning_content}` + `usage`
   and saves.
@@ -321,7 +322,7 @@ Server-mode features not wired up:
 
 ## 5. Threading model
 
-```
+```text
 main thread ────────────────────── ctx_server.start_loop()  [blocks until shutdown]
 
 cpp-httplib worker thread #1 ──── handler(req)  ──┐
@@ -338,6 +339,7 @@ cpp-httplib worker thread #N ──── handler(req)  ──┘
 ```
 
 **Why one mutex per modality:**
+
 - `whisper_full` mutates the context's internal state; concurrent calls
   on the same context corrupt that state.
 - `generate_image` is not thread-safe on a shared `sd_ctx_t` (both the

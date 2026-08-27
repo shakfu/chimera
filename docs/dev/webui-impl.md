@@ -110,7 +110,7 @@ stack discipline (§ 5), explicit kill switches (§ 10).
 
 ## 3. Architecture
 
-```
+```text
 chimera serve --public-path webui/ \
               --persist-chats --enable-rag --enable-audio \
               --enable-image --reranking --enable-embeddings <e.gguf>
@@ -330,6 +330,7 @@ Conditional on `--slot-save-path` being set.
 
 - `webui/` lives at the repo root (matches Variant B's location for
   consistency with git history).
+
 - `make webui-serve` is the demo entrypoint:
 
   ```make

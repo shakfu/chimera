@@ -2,7 +2,7 @@
 
 Copy-pasteable one-liners. For prose, see [`serve.md`](serve.md).
 
-```
+```text
 chimera <subcommand> [flags]
 ```
 
@@ -20,8 +20,7 @@ chimera <subcommand> [flags]
 | `db`       | Embedded SQLite management (status, backup, vacuum).        |
 | `info`     | Print versions + ggml backends/devices + CPU features. |
 
-Global: `-v` (verbose backend logs), `-V` (version), `-h` (help).
-Every subcommand also accepts `-h` for its own flags.
+Global: `-v` (verbose backend logs), `-V` (version), `-h` (help). Every subcommand also accepts `-h` for its own flags.
 
 ---
 
@@ -136,7 +135,7 @@ The same sampler / RoPE / multi-GPU / LoRA / grammar flags shown under `gen` als
 
 Slash commands inside the REPL:
 
-```
+```text
 /help                 list commands
 /exit, /quit          quit
 /regen                drop last assistant turn, re-sample
@@ -149,11 +148,7 @@ Slash commands inside the REPL:
 
 History persists at `$CHIMERA_HISTORY` or `~/.chimera_chat_history`.
 
-`--persist` saves message content, reasoning spans (when emitted),
-attached-media paths, token counts, model path, and timestamps to a
-local SQLite DB (see [Privacy / data on disk](#privacy--data-on-disk)).
-Ctrl-C mid-generation stores the partial turn with a `partial=1` flag;
-`--list` shows `(N interrupted)` next to affected chats.
+`--persist` saves message content, reasoning spans (when emitted), attached-media paths, token counts, model path, and timestamps to a local SQLite DB (see [Privacy / data on disk](#privacy--data-on-disk)). Ctrl-C mid-generation stores the partial turn with a `partial=1` flag; `--list` shows `(N interrupted)` next to affected chats.
 
 ---
 
@@ -182,9 +177,7 @@ chimera embed -m bge.gguf -p "..." --no-mmap --mlock     # pin model in RAM
 chimera embed -m bge.gguf -p "..." --load-mode dio        # none|mmap|mlock|dio
 ```
 
-`--load-mode` names llama.cpp's `llama_load_mode` directly and overrides
-`--no-mmap`/`--mlock`; `dio` (direct I/O, where the platform supports it) is
-reachable only this way. Also available on `gen` and `chat`.
+`--load-mode` names llama.cpp's `llama_load_mode` directly and overrides `--no-mmap`/`--mlock`; `dio` (direct I/O, where the platform supports it) is reachable only this way. Also available on `gen` and `chat`.
 
 ---
 
@@ -569,27 +562,17 @@ chimera index ingest -n notes -f doc.md --cache-embeddings
 chimera search       -n notes -q "..." --cache-embeddings
 ```
 
-Chunking is sentence-aware by default: text is split on sentence
-terminators and blank lines, then packed into `--chunk-tokens` budgets
-with `--chunk-overlap` tokens of context carried forward as
-whole-sentence tails. Oversize singleton sentences (run-ons,
-machine-generated text) fall back to a mid-stream token-window cut so
-ingestion never refuses input.
+Chunking is sentence-aware by default: text is split on sentence terminators and blank lines, then packed into `--chunk-tokens` budgets with `--chunk-overlap` tokens of context carried forward as whole-sentence tails. Oversize singleton sentences (run-ons, machine-generated text) fall back to a mid-stream token-window cut so ingestion never refuses input.
 
 Retrieval modes:
 
-- **`semantic`** — vec0 KNN on the embedding, using whatever distance
-  metric the collection was created with (default cosine). Best for
-  conceptual matches that don't share vocabulary with the corpus.
-- **`lexical`** — FTS5 BM25 over the chunk text. Best for exact
-  keyword / proper-noun lookups; skips loading the embedding model.
-- **`hybrid`** *(default)* — runs both, combines by reciprocal-rank
-  fusion (`Σ 1 / (60 + rank_i)`). Strictly improves recall over either
-  leg on typical English prose at the cost of one extra SELECT.
+- **`semantic`** — vec0 KNN on the embedding, using whatever distance metric the collection was created with (default cosine). Best for conceptual matches that don't share vocabulary with the corpus.
 
-Override the DB location: `--db <path>` on any subcommand, or set
-`$CHIMERA_DB` once. The pooling defaults to `mean`; use `--pooling cls`
-for BERT-style models.
+- **`lexical`** — FTS5 BM25 over the chunk text. Best for exact keyword / proper-noun lookups; skips loading the embedding model.
+
+- **`hybrid`** *(default)* — runs both, combines by reciprocal-rank fusion (`Σ 1 / (60 + rank_i)`). Strictly improves recall over either leg on typical English prose at the cost of one extra SELECT.
+
+Override the DB location: `--db <path>` on any subcommand, or set `$CHIMERA_DB` once. The pooling defaults to `mean`; use `--pooling cls` for BERT-style models.
 
 ---
 
@@ -609,13 +592,9 @@ chimera info
 chimera info --list-devices       # one device name per line; pipes into --device
 ```
 
-Prints chimera version, the platform tag, llama / whisper / sd
-version + ggml view + backend registries + enumerated devices, plus
-sqlite + sqlite-vec versions. Useful for bug reports.
+Prints chimera version, the platform tag, llama / whisper / sd version + ggml view + backend registries + enumerated devices, plus sqlite + sqlite-vec versions. Useful for bug reports.
 
-`--list-devices` is a parsing-friendly variant: just the device names
-("CUDA0", "Vulkan1", "CPU", ...), one per line, suitable for piping
-into `--device` on `gen` / `chat` / `embed`.
+`--list-devices` is a parsing-friendly variant: just the device names ("CUDA0", "Vulkan1", "CPU", ...), one per line, suitable for piping into `--device` on `gen` / `chat` / `embed`.
 
 ---
 
@@ -644,8 +623,7 @@ into `--device` on `gen` / `chat` / `embed`.
 
 ## Privacy / data on disk
 
-All write-to-disk features are **opt-in**. Without persistence flags
-chimera runs purely in memory.
+All write-to-disk features are **opt-in**. Without persistence flags chimera runs purely in memory.
 
 | Flag                              | Writes to                            | Records                                                                                  |
 |-----------------------------------|--------------------------------------|------------------------------------------------------------------------------------------|
@@ -656,19 +634,18 @@ chimera runs purely in memory.
 | Linenoise input history           | `$CHIMERA_HISTORY` or `~/.chimera_chat_history` | Every line you type at the `chat` prompt across all sessions. |
 
 Default DB path:
+
 - macOS: `~/Library/Application Support/chimera/chimera.db`
+
 - Linux: `$XDG_DATA_HOME/chimera/chimera.db` or `~/.local/share/chimera/chimera.db`
+
 - Windows: `%LOCALAPPDATA%\chimera\chimera.db`
 
-`chimera serve` never persists request headers, client IPs, API keys,
-or raw HTTP bodies. Nothing leaves the machine — all storage is local.
+`chimera serve` never persists request headers, client IPs, API keys, or raw HTTP bodies. Nothing leaves the machine — all storage is local.
 
-To wipe persisted chats: `sqlite3 chimera.db "DELETE FROM chats;
-DELETE FROM messages;"` (FTS5 triggers cascade). To wipe everything:
-remove `chimera.db`, `chimera.db-wal`, and `chimera.db-shm` together.
+To wipe persisted chats: `sqlite3 chimera.db "DELETE FROM chats; DELETE FROM messages;"` (FTS5 triggers cascade). To wipe everything: remove `chimera.db`, `chimera.db-wal`, and `chimera.db-shm` together.
 
-See [`serve.md`](serve.md#privacy--data-on-disk) for the full table
-of columns and additional notes.
+See [`serve.md`](serve.md#privacy--data-on-disk) for the full table of columns and additional notes.
 
 ---
 

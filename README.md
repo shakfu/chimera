@@ -89,7 +89,7 @@ make build
 
 This will:
 
-1. Run `python scripts/manage.py build --all --deps-only --sd-shared-ggml`, which clones and builds llama.cpp, whisper.cpp, and stable-diffusion.cpp into `thirdparty/<project>/{include,lib}` and vendors the SQLite + sqlite-vec amalgamations into `thirdparty/{sqlite,sqlite-vec}/`. The `--sd-shared-ggml` flag is load-bearing: stable-diffusion.cpp normally vendors its own copy of ggml, which would collide with llama.cpp's at link time. Building all three projects against the single ggml set is what makes the static binary possible.
+1. Run `python scripts/manage.py build --all --deps-only --sd-shared-ggml`, which clones and builds llama.cpp, whisper.cpp, and stable-diffusion.cpp into `thirdparty/<project>/{include,lib}` and vendors the SQLite + sqlite-vec amalgamations into `thirdparty/{sqlite,sqlite-vec}/`. The `--sd-shared-ggml` flag is structural: stable-diffusion.cpp normally vendors its own copy of ggml, which would collide with llama.cpp's at link time. Building all three projects against the single ggml set is what makes the static binary possible.
 
 2. Configure with `cmake -S . -B build -DSD_USE_VENDORED_GGML=OFF`.
 
@@ -108,9 +108,13 @@ OpenSSL is required at link time (cpp-httplib uses it for TLS support inside the
 On Windows, use one of the following methods:
 
 - `winget install -e --id ShiningLight.OpenSSL.Dev`
+
 - `vcpkg install openssl:x64-windows`
+
 - `choco install openssl -y`
+
 - `scoop install openssl`
+
 - Download directly from [Shining Light OpenSSL](https://slproweb.com/products/Win32OpenSSL.html).
 
 ## Install
@@ -368,7 +372,9 @@ print(llm.generate("What is the capital of France?"))
 Reading order for embedders:
 
 1. [`docs/dev/combine_archives.md`](docs/dev/combine_archives.md) — the three-archive link contract, why whole-archiving ggml is non-optional, validation plan.
+
 2. [`docs/dev/oop-layer.md`](docs/dev/oop-layer.md) — `chimera.hpp` design (persistent-handle semantics, dirty-options policy, streaming hook, upstream-drift guards).
+
 3. [`docs/bindings.md`](docs/bindings.md) — the Python bindings over the OOP layer: build/install, usage, and the GIL / exceptions / string-options notes.
 
 ## Related projects

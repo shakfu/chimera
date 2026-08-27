@@ -67,7 +67,7 @@ startup-banner line in `chimera_serve.cpp`.
 
 One-shot from a clean checkout:
 
-```
+```text
 make build-with-webui
 ```
 
@@ -75,7 +75,7 @@ That target is just `make deps` followed by `cmake … -DCHIMERA_WEBUI_EMBED=ON`
 and a chimera-target build. Equivalent to (and useful for understanding what
 it does):
 
-```
+```text
 make deps
 cmake -S . -B build -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release \
                    -DCHIMERA_WEBUI_EMBED=ON
@@ -85,7 +85,7 @@ make rebuild
 The CMake option mirrors the existing `CHIMERA_LINENOISE` ON/OFF/AUTO
 pattern, so you can also drive it directly:
 
-```
+```text
 # AUTO — links only if thirdparty/llama.cpp/src-aux/webui/index.html exists
 cmake -S . -B build -DCHIMERA_WEBUI_EMBED=AUTO
 make rebuild
@@ -134,7 +134,7 @@ names become relative paths). chimera now stages the whole `dist/` tree
 and passes the directory. To embed the UI you must run the Vite build
 yourself **before** invoking the chimera builder:
 
-```
+```text
 make deps        # clone llama.cpp@<pin> first; this also stages headers etc.
 cd build/llama.cpp/tools/ui
 npm install
@@ -219,7 +219,7 @@ the C++ `ui-embed` helper bakes them in — no `xxd(1)` dependency.
 
 After building with `-DCHIMERA_WEBUI_EMBED=ON`:
 
-```
+```text
 grep -c LLAMA_UI_HAS_ASSETS build/src/chimera/ui.h
 # expect: 1  (an OFF build has 0 — the stub omits the define)
 
@@ -229,7 +229,7 @@ ls -la build/chimera
 
 Run-time smoke:
 
-```
+```text
 PORT=8080
 ./build/chimera serve -m models/Llama-3.2-1B-Instruct-Q8_0.gguf \
     --host 127.0.0.1 --port $PORT &
@@ -484,7 +484,7 @@ Five reasons, ordered by weight:
    chat browsing, `X-Chimera-Chat-Id`, the Anthropic Messages form —
    is real but narrow value relative to the ongoing maintenance ask.
 3. **Demo code rots fast.** A "lightweight demo" looks small (~470 LOC
-   + vendor) but it gates a permanent tax: each chimera capability
+   - vendor) but it gates a permanent tax: each chimera capability
    becomes optional UI work, each vendor lib bump needs re-testing,
    each browser API change is a new bug surface. Within 2–3 chimera
    releases without active UI use, it would be visibly broken.
@@ -494,7 +494,7 @@ Five reasons, ordered by weight:
    asymmetric: working UI is "fine, expected"; broken UI is "this
    project doesn't care about polish."
 5. **The chimera-specific routes don't actually need a UI.** RAG ingest
-   + search is one `chimera index` / `chimera search` invocation. Chat
+   - search is one `chimera index` / `chimera search` invocation. Chat
    history is `chimera chat --list --search`. The Anthropic Messages
    shape is what the Anthropic SDK posts; you don't need a UI to use it.
    Power users have CLIs; casual users have third-party OpenAI UIs.
@@ -712,7 +712,7 @@ Until that lands, the manual verification recipe in § 4 is what we have.
 
 llama.cpp b9318 rebuilt the webui asset-embedding mechanism wholesale.
 The vendored API headers were unchanged (a naive header-diff bump looked
-safe), but three load-bearing build-system files were deleted or moved.
+safe), but three structural build-system files were deleted or moved.
 This section is the canonical record of what changed and how chimera
 adopted it; § 1 and § 2.1 are the quick-reference versions.
 

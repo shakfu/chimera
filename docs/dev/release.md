@@ -52,7 +52,7 @@ existing release's body untouched when none of those are set, so:
   writes the notes; if the GPU legs somehow win, action-gh-release creates a
   bodyless release and `release.yml` fills in the notes afterward.
 
-This no-notes invariant is load-bearing -- do not add `body_path` /
+This no-notes invariant is structural -- do not add `body_path` /
 `generate_release_notes` to `release-gpu.yml`'s publish step. The `with:` keys
 there are intended to be exactly `tag_name`, `files`, `fail_on_unmatched_files`.
 
@@ -60,7 +60,7 @@ there are intended to be exactly `tag_name`, `files`, `fail_on_unmatched_files`.
 
 Both workflows use the same scheme so a release's asset list reads uniformly:
 
-```
+```text
 chimera-<version>-<target>.<ext>
 ```
 
@@ -85,7 +85,7 @@ release shipped all nine, with a single release body.
 
 ## release-gpu.yml job graph
 
-```
+```text
 preflight (verify tag on origin)
    |
    +-- build-cuda            (container: nvidia/cuda:12.4.1-devel)

@@ -1,15 +1,14 @@
 # TODO
 
-
 ## Validation
 
 - [~] CI matrix for Vulkan + CUDA on Linux x86_64. Compile-only legs
-      exist in `.github/workflows/ci-gpu.yml` (workflow_dispatch-only):
-      they build each backend and assert its ggml registration symbol
-      linked, but do not execute kernels. Remaining: (a) promote to a
-      nightly `schedule:` once stable, (b) real runtime coverage needs a
-      self-hosted / paid GPU runner (catches silent runtime backend
-      non-registration, which compile-only is blind to).
+  exist in `.github/workflows/ci-gpu.yml` (workflow_dispatch-only):
+  they build each backend and assert its ggml registration symbol
+  linked, but do not execute kernels. Remaining: (a) promote to a
+  nightly `schedule:` once stable, (b) real runtime coverage needs a
+  self-hosted / paid GPU runner (catches silent runtime backend
+  non-registration, which compile-only is blind to).
 - [ ] GPU legs for ROCm-Windows and SYCL-Windows. These are the only
       backend x platform combos left worth adding (ROCm and SYCL are
       Linux-only today; OpenCL/CANN/MUSA target hardware no hosted runner

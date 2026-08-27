@@ -49,7 +49,8 @@ binary" deployment story.
 sampling params, attached media, or the conversation timestamps*. It
 also doesn't compose with `chimera serve`: an HTTP client and an
 interactive CLI session can't share a notion of "this is conversation
-#42."
+
+## 42."
 
 A small `chats` + `messages` schema in the same SQLite database makes
 both consumers point at one persistent log. The CLI can resume past
@@ -72,9 +73,9 @@ the build for RAG + chat, they become cheap.
 
 ---
 
-## 2. Build pipeline
+### 2. Build pipeline
 
-### Vendoring
+#### Vendoring
 
 Both libraries are designed for single-translation-unit embedding.
 `scripts/manage.py` already knows how to fetch + amalgamate dependencies
@@ -82,7 +83,7 @@ into `thirdparty/<name>/{include,lib,src-aux}/`; SQLite and sqlite-vec
 follow the same shape but ship pre-amalgamated, so the fetch step is
 simpler than for llama.cpp.
 
-```
+```text
 thirdparty/sqlite/
     include/sqlite3.h          # public API header
     src-aux/sqlite3.c          # amalgamation, compiled into chimera target
@@ -105,7 +106,7 @@ external dependencies. We don't build a static library; we compile the
 `.c` files directly into the chimera target, the same way `server-http.cpp`
 is handled today.
 
-### CMake wiring
+#### CMake wiring
 
 In `src/chimera/CMakeLists.txt`:
 
@@ -137,7 +138,7 @@ SQLite compile-time flags worth setting via `target_compile_definitions`:
 Approximate binary cost: **~1.5 MB** for sqlite3.c, **~60 KB** for
 sqlite-vec.c, both stripped & release-built.
 
-### `manage.py` changes
+#### `manage.py` changes
 
 ```python
 class SQLiteBuilder(Builder):
@@ -162,7 +163,7 @@ class SqliteVecBuilder(Builder):
 Both are added to `--all`/`--deps-only` so the existing `make deps`
 flow picks them up.
 
-### Top-level `CMakeLists.txt`
+#### Top-level `CMakeLists.txt`
 
 ```cmake
 set(SQLITE_DIR     "${CMAKE_SOURCE_DIR}/thirdparty/sqlite")
@@ -174,7 +175,7 @@ target directly, like `server-http.cpp` already is.
 
 ---
 
-## 3. Module layout
+### 3. Module layout
 
 | File | Responsibility |
 |------|---------------|
@@ -194,7 +195,7 @@ file into WAL mode, and loads sqlite-vec via
 
 ---
 
-## 4. Storage location
+### 4. Storage location
 
 We follow XDG. In priority order:
 
@@ -218,9 +219,9 @@ chat data goes to SQLite.
 
 ---
 
-## 5. Schema
+### 5. Schema
 
-### 5.1 Conversation history
+#### 5.1 Conversation history
 
 ```sql
 -- One row per conversation.
@@ -266,11 +267,12 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 ```
 
 This is small and sufficient for both:
+
 - `command_chat` resuming a prior conversation by `chat_id`.
 - A future server-side `/v1/responses`-style API that needs to retrieve
   conversation state by external ID.
 
-### 5.2 Vector store
+#### 5.2 Vector store
 
 ```sql
 -- A "collection" is one logical corpus (user's notes, a documentation
@@ -317,7 +319,7 @@ Why one vec0 table per collection rather than a single shared one:
 - KNN search inside one collection is the common case; cross-collection
   search would have to handle dim mismatch anyway.
 
-### 5.3 Schema versioning
+#### 5.3 Schema versioning
 
 `PRAGMA user_version` tracks the migration state. Migrations are
 plain functions taking a connection and producing version N+1:
@@ -354,9 +356,9 @@ promised.
 
 ---
 
-## 6. CLI surface area
+### 6. CLI surface area
 
-### 6.1 New subcommands
+#### 6.1 New subcommands
 
 ```sh
 # Vector store / RAG
@@ -375,7 +377,7 @@ fixed-window with overlap; smarter chunking is a follow-up), runs the
 configured embedding model against each chunk, and writes both
 `documents` + the vec0 row.
 
-### 6.2 `chimera chat` integration
+#### 6.2 `chimera chat` integration
 
 ```sh
 chimera chat -m model.gguf                         # ephemeral, no DB write
@@ -390,7 +392,7 @@ Persistence is **opt-in** for the first cut so existing users see no
 behavior change. Once stable we can flip the default — but only after
 deciding how to handle privacy (chat content includes user data).
 
-### 6.3 `chimera serve` integration
+#### 6.3 `chimera serve` integration
 
 The server can write to the same DB:
 
@@ -405,7 +407,7 @@ routes (see §7).
 
 ---
 
-## 7. Server-side HTTP routes (with `--enable-rag`)
+### 7. Server-side HTTP routes (with `--enable-rag`)
 
 OpenAI-shaped vector store API:
 
@@ -428,12 +430,12 @@ Not in the first cut.
 
 ---
 
-## 8. Concurrency
+### 8. Concurrency
 
 SQLite in WAL mode permits **one writer + many concurrent readers**.
 That maps well onto chimera's threading shape:
 
-```
+```text
 chimera CLI (chat, index, search):  one process, one connection.
 
 chimera serve:
@@ -459,11 +461,11 @@ vec0 virtual table backed by regular SQLite pages.
 
 ---
 
-## 9. Phased rollout
+### 9. Phased rollout
 
 Each phase is shippable on its own.
 
-### Phase 1 — vendor + connection + schema
+#### Phase 1 — vendor + connection + schema
 
 - `manage.py` fetches both amalgamations into `thirdparty/`.
 - `src/chimera/chimera_db.{h,cpp}` lands with the connection wrapper,
@@ -476,7 +478,7 @@ Each phase is shippable on its own.
 - Risk: ~1.5 MB binary growth, OpenSSL- and OpenMP-style configure
   drift across platforms.
 
-### Phase 2 — vector store CLI **[shipped]**
+#### Phase 2 — vector store CLI **[shipped]**
 
 - `chimera index create / ingest / list / stats / drop`
 - `chimera search`
@@ -493,7 +495,7 @@ Each phase is shippable on its own.
 - Chunker: character-window with 2048/256 default + sentence-boundary
   nudge. Token-based chunking remains a phase 6+ follow-up.
 
-### Phase 3 — chat persistence **[shipped]**
+#### Phase 3 — chat persistence **[shipped]**
 
 - `chimera chat --persist`, `--resume <id|last>`, `--list`, `--search`.
 - New module `src/chimera/chimera_chat_store.{h,cpp}` wraps the
@@ -524,17 +526,17 @@ Each phase is shippable on its own.
   use; resume replays the conversation text but doesn't load the
   attached images/audio. Flagged as a future follow-up.
 
-### Phase 4 — server-side RAG routes **[shipped]**
+#### Phase 4 — server-side RAG routes **[shipped]**
 
 - `chimera serve --enable-rag <embedding.gguf>` loads the named
   embedding model at startup and binds six routes on the same
   `server_http_context`:
-  - `GET  /v1/vector_stores`              — list collections
-  - `POST /v1/vector_stores`              — create
+  - `GET  /v1/vector_stores` — list collections
+  - `POST /v1/vector_stores` — create
   - `GET  /v1/vector_stores/:name`        — stats
   - `POST /v1/vector_stores/:name/delete` — drop (see note below on
     why this is POST and not DELETE)
-  - `POST /v1/vector_stores/:name/files`  — ingest (multipart upload
+  - `POST /v1/vector_stores/:name/files` — ingest (multipart upload
     of `file`, or JSON `{"text": "..."}` body)
   - `POST /v1/vector_stores/:name/search` — KNN search; body
     `{"query": "...", "k": N}`
@@ -567,7 +569,7 @@ Each phase is shippable on its own.
   `serve_chunk_text` (a copy of the CLI's chunker; keeping a copy is
   cheaper than promoting it to a shared header for one extra caller).
 
-### Phase 5 — server-side chat persistence **[shipped]**
+#### Phase 5 — server-side chat persistence **[shipped]**
 
 - `chimera serve --persist-chats` wraps `routes.post_chat_completions`
   with `make_persisting_chat_handler`. The wrapper handles both
@@ -598,7 +600,7 @@ Each phase is shippable on its own.
   chat-completions traffic still hits the chats table, so audit-log
   use cases work.
 
-### Phase 6+ — nice-to-haves
+#### Phase 6+ — nice-to-haves
 
 - Embedding cache (`embed(text) -> vector` memoized to a small KV
   table keyed by `sha256(text) || model_id`). **[shipped]** — driven
@@ -617,7 +619,7 @@ Each phase is shippable on its own.
 
 ---
 
-## 10. Risks and things to watch out for
+### 10. Risks and things to watch out for
 
 **Schema migration discipline forever.** Once a user has a DB file,
 we own forward-compat indefinitely. The release process needs a check
@@ -675,7 +677,7 @@ in either side would break the other. We open identically everywhere
 
 ---
 
-## 11. Open design questions
+### 11. Open design questions
 
 1. **Default chunk size.** Fixed 512 tokens with 64-token overlap is
    a reasonable starting point. Per-collection override seems easy
@@ -701,7 +703,7 @@ in either side would break the other. We open identically everywhere
 
 ---
 
-## 12. References
+### 12. References
 
 - SQLite amalgamation: <https://sqlite.org/amalgamation.html>
 - sqlite-vec docs: <https://alexgarcia.xyz/sqlite-vec/>

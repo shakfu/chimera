@@ -49,7 +49,7 @@ leaving ~1 GiB headroom." Skip it and `-1` is a blind all-layers load.
 
 ## The `serve` path reaches the fit step
 
-```
+```text
 ServeOptions.gpu_layers = -1                         chimera.h:491 (default)
   → build_common_params: params.n_gpu_layers = -1    chimera_serve.cpp:416
     (fit_params left at upstream default = TRUE       common.h:427)
