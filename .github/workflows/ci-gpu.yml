@@ -352,12 +352,23 @@ jobs:
 
   # --- CUDA (Windows) -------------------------------------------------
   # Same compile-only contract as the Linux CUDA leg, on MSVC + nvcc.
-  # windows-latest has no CUDA toolkit, so Jimver/cuda-toolkit installs nvcc +
+  # The image has no CUDA toolkit, so Jimver/cuda-toolkit installs nvcc +
   # cudart + cublas (+ the Visual Studio integration the VS generator needs to
   # compile .cu via MSBuild). CUDA 12.4.1 matches the Linux container's
   # version, and CMAKE_CUDA_ARCHITECTURES=75 pins a single arch to bound the
   # (slow) nvcc compile -- exactly the leg the `legs: cuda-windows` selector
   # exists to run in isolation.
+  #
+  # Pinned to windows-2022, not windows-latest: `windows-latest` (and
+  # `windows-2025`) now resolve to the windows-2025-vs2026 image, which ships
+  # Visual Studio 18 2026 only. CUDA 12.4's MSBuild integration installs under
+  # VS 2017/2019/2022 paths, so enable_language(CUDA) under the VS 18 generator
+  # dies with "No CUDA toolset found" (ggml/src/ggml-cuda/CMakeLists.txt:59).
+  # windows-2022 is the last label guaranteeing VS 2022. It is the older GA
+  # image and will eventually retire; the exit then is CUDA 13.2+, the first
+  # release with VS 2026 integration, which also means bumping the Linux leg's
+  # container to keep the two versions matched. The Vulkan-Windows leg is
+  # unaffected and stays on windows-latest.
   #
   # Heads-up for the first run: (1) the Jimver action ref below is pinned but
   # was not verifiable locally -- bump it if the install step 404s; (2) the
@@ -378,7 +389,7 @@ jobs:
   build-cuda-windows:
     name: build (cuda, windows x86_64)
     if: ${{ (github.event.inputs.legs || 'all') == 'all' || github.event.inputs.legs == 'cuda-windows' }}
-    runs-on: windows-latest
+    runs-on: windows-2022   # VS 2022; see the note above
     # Cold build is ~75 min (ggml-cuda kernels compiled 3x on a 4-core runner);
     # 150 leaves headroom for that while still bounding a true hang.
     timeout-minutes: 150
@@ -395,8 +406,9 @@ jobs:
       # Installs nvcc/cudart/cublas and sets CUDA_PATH + adds the toolkit bin
       # to PATH, which CMake's enable_language(CUDA) / FindCUDAToolkit pick up.
       # visual_studio_integration is required for the default "Visual Studio
-      # 17 2022" generator to compile .cu files; thrust + cuda_profiler_api
-      # cover headers ggml-cuda includes. NOTE: pin verified-by-bump only.
+      # 17 2022" generator to compile .cu files (hence the windows-2022 pin);
+      # thrust + cuda_profiler_api cover headers ggml-cuda includes.
+      # NOTE: pin verified-by-bump only.
       - name: install cuda toolkit
         uses: Jimver/cuda-toolkit@v0.2.19
         id: cuda-toolkit
