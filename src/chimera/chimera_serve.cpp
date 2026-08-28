@@ -420,6 +420,13 @@ common_params build_common_params(const ServeOptions & opts) {
     params.n_ubatch             = opts.n_ubatch;
     params.n_gpu_layers         = opts.gpu_layers;
     params.cpuparams.n_threads  = opts.threads;
+    // Upstream resolves n_threads == -1 in its arg parser, which chimera
+    // bypasses by filling common_params directly. Left unresolved, the
+    // threadpool common_init_from_params() now always builds sizes its
+    // worker array from -1, so the allocation fails and the memset of it
+    // segfaults before any logging happens.
+    postprocess_cpu_params(params.cpuparams, nullptr);
+    postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
     params.n_parallel           = opts.parallel;
     params.hostname             = opts.host;
     params.port                 = opts.port;
@@ -571,6 +578,9 @@ std::unique_ptr<SecondaryServerCtx> bring_up_secondary(
     p.n_ubatch             = opts.n_ubatch;
     p.n_gpu_layers         = opts.gpu_layers;
     p.cpuparams.n_threads  = opts.threads;
+    // Same -1 resolution as build_common_params() above.
+    postprocess_cpu_params(p.cpuparams, nullptr);
+    postprocess_cpu_params(p.cpuparams_batch, &p.cpuparams);
     p.n_parallel           = 1;
     p.embedding            = true;
     p.endpoint_metrics     = false;   // metrics route is bound off primary
@@ -1022,7 +1032,10 @@ int command_serve(const ServeOptions & opts) {
         // supplied — matches the LLM-side /lora-adapters shape.
         ctx_http.get("/v1/images/lora-adapters",
             ex_wrapper([&sd_lora_aliases](const server_http_req &) -> server_http_res_ptr {
-                json out = json::array();
+                // Qualify: `using namespace chimera_serve` in this function puts
+                // chimera_serve::json (nlohmann) and llama.cpp's global
+                // `using json = common_json` in the same lookup scope.
+                chimera_serve::json out = chimera_serve::json::array();
                 for (const auto & kv : sd_lora_aliases) {
                     out.push_back({{ "name", kv.first }});
                 }

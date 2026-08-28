@@ -94,10 +94,10 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.2.12"
-LLAMACPP_VERSION = "b10107"
-WHISPERCPP_VERSION = "v1.9.1"
-SDCPP_VERSION = "master-795-87a0177"
+CHIMERA_VERSION = "0.2.13"
+LLAMACPP_VERSION = "v0.3.0"
+WHISPERCPP_VERSION = "v1.9.2"
+SDCPP_VERSION = "master-816-487de75"
 # linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
 # commit in CHANGELOG for traceability.
 LINENOISE_VERSION = "master"
@@ -969,7 +969,8 @@ class LlamaCppBuilder(GgmlBuilder):
         # library and provide our own (smaller) entry point in chimera_serve.
         self.cmake_build_targets(
             build_dir=self.build_dir,
-            targets=["llama", "llama-common", "mtmd", "server-context", "cpp-httplib"],
+            targets=["llama", "llama-common", "mtmd", "server-context",
+                     "cpp-httplib", "vendor-hash"],
             release=True,
         )
 
@@ -983,6 +984,10 @@ class LlamaCppBuilder(GgmlBuilder):
         self.copy_lib(self.build_dir, "ggml/src", "ggml", self.lib)
         self.copy_lib(self.build_dir, "ggml/src", "ggml-base", self.lib)
         self.copy_lib(self.build_dir, "ggml/src", "ggml-cpu", self.lib)
+        # vendor-hash backs mtmd-helper's content-addressed bitmap ids
+        # (hash_sha256_hex). Upstream split it out of mtmd into its own
+        # archive, so it must be copied and linked separately.
+        self.copy_lib(self.build_dir, "vendor/hash", "vendor-hash", self.lib)
         self.copy_lib(self.build_dir, "tools/mtmd", "mtmd", self.lib)
         self.copy_lib(self.build_dir, "tools/server", "server-context", self.lib)
         self.copy_backend_libs()

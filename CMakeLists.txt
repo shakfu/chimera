@@ -13,6 +13,11 @@ foreach(_pair "CHIMERA_VERSION" "LLAMACPP_VERSION" "WHISPERCPP_VERSION" "SDCPP_V
 endforeach()
 unset(_manage_py)
 
+# These are read at configure time, so a version bump must re-trigger
+# configure -- otherwise an incremental build stamps the previous version.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_SOURCE_DIR}/scripts/manage.py")
+
 project(chimera LANGUAGES C CXX VERSION "${CHIMERA_VERSION}")
 
 message(STATUS "chimera version:        ${CHIMERA_VERSION}")
@@ -344,6 +349,7 @@ static_lib(LIB_GGML_CPU        "${LLAMACPP_LIB}" "ggml-cpu")
 static_lib(LIB_MTMD            "${LLAMACPP_LIB}" "mtmd")
 static_lib(LIB_SERVER_CONTEXT  "${LLAMACPP_LIB}" "server-context")
 static_lib(LIB_CPP_HTTPLIB     "${LLAMACPP_LIB}" "cpp-httplib")
+static_lib(LIB_VENDOR_HASH     "${LLAMACPP_LIB}" "vendor-hash")
 
 # server-http.cpp is not part of libserver-context.a (upstream compiles it
 # directly into the llama-server executable). manage.py drops it here so the

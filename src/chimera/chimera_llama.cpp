@@ -22,7 +22,6 @@
 #include "log.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
-#include "nlohmann/json.hpp"
 #include "sampling.h"
 
 #include <algorithm>
@@ -386,8 +385,7 @@ std::string resolve_grammar(const LlamaCommonOptions & opts) {
     else if (!opts.json_schema_file.empty()) schema_text = read_file(opts.json_schema_file);
     if (schema_text.empty()) return {};
     try {
-        auto schema = nlohmann::ordered_json::parse(schema_text);
-        return json_schema_to_grammar(schema);
+        return json_schema_to_grammar(common_json::parse(schema_text));
     } catch (const std::exception & e) {
         fail(ExitCode::BadInput,
              std::string("failed to convert --json-schema to grammar: ") + e.what());
@@ -676,16 +674,21 @@ common_sampler_ptr make_sampler(const llama_model *           model,
     // reasoning_budget_tokens stays -1 (upstream treats that as INT_MAX), so
     // the sampler never auto-fires — only the runtime force ends thinking.
     if ((rbp.budget >= 0 || rbp.control) && rbp.vocab != nullptr &&
-        !rbp.thinking_start_tag.empty() && !rbp.thinking_end_tag.empty()) {
+        !rbp.thinking_start_tag.empty() && !rbp.thinking_end_tags.empty()) {
         sampling.reasoning_budget_tokens = rbp.budget;
         sampling.reasoning_control       = rbp.control;
         sampling.reasoning_budget_start =
             common_tokenize(rbp.vocab, rbp.thinking_start_tag, /*add_special=*/false, /*parse_special=*/true);
-        sampling.reasoning_budget_end =
-            common_tokenize(rbp.vocab, rbp.thinking_end_tag, false, true);
+        // Upstream stops on any advertised end tag; the first also forms the
+        // forced sequence.
+        sampling.reasoning_budget_end.clear();
+        for (const std::string & tag : rbp.thinking_end_tags) {
+            sampling.reasoning_budget_end.push_back(
+                common_tokenize(rbp.vocab, tag, false, true));
+        }
         sampling.reasoning_budget_forced =
             common_tokenize(rbp.vocab,
-                            rbp.budget_message + rbp.thinking_end_tag,
+                            rbp.budget_message + rbp.thinking_end_tags.front(),
                             false, true);
     }
 

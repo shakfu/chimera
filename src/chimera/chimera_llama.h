@@ -123,7 +123,9 @@ void decode_tokens(llama_context *                ctx,
 struct ReasoningBudgetParams {
     const llama_vocab * vocab = nullptr;
     std::string         thinking_start_tag;
-    std::string         thinking_end_tag;
+    // A template may advertise several end tags; the first also forms the
+    // forced sequence. Mirrors common_chat_params::thinking_end_tags.
+    std::vector<std::string> thinking_end_tags;
     int                 budget = -1;
     std::string         budget_message;
     // Arm the on-demand reasoning-budget sampler even when budget < 0, so

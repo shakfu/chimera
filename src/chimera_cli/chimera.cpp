@@ -575,7 +575,7 @@ int command_chat(const LlamaCommonOptions & opts,
     // so we can install the reasoning-budget sampler inside the
     // long-lived `sampler` below. The tags are template-fixed (not
     // message-dependent) — common_chat_templates_apply populates
-    // chat_params.thinking_{start,end}_tag from the format, so a
+    // chat_params.thinking_start_tag/thinking_end_tags from the format, so a
     // dummy single-user-message apply is sufficient to read them out.
     // If the template doesn't advertise thinking tags (most non-
     // reasoning models), the tags come back empty and make_sampler
@@ -595,11 +595,11 @@ int command_chat(const LlamaCommonOptions & opts,
         common_chat_params probe = common_chat_templates_apply(templates.get(), tpl_probe);
         rbp.vocab              = vocab;
         rbp.thinking_start_tag = probe.thinking_start_tag;
-        rbp.thinking_end_tag   = probe.thinking_end_tag;
+        rbp.thinking_end_tags  = probe.thinking_end_tags;
         rbp.budget             = opts.reasoning_budget;
         rbp.budget_message     = opts.reasoning_budget_message;
         rbp.control            = opts.reasoning_control;
-        if (probe.thinking_start_tag.empty() || probe.thinking_end_tag.empty()) {
+        if (probe.thinking_start_tag.empty() || probe.thinking_end_tags.empty()) {
             const char * which = opts.reasoning_budget >= 0
                 ? "--reasoning-budget" : "--reasoning-control";
             std::cerr << "chimera: warning: " << which << " set but the "

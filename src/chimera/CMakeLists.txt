@@ -328,6 +328,7 @@ if(UNIX AND NOT APPLE)
         ${LIB_MTMD}
         ${LIB_SERVER_CONTEXT}
         ${LIB_CPP_HTTPLIB}
+        ${LIB_VENDOR_HASH}
         ${_CHIMERA_MODALITY_LIBS}
         -Wl,--end-group
         -Wl,--whole-archive
@@ -350,6 +351,7 @@ elseif(APPLE)
         ${LIB_MTMD}
         ${LIB_SERVER_CONTEXT}
         ${LIB_CPP_HTTPLIB}
+        ${LIB_VENDOR_HASH}
         ${_CHIMERA_MODALITY_LIBS}
         ${SYSTEM_LIBS}
     )
@@ -423,6 +425,7 @@ else()
         ${LIB_MTMD}
         ${LIB_SERVER_CONTEXT}
         ${LIB_CPP_HTTPLIB}
+        ${LIB_VENDOR_HASH}
         ${_CHIMERA_MODALITY_LIBS}
         ${SYSTEM_LIBS}
     )

@@ -4,6 +4,28 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.13]
+
+### Changed
+
+- **Update llama.cpp to v0.3.0** (from b10107), whisper.cpp to **v1.9.2** (from v1.9.1), and stable-diffusion.cpp to **master-816-487de75** (from master-795-87a0177). llama.cpp has moved from `bNNNN` build tags to semver, so `LLAMACPP_VERSION` changes shape with it. whisper.cpp and sd.cpp built clean; every adaptation below is llama.cpp's.
+
+### Fixed
+
+- **Adapt to llama.cpp replacing `nlohmann::json` with `common_json`.** `json_schema_to_grammar` takes the new type, so `--json-schema` parses through `common_json::parse`. Separately, `server-common.h` now declares a global `using json = common_json`, which is ambiguous against `chimera_serve::json` inside `command_serve` -- that function pulls the namespace in with a `using`-directive, so both names land in one scope. The one affected site is qualified rather than renaming chimera's alias, which is used throughout the serve TUs.
+
+- **Adapt to `common_chat_params::thinking_end_tag` becoming `thinking_end_tags`,** and `common_params_sampling::reasoning_budget_end` becoming a list of token sequences. chimera propagates the whole list instead of taking the first tag, so a template advertising several end tags still stops on all of them; the first also forms the forced sequence, as upstream specifies. `ReasoningBudgetParams::thinking_end_tag` is renamed and retyped to match, which is source-breaking for any external consumer that set it.
+
+- **Link llama.cpp's new `vendor-hash` archive.** `hash_sha256_hex`, which backs mtmd-helper's content-addressed bitmap ids, moved out of `libmtmd.a` into its own `libvendor-hash.a`; without it the final link fails on an undefined symbol. Added to the `manage.py` target list and copy step, all three link paths in `src/chimera/CMakeLists.txt`, and `combine_archives.py` so the redistributable `libchimera_thirdparty.a` carries it too.
+
+- **Resolve `cpuparams.n_threads` before handing `common_params` to llama.cpp.** `common_init_from_params()` now always builds a threadpool, and ggml sizes the worker array directly from `n_threads`. chimera fills `common_params` by hand and so never runs the arg-parser postprocess where upstream turns the `-1` sentinel into a real count; ggml computed a ~2^64-byte allocation, it returned null, and the `memset` of that null segfaulted `chimera serve` before it logged a single line. Both construction sites in `chimera_serve.cpp` now call upstream's own `postprocess_cpu_params()`. The image routes failed the same way, reporting `attempted to allocate 17592186044416.00 MB`. Nothing in the pin-check machinery can catch this class: the field was already there and still compiles, it just started being read.
+
+### Testing
+
+- `make test` 69 pass / 0 fail / 6 skip. `make test-external-smoke` and `make bump-check` clean.
+
+- **Not covered:** CUDA, ROCm, SYCL and Vulkan were not built, and `CHIMERA_WEBUI_EMBED=ON` was not exercised.
+
 ## [0.2.12]
 
 ### Fixed

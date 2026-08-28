@@ -9,7 +9,7 @@ into two static libraries.
                            static initializers actually run.
 
   libchimera_thirdparty.a  everything else: llama, llama-common, mtmd,
-                           server-context, cpp-httplib, whisper, sd,
+                           server-context, cpp-httplib, vendor-hash, whisper, sd,
                            vendored libwebp / libwebm, linenoise.
                            Linked normally so unused members get pruned.
 
@@ -79,6 +79,7 @@ class Inventory:
             llama / "tools" / "mtmd" / f"libmtmd{e}",
             llama / "tools" / "server" / f"libserver-context{e}",
             llama / "vendor" / "cpp-httplib" / f"libcpp-httplib{e}",
+            llama / "vendor" / "hash" / f"libvendor-hash{e}",
         ]
         if self.with_whisper:
             tp += [
