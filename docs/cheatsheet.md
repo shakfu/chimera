@@ -174,10 +174,10 @@ chimera embed -m bge.gguf -p "..." --cache-embeddings   # memoize to SQLite
 chimera embed -m bge.gguf -p "..." --cache-embeddings --cache-db /tmp/cache.db
 chimera embed -m bge.gguf -p "..." --flash-attn --ubatch-size 256
 chimera embed -m bge.gguf -p "..." --no-mmap --mlock     # pin model in RAM
-chimera embed -m bge.gguf -p "..." --load-mode dio        # none|mmap|mlock|dio
+chimera embed -m bge.gguf -p "..." --load-mode dio        # auto|none|mmap|mlock|mmap+mlock|dio
 ```
 
-`--load-mode` names llama.cpp's `llama_load_mode` directly and overrides `--no-mmap`/`--mlock`; `dio` (direct I/O, where the platform supports it) is reachable only this way. Also available on `gen` and `chat`.
+`--load-mode` names llama.cpp's `llama_load_mode` directly and overrides `--no-mmap`/`--mlock`; `auto` (upstream's own default since v0.3.0 — the loader picks a strategy from the device's capabilities), `mmap+mlock` and `dio` (direct I/O, where the platform supports it) are reachable only this way. Note that since v0.3.0 plain `mlock` locks *without* mmap; `mmap+mlock` is the old combined behavior. Also available on `gen` and `chat`.
 
 ---
 

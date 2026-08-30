@@ -718,6 +718,9 @@ int command_serve(const ServeOptions & opts) {
         slp.force_sdxl_vae_conv_scale  = opts.sd_force_sdxl_vae_conv_scale;
         slp.stream_layers              = opts.sd_stream_layers;
         slp.eager_load                 = opts.sd_eager_load;
+        slp.backend                    = opts.sd_backend;
+        slp.params_backend             = opts.sd_params_backend;
+        slp.auto_fit                   = opts.sd_auto_fit;
         slp.rng_type                   = opts.sd_rng;
         slp.sampler_rng_type           = opts.sd_sampler_rng;
         slp.prediction                 = opts.sd_prediction;

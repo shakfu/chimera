@@ -2051,7 +2051,7 @@ void bind_llama_common_opts(CLI::App * cmd, LlamaCommonOptions & o) {
     cmd->add_option("--dry-allowed-length", o.dry_allowed_length,
         "DRY: tokens extending repetition beyond this receive penalty");
     cmd->add_option("--dry-penalty-last-n", o.dry_penalty_last_n,
-        "DRY: tokens scanned for repetitions (-1 = ctx-size)");
+        "DRY: tokens scanned for repetitions (0 = disable, -1 = ctx-size)");
     cmd->add_option("--dry-sequence-breaker", o.dry_sequence_breakers,
         "DRY sequence breaker (repeatable)");
     cmd->add_option("--logit-bias", o.logit_bias,
@@ -2100,8 +2100,8 @@ void bind_llama_common_opts(CLI::App * cmd, LlamaCommonOptions & o) {
     cmd->add_flag("--mlock", o.use_mlock, "Force the system to keep model in RAM");
     cmd->add_option("--load-mode",o.load_mode,
         "Model loading mode, overriding --no-mmap/--mlock: "
-        "none | mmap | mlock | dio (direct I/O where supported)")
-        ->check(CLI::IsMember({"none","mmap","mlock","dio"}));
+        "auto | none | mmap | mlock | mmap+mlock | dio (direct I/O where supported)")
+        ->check(CLI::IsMember({"auto","none","mmap","mlock","mmap+mlock","dio"}));
 
     // mmproj offload
     cmd->add_flag("!--no-mmproj-offload", o.mmproj_use_gpu,
@@ -2327,8 +2327,8 @@ void bind_embed_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_flag("--mlock", p.embed_opts.use_mlock, "Force the system to keep model in RAM");
     cmd->add_option("--load-mode",p.embed_opts.load_mode,
         "Model loading mode, overriding --no-mmap/--mlock: "
-        "none | mmap | mlock | dio (direct I/O where supported)")
-        ->check(CLI::IsMember({"none","mmap","mlock","dio"}));
+        "auto | none | mmap | mlock | mmap+mlock | dio (direct I/O where supported)")
+        ->check(CLI::IsMember({"auto","none","mmap","mlock","mmap+mlock","dio"}));
     cmd->add_option("--rope-freq-base",  p.embed_opts.rope_freq_base,  "RoPE base frequency (0 = from model)");
     cmd->add_option("--rope-freq-scale", p.embed_opts.rope_freq_scale, "RoPE frequency scale (0 = from model)");
     cmd->add_option("--rope-scale",      p.embed_opts.rope_freq_scale, "Alias of --rope-freq-scale");
@@ -2578,6 +2578,18 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Keep the VAE encode/decode on CPU (more surgical than --offload-to-cpu)");
     cmd->add_flag("--control-net-cpu", p.sd_opts.keep_control_net_on_cpu,
         "Keep the ControlNet on CPU even when a GPU backend is available");
+    cmd->add_option("--backend", p.sd_opts.backend,
+        "Per-module compute placement: a bare target (\"cuda0\", \"cpu\") or "
+        "comma-separated assignments (\"diffusion=cuda0,te=cpu\"). Appended after "
+        "--clip-on-cpu/--vae-on-cpu/--control-net-cpu, which sd resolves last-wins");
+    cmd->add_option("--params-backend", p.sd_opts.params_backend,
+        "Per-module weight residency, same grammar as --backend and additionally "
+        "accepting cpu / disk. Appended after --offload-to-cpu. On a single GPU that "
+        "cannot hold every module, \"te=cpu\" is usually the fastest placement");
+    cmd->add_flag("--auto-fit", p.sd_opts.auto_fit,
+        "Let sd derive --backend and --params-backend from the model sizes and the "
+        "available VRAM (overriding both). Fits where an explicit placement would "
+        "not, but on a single-GPU box tends to resolve to all-CPU and is far slower");
     cmd->add_flag("--force-sdxl-vae-conv-scale", p.sd_opts.force_sdxl_vae_conv_scale,
         "Apply the SDXL VAE conv-scale numerics fix (workaround for some SDXL VAE checkpoints)");
     // Round 2 sampler / generation core.
@@ -2783,6 +2795,16 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "Keep the VAE encode/decode on CPU");
     cmd->add_flag("--sd-control-net-cpu", p.serve_opts.sd_keep_control_net_on_cpu,
         "Keep the ControlNet on CPU even when a GPU backend is available");
+    cmd->add_option("--sd-backend", p.serve_opts.sd_backend,
+        "Per-module compute placement: a bare target (\"cuda0\", \"cpu\") or "
+        "comma-separated assignments (\"diffusion=cuda0,te=cpu\"); resolved last-wins "
+        "after the --sd-*-on-cpu flags");
+    cmd->add_option("--sd-params-backend", p.serve_opts.sd_params_backend,
+        "Per-module weight residency, same grammar as --sd-backend and additionally "
+        "accepting cpu / disk; resolved last-wins after --sd-offload-to-cpu");
+    cmd->add_flag("--sd-auto-fit", p.serve_opts.sd_auto_fit,
+        "Let sd derive --sd-backend and --sd-params-backend from the model sizes and "
+        "the available VRAM (overriding both)");
     cmd->add_flag("--sd-force-sdxl-vae-conv-scale", p.serve_opts.sd_force_sdxl_vae_conv_scale,
         "Apply the SDXL VAE conv-scale numerics fix");
     cmd->add_option("--sd-rng", p.serve_opts.sd_rng,

@@ -16,21 +16,34 @@
 // Names accepted by --load-mode, matching upstream's -lm/--load-mode values
 // (common/arg.cpp). LLAMA_LOAD_MODE_DIRECT_IO is spelled "dio" there, and
 // direct I/O silently falls back to a normal read where unsupported.
+//
+// llama.cpp v0.3.0 reshaped the enum: it added LLAMA_LOAD_MODE_AUTO (-1, the
+// new upstream default -- the loader picks a strategy from the device's
+// capabilities) and split the old mmap+mlock value into a plain
+// LLAMA_LOAD_MODE_MLOCK (lock without mmap) and LLAMA_LOAD_MODE_MMAP_MLOCK.
+// DIRECT_IO moved from 3 to 4 with the split; chimera names the enumerators
+// rather than their values, so that part needed no change.
 inline enum llama_load_mode chimera_parse_load_mode(const std::string & name) {
-    if (name == "none")  return LLAMA_LOAD_MODE_NONE;
-    if (name == "mmap")  return LLAMA_LOAD_MODE_MMAP;
-    if (name == "mlock") return LLAMA_LOAD_MODE_MLOCK;
-    if (name == "dio")   return LLAMA_LOAD_MODE_DIRECT_IO;
+    if (name == "auto")       return LLAMA_LOAD_MODE_AUTO;
+    if (name == "none")       return LLAMA_LOAD_MODE_NONE;
+    if (name == "mmap")       return LLAMA_LOAD_MODE_MMAP;
+    if (name == "mlock")      return LLAMA_LOAD_MODE_MLOCK;
+    if (name == "mmap+mlock") return LLAMA_LOAD_MODE_MMAP_MLOCK;
+    if (name == "dio")        return LLAMA_LOAD_MODE_DIRECT_IO;
     fail(ExitCode::BadInput,
-         "unknown --load-mode: " + name + " (use none|mmap|mlock|dio)");
+         "unknown --load-mode: " + name +
+         " (use auto|none|mmap|mlock|mmap+mlock|dio)");
 }
 
 // An explicit --load-mode wins outright; chimera cannot reproduce upstream's
 // last-flag-wins ordering because the booleans and the enum live in separate
-// option fields. When --load-mode is absent this mirrors upstream's
-// deprecated-flag shim: --mlock selects LLAMA_LOAD_MODE_MLOCK (which is mmap +
-// mlock) regardless of the mmap flag, otherwise mmap on/off picks between
-// LLAMA_LOAD_MODE_MMAP and LLAMA_LOAD_MODE_NONE.
+// option fields. When --load-mode is absent this mirrors upstream's own
+// deprecated-flag shim (common/arg.cpp): --mlock selects LLAMA_LOAD_MODE_MLOCK
+// regardless of the mmap flag, otherwise mmap on/off picks between
+// LLAMA_LOAD_MODE_MMAP and LLAMA_LOAD_MODE_NONE. Note that since v0.3.0
+// LLAMA_LOAD_MODE_MLOCK no longer implies mmap -- upstream's --mlock shim has
+// the same behavior, so --mlock keeps tracking it. Pass --load-mode mmap+mlock
+// for the pre-v0.3.0 meaning.
 inline enum llama_load_mode chimera_llama_load_mode(const std::string & load_mode_name,
                                                     bool use_mmap,
                                                     bool use_mlock) {

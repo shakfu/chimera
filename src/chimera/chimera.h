@@ -49,9 +49,11 @@ struct LlamaCommonOptions {
     float repeat_penalty = 1.1f;
     bool use_mmap = true;
     bool use_mlock = false;
-    // --load-mode names llama_load_mode directly: none | mmap | mlock | dio.
-    // Empty = derive from use_mmap/use_mlock above; a non-empty value wins
-    // over both. "dio" (direct I/O) is reachable only this way.
+    // --load-mode names llama_load_mode directly:
+    // auto | none | mmap | mlock | mmap+mlock | dio. Empty = derive from
+    // use_mmap/use_mlock above; a non-empty value wins over both. "auto"
+    // (upstream's own default since v0.3.0), "mmap+mlock" and "dio" (direct
+    // I/O) are reachable only this way.
     std::string load_mode;
 
     // Perf / cache
@@ -69,6 +71,10 @@ struct LlamaCommonOptions {
     float dry_multiplier   = 0.0f;
     float dry_base         = 1.75f;
     int   dry_allowed_length = 2;
+    // -1 = scan the whole context. llama.cpp v0.3.0 dropped that sentinel
+    // (a negative window now clamps to 0, which *disables* the sampler), so
+    // make_sampler() resolves it against n_ctx before handing it to llama.
+    // Same for penalty_last_n above.
     int   dry_penalty_last_n = -1;
     std::vector<std::string> dry_sequence_breakers; // empty = leave upstream default
     std::vector<std::string> logit_bias;            // "<id>(+|-|=)<bias>" or "<id>=<bias>"
@@ -431,6 +437,14 @@ struct SdOptions {
     // --stream-layers). Only engages when max_vram > 0.
     bool  stream_layers             = false;
 
+    // Explicit backend-assignment specs (sd_cli's --backend /
+    // --params-backend) and the automatic placement solver (--auto-fit).
+    // See chimera_sd::LoadParams for the spec grammar; passed through
+    // verbatim, sd validates them.
+    std::string backend;
+    std::string params_backend;
+    bool  auto_fit                  = false;
+
     // Pre-load all params into the params backend at model-load time
     // instead of lazily on first use (sd_cli's --eager-load). Trades a
     // slower load for no first-generation warmup. Default off = lazy.
@@ -592,6 +606,9 @@ struct ServeOptions {
     bool        sd_force_sdxl_vae_conv_scale = false;
     bool        sd_stream_layers             = false; // engages only with sd_max_vram > 0
     bool        sd_eager_load                = false; // pre-load params at load time (vs lazy on first use)
+    std::string sd_backend;                           // per-module compute placement spec
+    std::string sd_params_backend;                    // per-module weight-residency spec
+    bool        sd_auto_fit                  = false; // let sd derive both specs from model size + VRAM
     std::string sd_rng;                      // empty = upstream default
     std::string sd_sampler_rng;              // empty = upstream default
     std::string sd_prediction;               // empty = upstream default

@@ -1,0 +1,87 @@
+Pin the Metal shading-language version instead of inheriting it from the host.
+
+Metal derives MSL version from the SDK the *host process* linked against when
+MTLCompileOptions.languageVersion is unset. ggml is a library loaded into
+whichever binary the user runs, so shader compilation depended on that binary
+rather than on the machine. Under python.org's CPython 3.12 (linked against the
+macOS 12.1 SDK) the embedded library fails to compile entirely --
+"no matching constructor for initialization of 'threadgroup metal::half4x4[512]'"
+-- and the Metal backend never initializes. Below MSL 3.1 the bf16 kernels are
+additionally #undef'd while props.has_bfloat stays true.
+
+This variant targets the per-kind library layout llama.cpp's ggml adopted in
+v0.3.0 (one MTLLibrary per op-source, compiled in parallel). The older
+single-library layout still vendored by whisper.cpp and stable-diffusion.cpp is
+handled by ggml-metal-pin-msl-version.patch; each tree matches exactly one, and
+the other self-skips.
+
+The ladder deliberately stops below MSL 4.0, so the Metal 4 tensor headers stay
+unavailable and the tensor probe keeps taking its existing unsupported path.
+Enabling the MSL 4.0 tensor kernels blanks stable-diffusion output, so raising
+the ceiling needs its own investigation first.
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 19c5782..4a062ba 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -273,6 +273,42 @@ static bool ggml_metal_library_flatten_file(NSMutableString * dst, NSString * pa
+     return src;
+ }
+ 
++// When MTLCompileOptions.languageVersion is left unset, Metal derives the MSL
++// version from the SDK the *host process* was linked against -- not from the
++// running OS. That makes shader compilation depend on which binary loaded ggml.
++// Loaded into an interpreter linked against an old SDK (python.org's CPython
++// 3.12 links the macOS 12.1 SDK), the default drops below MSL 3.1 and the
++// library fails to compile outright:
++//
++//   error: no matching constructor for initialization of
++//          'threadgroup metal::half4x4[512]'
++//
++// leaving ggml_metal_device_init with no library and no Metal backend. Below
++// MSL 3.1 the bf16 kernels are also silently #undef'd (see the .metal sources)
++// while props.has_bfloat stays true, so the failure mode there is worse than a
++// clean error.
++//
++// Pin the version so behaviour follows the machine, not the host binary. The
++// ladder stays below MSL 4.0: the Metal 4 tensor headers remain unavailable and
++// the tensor probe keeps taking its existing "unsupported" path.
++static void ggml_metal_set_language_version(MTLCompileOptions * options) {
++    // spelled numerically so this still builds against SDKs predating the enum
++    // constants, matching the MTLGPUFamilyMetal4_GGML precedent elsewhere here
++    const NSUInteger msl_3_0 = (3 << 16) | 0;
++    const NSUInteger msl_3_1 = (3 << 16) | 1;
++    const NSUInteger msl_3_2 = (3 << 16) | 2;
++
++    if (@available(macOS 15.0, iOS 18.0, tvOS 18.0, *)) {
++        options.languageVersion = (MTLLanguageVersion) msl_3_2;
++    } else if (@available(macOS 14.0, iOS 17.0, tvOS 17.0, *)) {
++        options.languageVersion = (MTLLanguageVersion) msl_3_1;
++    } else if (@available(macOS 13.0, iOS 16.0, tvOS 16.0, *)) {
++        // MSL 3.1 does not exist here; 3.0 still compiles the library, but the
++        // bf16 kernels are compiled out -- an OS ceiling, not a choice.
++        options.languageVersion = (MTLLanguageVersion) msl_3_0;
++    }
++}
++
+ // Compile all per-kind libraries in parallel. `source_for_kind` returns the MSL
+ // source for a kind (the helper takes ownership and releases it), or nil with
+ // *err set on failure. On success the objs[] slots are populated and the routing
+@@ -313,6 +349,8 @@ static bool ggml_metal_library_compile_all(
+                 MTLCompileOptions * options = [MTLCompileOptions new];
+                 options.preprocessorMacros = prep;
+ 
++                ggml_metal_set_language_version(options);
++
+                 lib = [device newLibraryWithSource:src options:options error:&error];
+ 
+                 [options release];
+@@ -557,6 +595,8 @@ ggml_metal_library_t ggml_metal_library_init_from_source(ggml_metal_device_t dev
+         MTLCompileOptions * options = [MTLCompileOptions new];
+         options.preprocessorMacros = prep;
+ 
++        ggml_metal_set_language_version(options);
++
+         library = [device newLibraryWithSource:src options:options error:&error];
+         if (error) {
+             if (verbose) {

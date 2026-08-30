@@ -230,6 +230,28 @@ struct LoadParams {
     // Default off = upstream default (lazy).
     bool  eager_load                = false;
 
+    // Explicit backend-assignment specs, passed to sd_ctx_params_t verbatim
+    // (sd master-700 replaced the per-component "keep on CPU" booleans with
+    // these). `backend` assigns the *compute* device per module,
+    // `params_backend` assigns *weight residency* and additionally accepts
+    // `cpu` and `disk`. Both take a bare target for every module ("cuda0",
+    // "cpu") or comma-separated per-module assignments
+    // ("diffusion=cuda0,te=cpu"); module keys follow upstream (diffusion /
+    // model / unet / dit, te / clip / llm / t5, vae, clip-vision,
+    // control-net, photomaker, upscaler, detector). Empty leaves the spec to
+    // whatever offload_to_cpu / keep_*_on_cpu compose. Not validated
+    // chimera-side: sd parses these itself and reports its own errors.
+    std::string backend;
+    std::string params_backend;
+
+    // Let sd.cpp derive both specs from the model sizes and the per-device
+    // memory budgets (max_vram, defaulting to free memory minus a margin).
+    // Overrides `backend` and `params_backend` upstream-side, and may split a
+    // module across GPUs. On a single-GPU box it tends to resolve to placing
+    // everything on the CPU, which fits but is far slower than an explicit
+    // placement -- prefer `params_backend` when one is known.
+    bool  auto_fit                  = false;
+
     // Enum-string knobs resolved via sd.cpp's str_to_* helpers. Empty
     // leaves the upstream default in place; unknown values exit with
     // BadInput from load_model.
@@ -289,6 +311,19 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req);
 // per-architecture preset defaults in place. Exposed for testing; generate()
 // calls it and hands the result to sd.
 std::string build_ref_image_args(const GenerateRequest & req);
+
+// Compose sd_ctx_params_t::backend and ::params_backend from a LoadParams.
+// sd.cpp (master-700) replaced the per-component "keep on CPU" booleans with
+// two assignment specs: `backend` places *compute* per module, `params_backend`
+// places *weight residency* (and additionally accepts cpu / disk). chimera keeps
+// its booleans -- they are what --clip-on-cpu / --vae-on-cpu / --control-net-cpu
+// / --offload-to-cpu bind to -- and composes them the way upstream's own
+// deprecation text says, then appends the caller's explicit --backend /
+// --params-backend passthrough. sd resolves repeated keys last-wins, so the
+// explicit spec overrides the booleans. Empty leaves the field unset, which
+// keeps sd's own defaults. Exposed for testing; load_model calls both.
+std::string build_backend_spec(const LoadParams & params);
+std::string build_params_backend_spec(const LoadParams & params);
 
 // ---- runtime introspection (for `chimera info`) ------------------------
 

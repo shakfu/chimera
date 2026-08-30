@@ -59,7 +59,10 @@ void probe_load_mode() {
           "load_mode: default (mmap on, mlock off) should be MMAP");
     check(chimera_llama_load_mode("", false, false) == LLAMA_LOAD_MODE_NONE,
           "load_mode: --no-mmap should be NONE");
-    // --mlock implies mmap upstream, so it wins over the mmap flag either way.
+    // --mlock wins over the mmap flag either way, matching upstream's own
+    // deprecated-flag shim. Since v0.3.0 LLAMA_LOAD_MODE_MLOCK no longer
+    // implies mmap -- that is now LLAMA_LOAD_MODE_MMAP_MLOCK -- and upstream's
+    // shim moved with it, so chimera keeps tracking it.
     check(chimera_llama_load_mode("", true,  true) == LLAMA_LOAD_MODE_MLOCK,
           "load_mode: --mlock should be MLOCK");
     check(chimera_llama_load_mode("", false, true) == LLAMA_LOAD_MODE_MLOCK,
@@ -72,7 +75,11 @@ void probe_load_mode() {
           "load_mode: explicit 'mmap' should override the booleans");
     check(chimera_llama_load_mode("mlock", false, false) == LLAMA_LOAD_MODE_MLOCK,
           "load_mode: explicit 'mlock' should override the booleans");
-    // dio is reachable only through --load-mode.
+    // auto, mmap+mlock and dio are reachable only through --load-mode.
+    check(chimera_llama_load_mode("auto",  false, true) == LLAMA_LOAD_MODE_AUTO,
+          "load_mode: explicit 'auto' should map to AUTO");
+    check(chimera_llama_load_mode("mmap+mlock", false, false) == LLAMA_LOAD_MODE_MMAP_MLOCK,
+          "load_mode: explicit 'mmap+mlock' should map to MMAP_MLOCK");
     check(chimera_llama_load_mode("dio",   true, false) == LLAMA_LOAD_MODE_DIRECT_IO,
           "load_mode: explicit 'dio' should map to DIRECT_IO");
 
@@ -130,6 +137,59 @@ void probe_ref_image_args() {
               "ref_index_mode=decrease,ref_index_mode=increase",
           "ref_image_args: flag must come after a colliding passthrough key");
 }
+
+// sd master-700 replaced the per-component "keep on CPU" booleans with two
+// assignment specs. Pin the composition and the ordering: sd's parser is
+// last-wins per key, so an explicit --backend / --params-backend must land
+// AFTER the flag-derived assignments to override them.
+void probe_backend_specs() {
+    chimera_sd::LoadParams lp;
+    check(chimera_sd::build_backend_spec(lp).empty(),
+          "backend_spec: defaults should produce an empty string");
+    check(chimera_sd::build_params_backend_spec(lp).empty(),
+          "params_backend_spec: defaults should produce an empty string");
+
+    // The three deprecated flags are *compute* placements, per upstream's own
+    // deprecation text ("use --backend te=cpu"). They must never reach
+    // params_backend, and never reach max_vram.
+    lp.keep_clip_on_cpu = true;
+    check(chimera_sd::build_backend_spec(lp) == "te=cpu",
+          "backend_spec: --clip-on-cpu alone");
+    check(chimera_sd::build_params_backend_spec(lp).empty(),
+          "backend_spec: --clip-on-cpu must not touch params_backend");
+
+    lp.keep_vae_on_cpu = true;
+    lp.keep_control_net_on_cpu = true;
+    check(chimera_sd::build_backend_spec(lp) == "te=cpu,vae=cpu,controlnet=cpu",
+          "backend_spec: all three CPU flags should be comma-joined");
+
+    // --offload-to-cpu is a residency placement, so it composes into the other
+    // spec and the two are independent.
+    lp = {};
+    lp.offload_to_cpu = true;
+    check(chimera_sd::build_params_backend_spec(lp) == "*=cpu",
+          "params_backend_spec: --offload-to-cpu alone");
+    check(chimera_sd::build_backend_spec(lp).empty(),
+          "params_backend_spec: --offload-to-cpu must not touch backend");
+
+    // Explicit specs pass through verbatim when no boolean is set...
+    lp = {};
+    lp.backend = "diffusion=cuda0,te=cpu";
+    lp.params_backend = "te=cpu";
+    check(chimera_sd::build_backend_spec(lp) == "diffusion=cuda0,te=cpu",
+          "backend_spec: --backend passthrough should survive verbatim");
+    check(chimera_sd::build_params_backend_spec(lp) == "te=cpu",
+          "params_backend_spec: --params-backend passthrough should survive verbatim");
+
+    // ...and come last when one is, so sd resolves the collision to the
+    // explicit spec rather than to the coarse boolean.
+    lp.keep_vae_on_cpu = true;
+    lp.offload_to_cpu  = true;
+    check(chimera_sd::build_backend_spec(lp) == "vae=cpu,diffusion=cuda0,te=cpu",
+          "backend_spec: --backend must be appended after the boolean flags");
+    check(chimera_sd::build_params_backend_spec(lp) == "*=cpu,te=cpu",
+          "params_backend_spec: --params-backend must be appended after --offload-to-cpu");
+}
 #endif
 
 }  // namespace
@@ -173,6 +233,7 @@ int main() {
     probe_load_mode();
 #ifdef CHIMERA_HAS_SD
     probe_ref_image_args();
+    probe_backend_specs();
 #endif
     if (g_failures != 0) {
         std::fprintf(stderr, "FAIL: %d translation-layer check(s) failed\n", g_failures);

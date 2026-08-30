@@ -602,6 +602,26 @@ void decode_tokens(llama_context * ctx, const std::vector<llama_token> & tokens,
     }
 }
 
+// llama.cpp v0.3.0 removed the "-1 = context size" sentinel from both
+// llama_sampler_init_penalties() and llama_sampler_init_dry(): a negative
+// window is now clamped with std::max(n, 0), and 0 is each sampler's
+// *disabled* value. Upstream used to resolve -1 one layer up and changed
+// both common_params_sampling defaults to 64 when it dropped the sentinel;
+// chimera kept -1, which silently turned the DRY sampler off entirely.
+// chimera still accepts -1 and resolves it here, so --repeat-last-n and
+// --dry-penalty-last-n keep meaning what their help text says. The window
+// resolves to the context chimera is about to create (opts.n_ctx), falling
+// back to the model's training context when that is left at 0.
+static int32_t resolve_penalty_window(int n, const llama_model * model, uint32_t n_ctx) {
+    if (n >= 0) {
+        return static_cast<int32_t>(n);
+    }
+    if (n_ctx > 0) {
+        return static_cast<int32_t>(n_ctx);
+    }
+    return llama_model_n_ctx_train(model);
+}
+
 common_sampler_ptr make_sampler(const llama_model *           model,
                                 const LlamaCommonOptions &    opts,
                                 const ReasoningBudgetParams & rbp) {
@@ -612,7 +632,7 @@ common_sampler_ptr make_sampler(const llama_model *           model,
     sampling.min_p = opts.min_p;
     sampling.temp = opts.temp;
     sampling.penalty_repeat = opts.repeat_penalty;
-    sampling.penalty_last_n  = opts.penalty_last_n;
+    sampling.penalty_last_n  = resolve_penalty_window(opts.penalty_last_n, model, opts.n_ctx);
     sampling.penalty_present = opts.penalty_present;
     sampling.penalty_freq    = opts.penalty_freq;
     sampling.mirostat        = opts.mirostat;
@@ -621,7 +641,7 @@ common_sampler_ptr make_sampler(const llama_model *           model,
     sampling.dry_multiplier     = opts.dry_multiplier;
     sampling.dry_base           = opts.dry_base;
     sampling.dry_allowed_length = opts.dry_allowed_length;
-    sampling.dry_penalty_last_n = opts.dry_penalty_last_n;
+    sampling.dry_penalty_last_n = resolve_penalty_window(opts.dry_penalty_last_n, model, opts.n_ctx);
     if (!opts.dry_sequence_breakers.empty()) {
         sampling.dry_sequence_breakers = opts.dry_sequence_breakers;
     }

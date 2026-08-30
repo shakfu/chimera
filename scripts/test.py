@@ -808,10 +808,11 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
                 t.fail("expected non-zero exit, got 0")
 
     # ...and every valid name must pass the validator and reach model load,
-    # which then fails with Load (3) on the missing file. "dio" in particular
-    # is reachable ONLY through --load-mode -- there is no boolean for it --
-    # so this is what proves the new flag is actually wired through.
-    for mode in ("none", "mmap", "mlock", "dio"):
+    # which then fails with Load (3) on the missing file. "auto", "mmap+mlock"
+    # and "dio" in particular are reachable ONLY through --load-mode -- there is
+    # no boolean for any of them -- so this is what proves the flag is actually
+    # wired through.
+    for mode in ("auto", "none", "mmap", "mlock", "mmap+mlock", "dio"):
         with maybe(rec, f"gen --load-mode {mode} reaches model load (exit 3)") as t:
             rc = run_silent(
                 [str(chimera), "gen", "-m", "/no/such/model.gguf",
@@ -834,6 +835,28 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
             timeout=60,
         )
         _check_rc(t, rc, want=3, timeout=60)
+
+    # --backend / --params-backend / --auto-fit are the placement surface sd
+    # exposes in place of the deprecated --clip-on-cpu / --vae-on-cpu /
+    # --offload-to-cpu booleans. Like --ref-image-args they are verbatim
+    # passthroughs that sd validates itself, so without a model all we can
+    # assert is that they parse and the run proceeds to model load. The
+    # composition against the boolean flags is pinned in
+    # tests/external/smoke.cpp.
+    for label, extra in [
+        ("--backend", ["--backend", "diffusion=cpu,te=cpu"]),
+        ("--params-backend", ["--params-backend", "te=cpu"]),
+        ("--auto-fit", ["--auto-fit"]),
+        ("--params-backend with --offload-to-cpu",
+         ["--offload-to-cpu", "--params-backend", "te=cpu"]),
+    ]:
+        with maybe(rec, f"sd {label} parses and reaches model load (exit 3)") as t:
+            rc = run_silent(
+                [str(chimera), "sd", "-m", "/no/such/model.gguf", "-p", "hi",
+                 "-o", "/no/such/dir/out.png", *extra],
+                timeout=60,
+            )
+            _check_rc(t, rc, want=3, timeout=60)
 
 
 # ============================================================================
@@ -876,11 +899,12 @@ def e2e_gen_tests(rec: Recorder, chimera: Path) -> None:
     # --load-mode against a REAL model. The parse-level checks in
     # smoke_tests() only prove the validator accepts each name and the run
     # reaches model load; they cannot catch a mode that loads garbage or
-    # fails at runtime. Each of the four maps to a distinct llama.cpp weight-
-    # loading path (b10107's llama_load_mode), and "dio" (direct I/O) in
+    # fails at runtime. Each maps to a distinct llama.cpp weight-loading path
+    # (llama_load_mode, reshaped in v0.3.0: "auto" and "mmap+mlock" joined the
+    # enum and MLOCK stopped implying mmap), and "dio" (direct I/O) in
     # particular is a path chimera never exercised before the flag existed.
-    # ~0.5s each on a 1.2G Q8_0, so all four are cheap to cover.
-    for mode in ("none", "mmap", "mlock", "dio"):
+    # ~0.5s each on a 1.2G Q8_0, so all six are cheap to cover.
+    for mode in ("auto", "none", "mmap", "mlock", "mmap+mlock", "dio"):
         with maybe(rec, f"gen --load-mode {mode} generates (real model)") as t:
             rc, out, _ = run_capture(
                 [str(chimera), "gen", "-m", str(GEN_MODEL), "-p", "Hello",

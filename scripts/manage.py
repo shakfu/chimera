@@ -39,6 +39,7 @@ Environment variables:
 """
 
 import argparse
+import hashlib
 import logging
 import os
 import platform
@@ -94,9 +95,15 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.2.13"
+CHIMERA_VERSION = "0.2.14"
 LLAMACPP_VERSION = "v0.3.0"
 WHISPERCPP_VERSION = "v1.9.2"
+# Ceiling, not staleness: from master-817 on, stable-diffusion.cpp calls
+# `ggml_mul_mat_i8_tensorwise` and `ggml_quantize_i8_convrot`, which exist only
+# in leejet's ggml fork. chimera compiles SD against llama.cpp's ggml (see
+# `_sync_ggml_abi`), where they are undeclared, so every SD translation unit
+# fails from 817 on. Do not bump past this until those ops land in ggml proper.
+# (Observed by the sibling cyllama project at its 0.4.1; not re-verified here.)
 SDCPP_VERSION = "master-816-487de75"
 # linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
 # commit in CHANGELOG for traceability.
@@ -513,6 +520,59 @@ class GgmlBuilder(Builder):
     def get_backend_cmake_options(self) -> dict[str, Any]:
         raise NotImplementedError
 
+    def _apply_source_patches(self) -> None:
+        """Apply chimera's local fixes to the vendored source before building.
+
+        Two sets of ``scripts/patches/*.patch`` are applied with ``-p1`` to the
+        cloned tree: ``ggml-*.patch``, which fix the ggml copy every ggml-backed
+        project vendors, and ``<project>-*.patch`` (e.g.
+        ``stable-diffusion.cpp-*.patch``), specific to one upstream. Trees are
+        wiped and re-fetched by ``make reset``, so these run on every build.
+
+        Each patch is idempotent and self-disabling: already-applied and
+        no-longer-applies are logged and skipped, never fatal, so a version bump
+        that lands an equivalent upstream fix does not break the build. The
+        ``.patch`` files are the single source of truth and double as the
+        upstream PR payload; see ``scripts/patches/README.md``.
+        """
+        patch_dir = Path(__file__).resolve().parent / "patches"
+        if not patch_dir.exists():
+            return
+        patches = sorted(patch_dir.glob("ggml-*.patch")) + sorted(
+            patch_dir.glob(f"{self.name}-*.patch")
+        )
+        for patch in patches:
+            self._apply_patch(patch)
+
+    def _apply_patch(self, patch: Path) -> None:
+        """Apply a single unified diff to ``self.src_dir`` if it isn't already.
+
+        Uses ``git apply`` (which works with or without a git repo) and its
+        ``--check`` / ``--reverse --check`` dry runs to tell apply,
+        already-applied and no-longer-applies apart -- without aborting the
+        build in the latter two cases, unlike ``self.cmd``.
+        """
+
+        def _git_apply(*flags: str) -> bool:
+            return (
+                subprocess.run(
+                    ["git", "apply", *flags, str(patch)],
+                    cwd=str(self.src_dir),
+                    capture_output=True,
+                ).returncode
+                == 0
+            )
+
+        if _git_apply("--check"):
+            subprocess.run(
+                ["git", "apply", str(patch)], cwd=str(self.src_dir), check=True
+            )
+            self.log.info(f"applied patch: {patch.name}")
+        elif _git_apply("--reverse", "--check"):
+            self.log.debug(f"patch already applied, skipping: {patch.name}")
+        else:
+            self.log.info(f"patch no longer applies, skipping: {patch.name}")
+
     def ggml_max_name_flags(self) -> dict[str, str]:
         """-DGGML_MAX_NAME for every language that compiles ggml_tensor code.
 
@@ -916,6 +976,10 @@ class LlamaCppBuilder(GgmlBuilder):
         if not self.src_dir.exists():
             self.setup()
         self.log.info(f"building {self.name}")
+
+        # Before _copy_headers(): a patch may touch a header that gets staged.
+        self._apply_source_patches()
+
         self.prefix.mkdir(exist_ok=True)
         self.include.mkdir(exist_ok=True)
         self._copy_headers()
@@ -1043,6 +1107,9 @@ class WhisperCppBuilder(GgmlBuilder):
         if not self.src_dir.exists():
             self.setup()
         self.log.info(f"building {self.name}")
+
+        self._apply_source_patches()
+
         self.prefix.mkdir(exist_ok=True)
         self.include.mkdir(exist_ok=True)
         self.glob_copy(
@@ -1182,17 +1249,66 @@ class StableDiffusionCppBuilder(GgmlBuilder):
         SD vendors its own ggml. When chimera links SD against llama.cpp's
         ggml, ggml_op / ggml_type ids must match between header and runtime
         or compute graphs build with wrong op ids and assert at runtime.
+
+        The swap also invalidates SD's cmake tree, which is dropped with it:
+        `copytree` preserves mtimes, so the incoming sources are not newer than
+        the objects already built from the tree being replaced, and make sees
+        nothing to redo. After a llama.cpp bump that leaves SD compiling against
+        the new ggml while linking objects built from the old one -- one
+        surviving `ggml-metal-device.m.o` from before llama.cpp split its Metal
+        library per op-source resolves `_ggml_metallib_start` against a tree
+        that only defines `_ggml_metallib_<name>_start`.
+
+        Dropping the tree unconditionally would mean a full SD rebuild on every
+        single build, so the swap is skipped when the ggml already in place is
+        the one we would copy: `_ggml_tree_stamp` fingerprints the source tree
+        and the result is recorded in the destination. Only a real change --
+        i.e. a llama.cpp bump, or a ggml-*.patch landing on llama.cpp's copy --
+        re-copies and invalidates the objects.
         """
         llama_ggml = self.project.src / "llama.cpp" / "ggml"
         sd_ggml = self.src_dir / "ggml"
         if not llama_ggml.exists() or not sd_ggml.exists():
             self.log.warning("Cannot sync ggml ABI: llama.cpp or SD ggml dir missing")
             return
+
+        stamp_path = sd_ggml / self.GGML_SYNC_STAMP
+        stamp = self._ggml_tree_stamp(llama_ggml)
+        if stamp_path.exists() and stamp_path.read_text().strip() == stamp:
+            self.log.info("SD's ggml already matches llama.cpp's; skipping sync")
+            return
+
         shutil.rmtree(sd_ggml)
         shutil.copytree(llama_ggml, sd_ggml)
+        stamp_path.write_text(stamp + "\n")
         self.log.info(
             "Replaced SD's vendored ggml with llama.cpp's ggml for ABI compatibility"
         )
+        if self.build_dir.exists():
+            self.remove(self.build_dir)
+            self.log.info(
+                "Dropped %s: its objects were compiled against the replaced ggml",
+                self.build_dir,
+            )
+
+    #: Written into SD's ggml dir to record which llama.cpp ggml is in place.
+    GGML_SYNC_STAMP: str = ".chimera-ggml-sync"
+
+    @classmethod
+    def _ggml_tree_stamp(cls, tree: Path) -> str:
+        """Fingerprint a ggml source tree: relative path, size and mtime.
+
+        Cheap enough to run on every build and sensitive to exactly what makes
+        the copy stale -- a re-clone at a new ref, or a patch rewriting a file.
+        Content hashing would be stricter but reads the whole tree each time for
+        no practical gain here.
+        """
+        h = hashlib.sha256()
+        for path in sorted(p for p in tree.rglob("*") if p.is_file()):
+            st = path.stat()
+            rel = path.relative_to(tree).as_posix()
+            h.update(f"{rel}\0{st.st_size}\0{int(st.st_mtime)}\n".encode())
+        return h.hexdigest()
 
     def build(self, examples: bool = True) -> None:
         if not self.src_dir.exists():
@@ -1204,6 +1320,10 @@ class StableDiffusionCppBuilder(GgmlBuilder):
         # against llama.cpp's ggml (chimera's default, SD_USE_VENDORED_GGML=0).
         if os.environ.get("SD_USE_VENDORED_GGML") == "0":
             self._sync_ggml_abi()
+
+        # After _sync_ggml_abi(), so ggml-*.patch lands on whichever ggml copy
+        # is actually compiled (SD's vendored one or llama.cpp's).
+        self._apply_source_patches()
 
         self.prefix.mkdir(exist_ok=True)
         self.include.mkdir(exist_ok=True)
@@ -1219,15 +1339,17 @@ class StableDiffusionCppBuilder(GgmlBuilder):
 
         backend_options = self.get_backend_cmake_options()
 
-        # MSVC caps an object file at 65535 sections. src/stable-diffusion.cpp
+        # MSVC caps an object file at 65535 sections and src/stable-diffusion.cpp
         # blew past that at sd.cpp master-795 (error C1128), which is why the
-        # Windows CI leg started failing while macOS/Linux stayed green. sd.cpp
-        # does not set the flag in its CMakeLists.txt -- upstream works around
-        # it in its own workflow (.github/workflows/build.yml passes
-        # -DCMAKE_CXX_FLAGS='/bigobj'), so chimera has to do the same.
+        # Windows CI leg started failing while macOS/Linux stayed green. This
+        # used to be handled by passing -DCMAKE_CXX_FLAGS=/bigobj here, the way
+        # upstream's own workflow does, but a command-line -D pre-seeds the
+        # cache so CMake's platform init never runs: that *replaces* the MSVC
+        # defaults rather than appending, silently dropping /EHsc (and /GR) from
+        # every SD translation unit. /bigobj is now added inside sd.cpp's own
+        # `if (MSVC)` block, next to the /MP and /utf-8 it already sets --
+        # see scripts/patches/stable-diffusion.cpp-msvc-bigobj.patch.
         extra: dict[str, Any] = {}
-        if PLATFORM == "Windows":
-            extra["CMAKE_CXX_FLAGS"] = "/bigobj"
 
         self.cmake_config(
             src_dir=self.src_dir,

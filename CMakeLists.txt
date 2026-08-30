@@ -590,7 +590,7 @@ if(WIN32)
     # pulls in sd.cpp's ggml_extend.hpp, chimera_llama.cpp pulls in mtmd +
     # server-context) toward that ceiling. sd.cpp's own src/stable-diffusion.cpp
     # crossed it at master-795 with error C1128 -- see the matching /bigobj in
-    # StableDiffusionCppBuilder.build (scripts/manage.py). The flag only widens
+    # scripts/patches/stable-diffusion.cpp-msvc-bigobj.patch. The flag only widens
     # the object file's section table; no codegen or runtime effect.
     set(CXX_COMPILE_OPTIONS /std:c++17 /EHsc /MD /bigobj)
 else()

@@ -150,6 +150,7 @@ static_assert(std::is_same_v<decltype(sd_ctx_params_t::eager_load),             
 // encode+decode, so vae_decode_only has no replacement and is simply dropped.
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::backend),                  const char *>, "sd_ctx_params_t::backend retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::params_backend),           const char *>, "sd_ctx_params_t::params_backend retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::auto_fit),                        bool>, "sd_ctx_params_t::auto_fit retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::vae_format),         enum sd_vae_format_t>, "sd_ctx_params_t::vae_format retyped.");
 
 // ---- sd_img_gen_params_t top-level fields (build_img_gen_params) ------
@@ -505,18 +506,12 @@ SdContextPtr load_model(const LoadParams & params) {
     // params_backend; the keep_*_on_cpu flags prepend te=/vae=/controlnet=cpu
     // to backend. The backing std::strings must outlive new_sd_ctx() below,
     // which copies them; they live for the rest of this function.
-    std::string sd_backend_spec;
-    std::string sd_params_backend_spec;
+    const std::string sd_backend_spec        = build_backend_spec(params);
+    const std::string sd_params_backend_spec = build_params_backend_spec(params);
     std::string sd_max_vram_str;
-    auto prepend_assignment = [](std::string & spec, const char * assignment) {
-        spec = spec.empty() ? assignment : std::string(assignment) + "," + spec;
-    };
-    if (params.offload_to_cpu)         prepend_assignment(sd_params_backend_spec, "*=cpu");
-    if (params.keep_clip_on_cpu)       prepend_assignment(sd_backend_spec, "te=cpu");
-    if (params.keep_vae_on_cpu)        prepend_assignment(sd_backend_spec, "vae=cpu");
-    if (params.keep_control_net_on_cpu) prepend_assignment(sd_backend_spec, "controlnet=cpu");
     if (!sd_backend_spec.empty())        ctx_params.backend        = sd_backend_spec.c_str();
     if (!sd_params_backend_spec.empty()) ctx_params.params_backend = sd_params_backend_spec.c_str();
+    ctx_params.auto_fit = params.auto_fit;
     // Upstream retyped max_vram from float to const char* (sd.cpp master-709):
     // it now accepts either a GiB budget or a per-backend assignment spec
     // ("cuda0=6,vulkan0=2") for graph-cut segmented param offload. chimera's
@@ -743,6 +738,38 @@ void save_png_file(const std::string &   path,
 // deprecated-flag shim does (examples/common/common.cpp) — sd's parser applies
 // pairs left to right, so a repeated key resolves to the last one and the
 // explicit flags win. An empty result leaves the preset defaults alone.
+// Append `addition` to a comma-separated backend-assignment spec.
+static void append_assignment(std::string & spec, const std::string & addition) {
+    if (addition.empty()) {
+        return;
+    }
+    spec = spec.empty() ? addition : spec + "," + addition;
+}
+
+std::string build_backend_spec(const LoadParams & params) {
+    std::string spec;
+    // Upstream's own deprecation text for these three flags is literally
+    // "use --backend te=cpu" / "vae=cpu" / "controlnet=cpu", so they compose
+    // into the compute spec, not the residency one.
+    if (params.keep_clip_on_cpu)        append_assignment(spec, "te=cpu");
+    if (params.keep_vae_on_cpu)         append_assignment(spec, "vae=cpu");
+    if (params.keep_control_net_on_cpu) append_assignment(spec, "controlnet=cpu");
+    // The caller's explicit spec goes last: sd's parser is last-wins per key
+    // (and per default), so it overrides the coarse booleans above rather than
+    // the other way round.
+    append_assignment(spec, params.backend);
+    return spec;
+}
+
+std::string build_params_backend_spec(const LoadParams & params) {
+    std::string spec;
+    if (params.offload_to_cpu) {
+        append_assignment(spec, "*=cpu");
+    }
+    append_assignment(spec, params.params_backend);
+    return spec;
+}
+
 std::string build_ref_image_args(const GenerateRequest & req) {
     std::string args = req.ref_image_args;
     const auto append = [&args](const char * pair) {
@@ -1099,6 +1126,9 @@ int command_sd(const SdOptions & opts) {
     lp.force_sdxl_vae_conv_scale = opts.force_sdxl_vae_conv_scale;
     lp.stream_layers             = opts.stream_layers;
     lp.eager_load                = opts.eager_load;
+    lp.backend                   = opts.backend;
+    lp.params_backend            = opts.params_backend;
+    lp.auto_fit                  = opts.auto_fit;
     lp.prediction                = opts.prediction;
     lp.lora_apply_mode           = opts.lora_apply_mode;
     lp.vae_format                = opts.vae_format;
