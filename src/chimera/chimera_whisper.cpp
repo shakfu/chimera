@@ -206,6 +206,27 @@ T read_le(std::istream & in) {
 chimera_whisper::WavData parse_wav_stream(std::istream & in, const std::string & origin) {
     using chimera_whisper::WavData;
 
+    // Total stream length, so every chunk header can be validated against
+    // what is actually there before it is believed. A `data` chunk header
+    // is 8 bytes of attacker-controlled input in front of a `resize()`;
+    // without this bound a 12-byte upload can declare a 4 GiB payload and
+    // the allocation -- not the parse -- is what fails.
+    in.seekg(0, std::ios::end);
+    const std::streamoff stream_end = in.tellg();
+    in.seekg(0, std::ios::beg);
+    if (stream_end < 12) {
+        fail(ExitCode::BadInput, "truncated WAV container: " + origin);
+    }
+    const uint64_t stream_size = static_cast<uint64_t>(stream_end);
+
+    // Bytes left after the chunk header the caller just consumed. Returns
+    // 0 past the end rather than wrapping.
+    auto remaining = [&]() -> uint64_t {
+        const std::streamoff pos = in.tellg();
+        if (pos < 0 || static_cast<uint64_t>(pos) >= stream_size) return 0;
+        return stream_size - static_cast<uint64_t>(pos);
+    };
+
     char riff[4];
     char wave[4];
     in.read(riff, 4);
@@ -230,6 +251,18 @@ chimera_whisper::WavData parse_wav_stream(std::istream & in, const std::string &
         const uint32_t chunk_size = read_le<uint32_t>(in);
         const std::string_view id(chunk_id, 4);
 
+        // A chunk may not claim more than the stream holds. Rejecting
+        // rather than clamping: a header that disagrees with the file is
+        // a malformed file, and silently truncating it would hand
+        // whisper a buffer of zeroes that transcribes as plausible
+        // silence instead of reporting the upload as broken.
+        if (static_cast<uint64_t>(chunk_size) > remaining()) {
+            fail(ExitCode::BadInput,
+                 "WAV chunk '" + std::string(id) + "' declares " +
+                 std::to_string(chunk_size) + " bytes but only " +
+                 std::to_string(remaining()) + " remain: " + origin);
+        }
+
         if (id == "fmt ") {
             audio_format = read_le<uint16_t>(in);
             channels = read_le<uint16_t>(in);
@@ -241,8 +274,13 @@ chimera_whisper::WavData parse_wav_stream(std::istream & in, const std::string &
                 in.seekg(static_cast<std::streamoff>(chunk_size - 16), std::ios::cur);
             }
         } else if (id == "data") {
+            // Bounded by the check above, so the resize can only ask for
+            // bytes the stream actually has.
             pcm_bytes.resize(chunk_size);
             in.read(pcm_bytes.data(), static_cast<std::streamsize>(chunk_size));
+            if (in.gcount() != static_cast<std::streamsize>(chunk_size)) {
+                fail(ExitCode::BadInput, "truncated WAV data chunk: " + origin);
+            }
         } else {
             in.seekg(static_cast<std::streamoff>(chunk_size), std::ios::cur);
         }

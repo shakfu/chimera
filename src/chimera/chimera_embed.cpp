@@ -499,12 +499,16 @@ std::vector<TokenChunk> chunk_by_sentences(const std::string & text,
             --back;
             tail_tokens += sents[back].n_tokens;
         }
-        // Don't loop forever: if `back` didn't move past `first` and the
-        // tail tokens already exceed chunk_tokens minus the next
-        // sentence, just advance. (Pathological case — overlap >=
-        // chunk_tokens is rejected at the top of this function, so this
-        // is mostly belt-and-braces.)
-        if (back >= i) continue;
+        // Forward progress is the invariant: the next pack must start
+        // strictly after the one we just emitted began. `back == first`
+        // would restart the identical pack -- and when only one sentence
+        // fit (the next one pushes the window over `chunk_tokens`) the
+        // walk-back always lands on `first`, so without this guard the
+        // same singleton is emitted forever. Two 6-token sentences with
+        // chunk_tokens=10 and any positive overlap is the minimal case.
+        // Dropping the overlap for that chunk is the right trade: the
+        // window is simply too small to carry one.
+        if (back <= first || back >= i) continue;
         i = back;
     }
     return out;

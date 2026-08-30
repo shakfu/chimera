@@ -140,12 +140,17 @@ std::vector<Chat> list_chats(sqlite3 * db, int limit) {
         sqlite_throw(db, "prepare(list_chats)");
     }
     sqlite3_bind_int(q.get(), 1, limit);
-    while (sqlite3_step(q.get()) == SQLITE_ROW) {
+    int rc;
+    while ((rc = sqlite3_step(q.get())) == SQLITE_ROW) {
         Chat c = row_to_chat(q.get());
         c.message_count = sqlite3_column_int64(q.get(), 9);
         c.partial_count = sqlite3_column_int64(q.get(), 10);
         out.push_back(std::move(c));
     }
+    // A BUSY/IOERR mid-iteration would otherwise be indistinguishable
+    // from the end of the result set, i.e. a short list reported as
+    // complete.
+    if (rc != SQLITE_DONE) sqlite_throw(db, "step(list_chats)");
     return out;
 }
 
@@ -282,7 +287,8 @@ std::vector<StoredMessage> load_messages(sqlite3 * db, int64_t chat_id) {
         sqlite_throw(db, "prepare(load_messages)");
     }
     sqlite3_bind_int64(q.get(), 1, chat_id);
-    while (sqlite3_step(q.get()) == SQLITE_ROW) {
+    int rc;
+    while ((rc = sqlite3_step(q.get())) == SQLITE_ROW) {
         StoredMessage m;
         m.id          = sqlite3_column_int64(q.get(), 0);
         m.chat_id     = sqlite3_column_int64(q.get(), 1);
@@ -297,6 +303,9 @@ std::vector<StoredMessage> load_messages(sqlite3 * db, int64_t chat_id) {
         m.partial     = sqlite3_column_int  (q.get(), 10) != 0;
         out.push_back(std::move(m));
     }
+    // Same invariant as list_chats: a partial transcript must be an
+    // error, not a silently shorter conversation.
+    if (rc != SQLITE_DONE) sqlite_throw(db, "step(load_messages)");
     return out;
 }
 

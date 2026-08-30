@@ -179,11 +179,27 @@ bool fill_common_image_fields(const json &                  fields,
         req.batch_count = coerce_int(fields["n"], 1);
     }
     if (req.batch_count < 1) { err = "n must be >= 1"; return false; }
+    // Upper bound too: `n` multiplies a full diffusion run, and the sd
+    // worker is single-threaded behind one mutex, so an unbounded batch is
+    // an indefinite denial of the image routes for every other caller.
+    if (req.batch_count > CHIMERA_MAX_IMAGE_BATCH) {
+        err = "n must be <= " + std::to_string(CHIMERA_MAX_IMAGE_BATCH);
+        return false;
+    }
 
     if (fields.contains("size")) {
         const std::string size_str = coerce_string(fields["size"]);
         if (!parse_size(size_str, req.width, req.height)) {
             err = "size must be '<W>x<H>' (got '" + size_str + "')";
+            return false;
+        }
+        // parse_size only validates the shape. Dimensions drive both the
+        // latent allocation and the VAE decode buffer, so they need a
+        // ceiling of their own.
+        if (req.width < 1 || req.height < 1 ||
+            req.width > CHIMERA_MAX_IMAGE_DIM || req.height > CHIMERA_MAX_IMAGE_DIM) {
+            err = "size dimensions must be between 1 and " +
+                  std::to_string(CHIMERA_MAX_IMAGE_DIM) + " (got '" + size_str + "')";
             return false;
         }
     }

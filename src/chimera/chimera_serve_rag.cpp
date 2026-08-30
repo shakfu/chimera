@@ -188,6 +188,15 @@ server_http_context::handler_t make_vs_ingest_handler(RagContext * rag) {
             return rag_err(400,
                 "request must include either a multipart 'file' upload or a JSON 'text' field");
         }
+        // Bound the document before it is chunked: every chunk is an
+        // embed() call under `embedder_mutex`, so an oversized upload is
+        // an exclusive hold on the embedder for every other caller, not
+        // just memory.
+        if (text.size() > CHIMERA_MAX_RAG_TEXT_BYTES) {
+            return rag_err(413,
+                "document is " + std::to_string(text.size()) +
+                " bytes; the limit is " + std::to_string(CHIMERA_MAX_RAG_TEXT_BYTES));
+        }
 
         auto conn = rag_open_db(rag);
         auto col = chimera_vector_store::find(conn.get(), name);
@@ -211,7 +220,22 @@ server_http_context::handler_t make_vs_ingest_handler(RagContext * rag) {
                 text, *rag->embedder, col->chunk_tokens, col->chunk_overlap);
         }
         if (chunks.empty()) return rag_err(400, "no non-empty chunks produced");
+        // Chunk count is a function of the collection's window, not the
+        // request, so the byte cap above does not bound it. Cap it too so
+        // a tiny `chunk_tokens` on a large document cannot turn one
+        // request into an unbounded insert loop.
+        if (chunks.size() > CHIMERA_MAX_RAG_CHUNKS) {
+            return rag_err(413,
+                "document produced " + std::to_string(chunks.size()) +
+                " chunks; the limit is " + std::to_string(CHIMERA_MAX_RAG_CHUNKS) +
+                " (raise the collection's chunk_tokens, or split the document)");
+        }
 
+        // All-or-nothing per request. Previously each chunk committed on
+        // its own, so a failure partway through left the leading chunks
+        // in the store while the caller saw an error -- and a retry
+        // re-inserted them, since nothing keys on source_uri.
+        chimera_vector_store::Transaction txn(conn.get(), "chimera_vs_ingest");
         int64_t inserted = 0;
         for (const auto & c : chunks) {
             std::vector<float> vec;
@@ -228,6 +252,7 @@ server_http_context::handler_t make_vs_ingest_handler(RagContext * rag) {
             chimera_vector_store::insert_document(conn.get(), *col, doc);
             ++inserted;
         }
+        txn.commit();
 
         auto res = std::make_unique<server_http_res>();
         res->data = json{

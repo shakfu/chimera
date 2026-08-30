@@ -53,6 +53,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1069,6 +1070,51 @@ def e2e_embed_tests(rec: Recorder, chimera: Path) -> None:
                 )
                 if "wav audio files" not in hit.lower():
                     t.fail(f"top hit didn't mention wav: {hit!r}")
+
+    # Chunker termination. `chunk_by_sentences` walks back from a packed
+    # chunk to apply overlap; when the window only fits one sentence at a
+    # time, that walk-back lands on the sentence the chunk started with
+    # and the pack repeats forever. A 10-token window over ~6-token
+    # sentences with a positive overlap is the minimal reproduction --
+    # before the fix this ingest never returned and grew the DB without
+    # bound, so the timeout is the assertion.
+    with maybe(rec, "sentence chunker terminates when overlap can't advance") as t:
+        with (
+            scratch_file(suffix=".db") as tiny_db,
+            scratch_file(suffix=".txt") as tiny_doc,
+        ):
+            tiny_doc.write_text(
+                "The red fox jumped over. The lazy dog slept on. "
+                "The quick bird flew off. The old cat sat down.\n"
+            )
+            env = {**os.environ, "CHIMERA_DB": str(tiny_db)}
+            rc_c = run_silent(
+                [
+                    str(chimera), "index", "create", "-n", "tiny_window",
+                    "-e", str(EMBED_MODEL),
+                    "--chunk-tokens", "10",
+                    "--chunk-overlap", "4",
+                ],
+                env=env,
+                timeout=60,
+            )
+            if rc_c != 0:
+                t.fail(f"index create exit code {rc_c}")
+            else:
+                try:
+                    rc_i = run_silent(
+                        [
+                            str(chimera), "index", "ingest",
+                            "-n", "tiny_window", "-f", str(tiny_doc),
+                        ],
+                        env=env,
+                        timeout=60,
+                    )
+                except subprocess.TimeoutExpired:
+                    t.fail("ingest did not terminate within 60s (chunker looped)")
+                else:
+                    if rc_i != 0:
+                        t.fail(f"index ingest exit code {rc_i}")
 
     # Hybrid / lexical search: deliberately rare proper-noun-like token so
     # the lexical leg has something semantic search wouldn't surface.
@@ -2419,6 +2465,73 @@ def e2e_image_serve_success_paths(rec: Recorder, chimera: Path) -> None:
 
 
 # ============================================================================
+# Audio input validation — malformed WAV headers + unsupported formats
+# ============================================================================
+
+
+def _wav_with_declared_data_size(declared: int, payload: bytes = b"") -> bytes:
+    """A structurally valid RIFF/WAVE whose `data` chunk lies about its size.
+
+    Used to prove the parser bounds `chunk_size` against what the stream
+    actually holds before it allocates: `declared` near 2**32 previously
+    reached `pcm_bytes.resize(declared)` straight from the wire.
+    """
+    fmt = struct.pack(
+        "<HHIIHH",
+        1,      # PCM
+        1,      # mono
+        16000,  # sample rate
+        32000,  # byte rate
+        2,      # block align
+        16,     # bits per sample
+    )
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
+    body += b"data" + struct.pack("<I", declared) + payload
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def e2e_audio_input_validation(rec: Recorder, chimera: Path) -> None:
+    labels = [
+        "POST /v1/audio/transcriptions rejects an over-declared WAV data chunk",
+        "POST /v1/audio/transcriptions rejects an unknown response_format",
+    ]
+    if not (GEN_MODEL.is_file() and WHISPER_MODEL.is_file() and WHISPER_WAV.is_file()):
+        for label in labels:
+            rec.skip(label, f"needs {GEN_MODEL.name} + {WHISPER_MODEL.name} + {WHISPER_WAV.name}")
+        return
+    if not any(rec.matches(label) for label in labels):
+        return
+    try:
+        with chimera_serve(
+            chimera, ["-m", str(GEN_MODEL), "--enable-audio", str(WHISPER_MODEL)]
+        ) as srv:
+            # A 4 GiB - 1 `data` chunk in a ~50 byte upload. The old parser
+            # sized a vector from that number; the fix is a 4xx, and the
+            # server staying up for the next request is half the assertion.
+            with maybe(rec, labels[0]) as t:
+                r = http_post_multipart(
+                    f"{srv.base_url}/v1/audio/transcriptions",
+                    files={"file": ("evil.wav", _wav_with_declared_data_size(0xFFFFFFFF))},
+                    timeout=60,
+                )
+                if r.status not in (400, 413, 415):
+                    t.fail(f"expected 4xx, got HTTP {r.status}: {r.body[:200]!r}")
+
+            with maybe(rec, labels[1]) as t:
+                r = http_post_multipart(
+                    f"{srv.base_url}/v1/audio/transcriptions",
+                    fields={"response_format": "yaml"},
+                    files={"file": WHISPER_WAV},
+                    timeout=120,
+                )
+                if r.status != 400:
+                    t.fail(f"expected HTTP 400, got {r.status}: {r.body[:200]!r}")
+    except RuntimeError as e:
+        for label in labels:
+            rec.fail(label, 0.0, str(e))
+
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -2438,6 +2551,7 @@ _SECTIONS = [
     ("chats_endpoints", e2e_chats_endpoints_tests),
     ("slots_lora", e2e_slots_lora_tests),
     ("detect_language", e2e_detect_language_test),
+    ("audio_input_validation", e2e_audio_input_validation),
     ("image_serve_enum_validators", e2e_image_serve_enum_validators),
     ("image_serve_gating", e2e_image_serve_gating),
     ("image_serve_aliases", e2e_image_serve_aliases),

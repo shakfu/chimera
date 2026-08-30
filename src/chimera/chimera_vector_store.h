@@ -107,11 +107,39 @@ struct DocumentInput {
     int                token_count = 0;  // optional, informational
 };
 
-// Insert one document + its embedding inside a transaction. The vec0
+// Insert one document + its embedding inside a savepoint. The vec0
 // row uses the same rowid as the `documents` row so KNN results join
-// back trivially. For batch ingestion, wrap multiple calls in your own
-// BEGIN/COMMIT for higher throughput.
+// back trivially. Nests inside a caller's Transaction (see below), which
+// is how batch ingestion gets both throughput and all-or-nothing.
 int64_t insert_document(sqlite3 * db, const Collection & col, const DocumentInput & doc);
+
+// RAII savepoint. Rolls back in the destructor unless commit() ran, so a
+// throw or an early return anywhere inside a multi-document ingest
+// leaves the store as it was rather than half-populated.
+//
+// A savepoint rather than BEGIN/COMMIT so it composes: the outermost one
+// behaves like a transaction when none is open, and insert_document's
+// own savepoint nests inside it instead of failing with "cannot start a
+// transaction within a transaction".
+class Transaction {
+public:
+    // `name` must be a SQL identifier; it is interpolated, not bound.
+    // Callers pass a literal.
+    explicit Transaction(sqlite3 * db, const char * name);
+    ~Transaction();
+
+    Transaction(const Transaction &)             = delete;
+    Transaction & operator=(const Transaction &) = delete;
+
+    // Releases the savepoint. Throws on failure, in which case the
+    // destructor still rolls back.
+    void commit();
+
+private:
+    sqlite3 *   db_;
+    const char * name_;
+    bool        done_ = false;
+};
 
 // --- search ------------------------------------------------------------
 

@@ -237,8 +237,12 @@ std::optional<Collection> find(sqlite3 * db, const std::string & name) {
         sqlite_throw(db, "prepare(find collection)");
     }
     sqlite3_bind_text(q.get(), 1, name.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(q.get()) != SQLITE_ROW) {
-        return std::nullopt;
+    {
+        // DONE is "no such collection"; anything else is a real failure
+        // and must not be reported as a missing row.
+        const int rc = sqlite3_step(q.get());
+        if (rc == SQLITE_DONE) return std::nullopt;
+        if (rc != SQLITE_ROW)  sqlite_throw(db, "step(find collection)");
     }
     return row_to_collection(q.get());
 }
@@ -254,11 +258,13 @@ std::vector<Collection> list(sqlite3 * db) {
     if (sqlite3_prepare_v2(db, sql, -1, q.out(), nullptr) != SQLITE_OK) {
         sqlite_throw(db, "prepare(list collections)");
     }
-    while (sqlite3_step(q.get()) == SQLITE_ROW) {
+    int rc;
+    while ((rc = sqlite3_step(q.get())) == SQLITE_ROW) {
         Collection c = row_to_collection(q.get());
         c.doc_count  = sqlite3_column_int64(q.get(), 8);
         out.push_back(std::move(c));
     }
+    if (rc != SQLITE_DONE) sqlite_throw(db, "step(list collections)");
     return out;
 }
 
@@ -274,8 +280,8 @@ int64_t insert_document(sqlite3 * db, const Collection & col, const DocumentInpu
              std::to_string(doc.embedding.size()));
     }
 
-    exec(db, "BEGIN");
-    try {
+    Transaction txn(db, "chimera_insert_document");
+    {
         StmtGuard ins_doc;
         const char * sql_doc =
             "INSERT INTO documents "
@@ -312,12 +318,31 @@ int64_t insert_document(sqlite3 * db, const Collection & col, const DocumentInpu
         if (sqlite3_step(ins_vec.get()) != SQLITE_DONE) {
             sqlite_throw(db, "step(insert vec row)");
         }
-        exec(db, "COMMIT");
+        txn.commit();
         return doc_id;
-    } catch (...) {
-        sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
-        throw;
     }
+}
+
+// -----------------------------------------------------------------------
+// Transaction
+// -----------------------------------------------------------------------
+
+Transaction::Transaction(sqlite3 * db, const char * name) : db_(db), name_(name) {
+    exec(db_, std::string("SAVEPOINT ") + name_);
+}
+
+Transaction::~Transaction() {
+    if (done_) return;
+    // Destructor path: never throws, and never leaves the savepoint on
+    // the stack. ROLLBACK TO rewinds; RELEASE pops.
+    const std::string n(name_);
+    sqlite3_exec(db_, ("ROLLBACK TO " + n).c_str(), nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, ("RELEASE "     + n).c_str(), nullptr, nullptr, nullptr);
+}
+
+void Transaction::commit() {
+    exec(db_, std::string("RELEASE ") + name_);
+    done_ = true;
 }
 
 // =======================================================================
@@ -357,7 +382,8 @@ std::vector<Hit> search_semantic(sqlite3 *                  db,
     std::vector<Hit> hits;
     hits.reserve(static_cast<size_t>(k));
     int rank = 0;
-    while (sqlite3_step(q.get()) == SQLITE_ROW) {
+    int rc;
+    while ((rc = sqlite3_step(q.get())) == SQLITE_ROW) {
         Hit h;
         h.document_id   = sqlite3_column_int64(q.get(), 0);
         h.source_uri    = reinterpret_cast<const char *>(sqlite3_column_text(q.get(), 1));
@@ -366,6 +392,14 @@ std::vector<Hit> search_semantic(sqlite3 *                  db,
         h.distance      = sqlite3_column_double(q.get(), 4);
         h.semantic_rank = rank++;
         hits.push_back(std::move(h));
+    }
+    // Anything other than DONE means the iteration stopped early -- BUSY,
+    // IOERR, CORRUPT. Without this the truncated result set is returned as
+    // if it were the complete answer, and a hybrid search silently drops
+    // its whole semantic leg. Matches search_lexical_raw below.
+    if (rc != SQLITE_DONE) {
+        fail(ExitCode::Runtime,
+             std::string("step(search_semantic): ") + sqlite3_errmsg(db));
     }
     return hits;
 }

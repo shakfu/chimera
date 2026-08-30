@@ -148,6 +148,14 @@ server_http_context::handler_t make_audio_transcribe_handler(
             return err_res(400, "missing 'file' field in multipart form");
         }
         const auto & upload = file_it->second;
+        // Bound the upload before it is decoded: WAV expands to 4 bytes of
+        // float per sample per channel, so the decoded form is several
+        // times the size of what arrived.
+        if (upload.data.size() > CHIMERA_MAX_AUDIO_BYTES) {
+            return err_res(413,
+                "audio file is " + std::to_string(upload.data.size()) +
+                " bytes; the limit is " + std::to_string(CHIMERA_MAX_AUDIO_BYTES));
+        }
 
         // Text fields: server-http folds them into a JSON object stored in
         // req.body. Tolerate the empty / non-JSON body case (e.g. file-only
@@ -162,6 +170,15 @@ server_http_context::handler_t make_audio_transcribe_handler(
         }
 
         const std::string fmt = fields.value("response_format", std::string("json"));
+        // Reject rather than silently falling through to the default JSON
+        // shape: a client that asked for "srt" and got `{"text": ...}` with
+        // a 200 has no way to notice it typo'd the format.
+        if (fmt != "json" && fmt != "text" && fmt != "srt" &&
+            fmt != "vtt"  && fmt != "verbose_json") {
+            return err_res(400,
+                "unsupported response_format '" + fmt +
+                "' (expected one of: json, text, srt, vtt, verbose_json)");
+        }
         const std::string lang = fields.value("language", std::string("auto"));
         const std::string prompt = fields.value("prompt", std::string());
 
@@ -422,6 +439,14 @@ server_http_context::handler_t make_audio_detect_language_handler(
             return err_res(400, "missing 'file' field in multipart form");
         }
         const auto & upload = file_it->second;
+        // Bound the upload before it is decoded: WAV expands to 4 bytes of
+        // float per sample per channel, so the decoded form is several
+        // times the size of what arrived.
+        if (upload.data.size() > CHIMERA_MAX_AUDIO_BYTES) {
+            return err_res(413,
+                "audio file is " + std::to_string(upload.data.size()) +
+                " bytes; the limit is " + std::to_string(CHIMERA_MAX_AUDIO_BYTES));
+        }
         chimera_whisper::WavData wav;
         try {
             wav = chimera_whisper::load_wav_bytes(upload.data.data(), upload.data.size());

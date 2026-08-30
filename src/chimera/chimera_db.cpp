@@ -419,10 +419,15 @@ std::vector<std::string> list_tables(sqlite3 * db) {
         fail(ExitCode::Runtime,
              std::string("sqlite prepare(list_tables) failed: ") + sqlite3_errmsg(db));
     }
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         tables.emplace_back(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0)));
     }
     sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fail(ExitCode::Runtime,
+             std::string("sqlite step(list_tables) failed: ") + sqlite3_errmsg(db));
+    }
     return tables;
 }
 

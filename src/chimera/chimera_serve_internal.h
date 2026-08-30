@@ -54,6 +54,57 @@ using json = nlohmann::ordered_json;
 server_http_context::handler_t ex_wrapper(server_http_context::handler_t func);
 
 // ----------------------------------------------------------------------------
+// Request resource limits
+//
+// The staged cpp-httplib carries a 256 MB per-request payload cap
+// (`_patch_server_http_payload_cap` in scripts/manage.py), which stops a
+// gigabyte upload from reaching the process at all. That cap is a floor,
+// not a policy: 256 MB of WAV still decodes to ~1.5 GB of float samples,
+// and the expensive request parameters -- image batch count, image
+// dimensions, ingest size -- are numbers in a small body, so a payload
+// cap does not bound them at all. These are the application-level bounds
+// each route checks before it commits memory or the model worker.
+//
+// All are deliberately far above any legitimate use, because the point is
+// to make the pathological case fail fast with a 4xx rather than to
+// second-guess a real workload. Override at configure time with
+// -DCHIMERA_MAX_AUDIO_BYTES=<n> etc. if a deployment genuinely needs more.
+// ----------------------------------------------------------------------------
+
+#ifndef CHIMERA_MAX_AUDIO_BYTES
+// ~2 hours of 16 kHz / 16-bit mono WAV, the realistic upper end for one
+// ASR request. Checked against the raw upload before the WAV is decoded.
+#define CHIMERA_MAX_AUDIO_BYTES (256u * 1024u * 1024u)
+#endif
+
+#ifndef CHIMERA_MAX_IMAGE_BATCH
+// `n` in the OpenAI images API. Each image is a full diffusion run, so a
+// large batch is a multi-hour occupancy of the single sd worker.
+#define CHIMERA_MAX_IMAGE_BATCH 16
+#endif
+
+#ifndef CHIMERA_MAX_IMAGE_DIM
+// Per-side pixel bound. Well past what any current model produces
+// coherently, and past the point where the VAE decode buffer alone runs
+// into the gigabytes.
+#define CHIMERA_MAX_IMAGE_DIM 4096
+#endif
+
+#ifndef CHIMERA_MAX_RAG_TEXT_BYTES
+// One ingest request's text. Every chunk is a separate embed() call
+// holding `embedder_mutex`, so a large document is a long exclusive hold
+// on the embedder for every other caller.
+#define CHIMERA_MAX_RAG_TEXT_BYTES (64u * 1024u * 1024u)
+#endif
+
+#ifndef CHIMERA_MAX_RAG_CHUNKS
+// Chunks produced from one ingest request. Bounds the insert loop (and
+// therefore the transaction) independently of the byte cap, since chunk
+// size comes from the collection row rather than the request.
+#define CHIMERA_MAX_RAG_CHUNKS 100000
+#endif
+
+// ----------------------------------------------------------------------------
 // JSON-field coercion helpers (defined in chimera_serve_images.cpp; used by both the
 // /v1/images/* and /v1/vector_stores/:name/search handlers because multipart
 // text fields arrive as strings while application/json bodies preserve

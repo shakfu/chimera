@@ -369,6 +369,20 @@ bool coerce_bool(const json & v, bool dflt) {
 
 namespace {
 
+// True for the addresses that only accept connections from this machine.
+// Deliberately conservative: anything unrecognized (a hostname, a specific
+// interface address, "0.0.0.0", "::") counts as reachable, because the
+// only consumer is a warning and a false negative there is the expensive
+// direction.
+bool is_loopback_host(const std::string & host) {
+    if (host == "localhost" || host == "127.0.0.1" || host == "::1" ||
+        host == "[::1]") {
+        return true;
+    }
+    // The whole 127.0.0.0/8 block, not just 127.0.0.1.
+    return host.rfind("127.", 0) == 0;
+}
+
 // Signal handling. The shutdown_handler closes the task queue, which causes
 // ctx_server.start_loop() to return on the main thread. Hitting Ctrl-C twice
 // force-exits in case the loop is wedged. Same pattern as llama-server.
@@ -1177,6 +1191,25 @@ int command_serve(const ServeOptions & opts) {
     }
     if (!opts.public_path.empty()) {
         std::cout << "  webui: serving " << opts.public_path << " at GET /\n";
+    }
+
+    // Exposure warning. When --api-key is set, upstream's
+    // middleware_validate_api_key gates every route except /health and
+    // the UI assets, chimera's own routes included -- but it is opt-in,
+    // and with no key the server publishes POST /v1/chimera/shutdown
+    // (anyone can stop the process) and, under --persist-chats, GET
+    // /v1/chats/:id, whose ids are sequential rowids that authorize by
+    // existence alone. That is a defensible default on loopback and a
+    // bad surprise off it, so say so once at startup rather than leaving
+    // it to the docs.
+    if (opts.api_key.empty() && !is_loopback_host(opts.host)) {
+        std::cerr << "chimera serve: WARNING: bound to " << opts.host
+                  << " with no --api-key; every route is unauthenticated, including "
+                     "POST /v1/chimera/shutdown"
+                  << (opts.persist_chats
+                        ? " and the /v1/chats history endpoints"
+                        : "")
+                  << ". Pass --api-key, or bind to 127.0.0.1 and put a proxy in front.\n";
     }
 
     // Blocks on the main thread until the task queue is terminated by the

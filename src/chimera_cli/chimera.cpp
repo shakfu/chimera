@@ -1006,14 +1006,16 @@ int command_chat(const LlamaCommonOptions & opts,
             // the column is informational. See TODO.md.
             std::string media_json;
             if (!pending_media.empty()) {
-                media_json = "[";
-                bool first = true;
+                // Serialize rather than interpolate: a path containing a
+                // quote, a backslash (every Windows path) or a control
+                // character produced a body that no JSON reader would
+                // accept, so the column silently lost the metadata it
+                // exists to carry.
+                nlohmann::json arr = nlohmann::json::array();
                 for (const auto & m : pending_media) {
-                    if (!first) media_json += ",";
-                    media_json += "\"" + m.path + "\"";
-                    first = false;
+                    arr.push_back(m.path);
                 }
-                media_json += "]";
+                media_json = arr.dump();
             }
             if (chat_id) {
                 chimera_chat_store::append_message(
@@ -1162,7 +1164,7 @@ int command_chat(const LlamaCommonOptions & opts,
             // message. parse_special=true is enough — it maps the
             // template's BOS literal back to the right token.
             const auto full_tokens = tokenize(vocab, params.prompt,
-                                              /*add_special=*/true,
+                                              /*add_special=*/false,
                                               /*parse_special=*/true);
 
             const size_t shared = common_prefix(kv_tokens, full_tokens);
@@ -1393,6 +1395,11 @@ int command_index_ingest(const std::string &              db_path,
         const std::string text = read_file(path);
         const auto chunks = chimera_embed::chunk_by_sentences(
             text, embedder, eff_chunk_tokens, eff_chunk_overlap);
+        // One file, one transaction. Without it a dim-drift `fail()` or a
+        // failed insert partway through leaves the leading chunks of that
+        // file committed, and re-running the same command duplicates them
+        // -- nothing keys on source_uri.
+        chimera_vector_store::Transaction txn(conn.get(), "chimera_ingest_file");
         for (const auto & c : chunks) {
             auto vec = embedder.embed(c.text);
             if (static_cast<int>(vec.size()) != col->dim) {
@@ -1410,6 +1417,7 @@ int command_index_ingest(const std::string &              db_path,
             chimera_vector_store::insert_document(conn.get(), *col, doc);
             ++total_chunks;
         }
+        txn.commit();
         std::cout << "  ingested " << chunks.size() << " chunk(s) from " << path << "\n";
     }
     std::cout << "done: " << total_chunks << " chunk(s) into '" << name << "'\n";
