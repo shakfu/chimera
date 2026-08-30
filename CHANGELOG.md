@@ -44,7 +44,6 @@ Audit of chimera against the sibling cyllama (`0.4.0`--`0.4.2`) and inferna (`0.
 
 - **`SDCPP_VERSION` gains a ceiling note.** From master-817 on, stable-diffusion.cpp calls `ggml_mul_mat_i8_tensorwise` and `ggml_quantize_i8_convrot`, which exist only in leejet's ggml fork; chimera compiles SD against llama.cpp's ggml, where they are undeclared, so every SD translation unit fails from 817 on. `master-816-487de75` is the last commit that builds. Observed by cyllama at its `0.4.1` and recorded here so the next bump does not walk into it; not re-verified against 817 directly.
 
-
 ## [0.2.13]
 
 ### Changed

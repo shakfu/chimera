@@ -1,45 +1,18 @@
 # Chimera Serve — CLI/HTTP Parity Inventory
 
-Report date: 2026-05-21
-Last status update: 2026-05-21 (waves 1–4 + steps 5a–5e + step 6 all landed. The numbered roadmap is closed. Full sd LoadParams surface exposed on serve, 30 --sd-* flags + per-request PhotoMaker + per-request LoRA via named aliases.)
-Companion to [cli-api-coverage.md](cli-api-coverage.md), which audits the
-CLI subcommand surface against upstream. This document audits the
-**HTTP server surface** (`chimera serve`) against the matching CLI
-subcommands.
+Report date: 2026-05-21 Last status update: 2026-05-21 (waves 1–4 + steps 5a–5e + step 6 all landed. The numbered roadmap is closed. Full sd LoadParams surface exposed on serve, 30 --sd-* flags + per-request PhotoMaker + per-request LoRA via named aliases.) Companion to [cli-api-coverage.md](cli-api-coverage.md), which audits the CLI subcommand surface against upstream. This document audits the **HTTP server surface** (`chimera serve`) against the matching CLI subcommands.
 
 ## TL;DR
 
-**Status (2026-05-21): the numbered roadmap is closed.** Every step
-from waves 1–4 (per-request gap, 40 fields) through 5a–5e (server-init
-gap: audio LoadParams + VAD, sd LoadParams + ControlNet,
-split-checkpoint flags, perf/offload long-tail, PhotoMaker) and step 6
-(per-request LoRA via named aliases) has shipped. Plus the
-chimera-specific `POST /v1/audio/detect-language` endpoint resolved one
-of the audio Tier-2 items.
+**Status (2026-05-21): the numbered roadmap is closed.** Every step from waves 1–4 (per-request gap, 40 fields) through 5a–5e (server-init gap: audio LoadParams + VAD, sd LoadParams + ControlNet, split-checkpoint flags, perf/offload long-tail, PhotoMaker) and step 6 (per-request LoRA via named aliases) has shipped. Plus the chimera-specific `POST /v1/audio/detect-language` endpoint resolved one of the audio Tier-2 items.
 
-**Background.** chimera ships one engine; the CLI surfaces it with full
-flag coverage, the HTTP server surfaced only an OpenAI subset. This
-doc tracked closing that gap. Going into the 2026-05-20 audit, every
-CLI subcommand (`gen`, `chat`, `embed`, `whisper`, `sd`) already had
-zero unresolved `❌` rows against upstream; the HTTP side then closed
-its two structural gaps in turn:
+**Background.** chimera ships one engine; the CLI surfaces it with full flag coverage, the HTTP server surfaced only an OpenAI subset. This doc tracked closing that gap. Going into the 2026-05-20 audit, every CLI subcommand (`gen`, `chat`, `embed`, `whisper`, `sd`) already had zero unresolved `❌` rows against upstream; the HTTP side then closed its two structural gaps in turn:
 
-1. **Per-request gap (closed 2026-05-20):** flags that already live on
-   `TranscribeRequest` / `GenerateRequest` but weren't being read from
-   the HTTP body. Pure handler-side work. 40 fields landed across four
-   waves: audio wave 1 (9), audio wave 2 (4), image wave 1 (14), image
-   wave 2 (13).
-2. **Server-init gap (closed 2026-05-21):** the serve path used to
-   call the simple `load_model(path)` overloads, never the richer
-   `LoadParams` ones. Closing this routed new `--audio-*` / `--sd-*`
-   CLI flags through to `LoadParams`, unlocking 30 `--sd-*` flags +
-   the audio VAD model + PhotoMaker. Step 6 added the closed-set LoRA
-   alias surface.
+1. **Per-request gap (closed 2026-05-20):** flags that already live on `TranscribeRequest` / `GenerateRequest` but weren't being read from the HTTP body. Pure handler-side work. 40 fields landed across four waves: audio wave 1 (9), audio wave 2 (4), image wave 1 (14), image wave 2 (13).
 
-**What's left:** Tier-2 design-open items only — audio `grammar` /
-`grammar_rule` / `grammar_penalty`, image `ref_image` / IP-adapter
-style conditioning. Neither needs more mechanical wiring; both need
-API-shape decisions.
+2. **Server-init gap (closed 2026-05-21):** the serve path used to call the simple `load_model(path)` overloads, never the richer `LoadParams` ones. Closing this routed new `--audio-*` / `--sd-*` CLI flags through to `LoadParams`, unlocking 30 `--sd-*` flags + the audio VAD model + PhotoMaker. Step 6 added the closed-set LoRA alias surface.
+
+**What's left:** Tier-2 design-open items only — audio `grammar` / `grammar_rule` / `grammar_penalty`, image `ref_image` / IP-adapter style conditioning. Neither needs more mechanical wiring; both need API-shape decisions.
 
 ---
 
@@ -89,8 +62,7 @@ Handlers in `src/chimera/chimera_serve_images.cpp`.
 
 ### Chat / completions / embeddings
 
-Already mature — the LLM-side surface exposes the full common_params
-field set via the OpenAI body. No parity work needed here.
+Already mature — the LLM-side surface exposes the full common_params field set via the OpenAI body. No parity work needed here.
 
 ---
 
@@ -114,27 +86,15 @@ All map to existing `TranscribeRequest` fields — engine is unchanged. **Wave 1
 
 ### Tier 2 — per-request, more thought
 
-- `grammar` / `grammar_rule` / `grammar_penalty` — per-request constrained
-  decoding. Lifetime is fine (`parse_state` lives on the handler scope).
-  Open question: JSON shape — pass GBNF as a string field, or as a
-  separate file part. Probably string field with a size cap.
-- `suppress_nst`, `suppress_regex` — useful but rarely the right API
-  knob; usually belongs in `prompt`.
+- `grammar` / `grammar_rule` / `grammar_penalty` — per-request constrained decoding. Lifetime is fine (`parse_state` lives on the handler scope). Open question: JSON shape — pass GBNF as a string field, or as a separate file part. Probably string field with a size cap.
+
+- `suppress_nst`, `suppress_regex` — useful but rarely the right API knob; usually belongs in `prompt`.
+
 - `audio_ctx`, `tinydiarize` — niche; expose if/when asked.
-- `processors` — careful. The server already runs handlers on its
-  thread pool, so `processors > 1` would multiply thread pressure. If
-  exposed, cap server-side.
-- ~~`detect_language` — useful as a probe, but I'd argue it deserves
-  its own endpoint (`POST /v1/audio/detect_language`) rather than a
-  query parameter that silently suppresses transcription.~~
-  ✅ Landed 2026-05-21 as a chimera-specific route at
-  `POST /v1/audio/detect-language` (kebab-case for symmetry with
-  `/v1/images/lora-adapters`). Same multipart `file` field as
-  `/v1/audio/transcriptions`; response is
-  `{"language": "<code>", "duration": <seconds>}` — no `text`, no
-  `segments`. Separate endpoint, not a query parameter, so the
-  response shape stays unambiguous and transcription clients don't
-  need a "transcription silently suppressed" code path.
+
+- `processors` — careful. The server already runs handlers on its thread pool, so `processors > 1` would multiply thread pressure. If exposed, cap server-side.
+
+- ~~`detect_language` — useful as a probe, but I'd argue it deserves its own endpoint (`POST /v1/audio/detect_language`) rather than a query parameter that silently suppresses transcription.~~ ✅ Landed 2026-05-21 as a chimera-specific route at `POST /v1/audio/detect-language` (kebab-case for symmetry with `/v1/images/lora-adapters`). Same multipart `file` field as `/v1/audio/transcriptions`; response is `{"language": "<code>", "duration": <seconds>}` — no `text`, no `segments`. Separate endpoint, not a query parameter, so the response shape stays unambiguous and transcription clients don't need a "transcription silently suppressed" code path.
 
 ### Tier 3 — server-init only (needs `LoadParams` routing first)
 
@@ -145,14 +105,12 @@ All map to existing `TranscribeRequest` fields — engine is unchanged. **Wave 1
 | `--threads` | Thread budget at context init. | already partly covered (server has its own thread pool) |
 | `--vad-model` | The VAD model file is loaded by whisper at context init when `vad=true` arrives on a request. | `--enable-audio-vad-model` |
 
-Today's serve path calls `chimera_whisper::load_model(path)` — the
-simple overload that takes only the model path. To enable any of these,
-add `--enable-audio-*` family CLI flags and route them through to the
-`chimera_whisper::LoadParams` overload.
+Today's serve path calls `chimera_whisper::load_model(path)` — the simple overload that takes only the model path. To enable any of these, add `--enable-audio-*` family CLI flags and route them through to the `chimera_whisper::LoadParams` overload.
 
 ### Skip
 
 - All `--output-*` flags — subsumed by `response_format`.
+
 - `--output-file` — N/A on HTTP (no filesystem destination).
 
 ---
@@ -178,55 +136,25 @@ All map to existing `GenerateRequest` fields. **Wave 1 (14 fields) landed 2026-0
 
 ### Tier 2 — per-request, more thought
 
-- `ref_image` (repeatable multipart) + `increase_ref_index` +
-  `no_auto_resize_ref_image` — IP-adapter-style style/identity
-  conditioning. JSON-shape decision: OpenAI's body has no precedent
-  for repeatable image uploads; chimera would invent the field name.
-- ~~PhotoMaker bundle — requires `--photo-maker` model loaded at
-  startup. Same multipart-plural shape question as ref-images.~~
-  ✅ Landed 2026-05-21 as step 5e. Sidestepped the multipart-plural
-  shape question by accepting a **JSON base64 array** (`pm_id_images`)
-  for explicit per-request identity, and a **named identity-set**
-  shape (`pm_id_image_set: "<name>"`) that references a subdirectory
-  of `--sd-pm-id-dir` scanned eagerly at server start. The
-  explicit-base64 form wins over the named-set form when both are
-  given. See step 5e in the [Recommended order](#recommended-order).
-- ~~`lora` — per-request LoRA selection.~~ ✅ Landed 2026-05-21 as
-  step 6. The design question resolved in favor of **named aliases at
-  startup** (option A): repeatable `--sd-lora <name>=<path>` at server
-  start registers a closed allowlist; requests use `loras: [{"name":
-  "...", "scale": 0.7}, ...]`. Request bodies can't reference raw
-  filesystem paths. `GET /v1/images/lora-adapters` lists registered
-  names (no paths). See step 6 in the [Recommended order](#recommended-order).
+- `ref_image` (repeatable multipart) + `increase_ref_index` + `no_auto_resize_ref_image` — IP-adapter-style style/identity conditioning. JSON-shape decision: OpenAI's body has no precedent for repeatable image uploads; chimera would invent the field name.
+
+- ~~PhotoMaker bundle — requires `--photo-maker` model loaded at startup. Same multipart-plural shape question as ref-images.~~ ✅ Landed 2026-05-21 as step 5e. Sidestepped the multipart-plural shape question by accepting a **JSON base64 array** (`pm_id_images`) for explicit per-request identity, and a **named identity-set** shape (`pm_id_image_set: "<name>"`) that references a subdirectory of `--sd-pm-id-dir` scanned eagerly at server start. The explicit-base64 form wins over the named-set form when both are given. See step 5e in the [Recommended order](#recommended-order).
+
+- ~~`lora` — per-request LoRA selection.~~ ✅ Landed 2026-05-21 as step 6. The design question resolved in favor of **named aliases at startup** (option A): repeatable `--sd-lora <name>=<path>` at server start registers a closed allowlist; requests use `loras: [{"name": "...", "scale": 0.7}, ...]`. Request bodies can't reference raw filesystem paths. `GET /v1/images/lora-adapters` lists registered names (no paths). See step 6 in the [Recommended order](#recommended-order).
 
 ### Tier 3 — server-init only (needs `LoadParams` routing first)
 
-Nearly everything else that's a CLI flag: model component paths
-(`--diffusion-model`, `--vae`, `--clip-l`, `--clip-g`, `--t5xxl`, `--llm`,
-`--clip-vision`, `--llm-vision`, `--taesd`, `--tensor-type-rules`,
-`--high-noise-diffusion-model`, `--control-net`, `--photo-maker`,
-`--embd-dir`), weights (`--type`, `--lora-model-dir`), RNG
-(`--rng`, `--sampler-rng`), perf/offload (`--offload-to-cpu`,
-`--diffusion-fa`, `--fa`, `--diffusion-conv-direct`, `--vae-conv-direct`,
-`--no-mmap`, `--max-vram`, `--clip-on-cpu`, `--vae-on-cpu`,
-`--control-net-cpu`, `--force-sdxl-vae-conv-scale`), enums
-(`--prediction`, `--lora-apply-mode`).
+Nearly everything else that's a CLI flag: model component paths (`--diffusion-model`, `--vae`, `--clip-l`, `--clip-g`, `--t5xxl`, `--llm`, `--clip-vision`, `--llm-vision`, `--taesd`, `--tensor-type-rules`, `--high-noise-diffusion-model`, `--control-net`, `--photo-maker`, `--embd-dir`), weights (`--type`, `--lora-model-dir`), RNG (`--rng`, `--sampler-rng`), perf/offload (`--offload-to-cpu`, `--diffusion-fa`, `--fa`, `--diffusion-conv-direct`, `--vae-conv-direct`, `--no-mmap`, `--max-vram`, `--clip-on-cpu`, `--vae-on-cpu`, `--control-net-cpu`, `--force-sdxl-vae-conv-scale`), enums (`--prediction`, `--lora-apply-mode`).
 
-Today's serve path calls
-`chimera_sd::load_model(path, vae_decode_only=false)` — the simple
-overload. To unlock any of these, add `--enable-image-*` flag families
-and route through `chimera_sd::LoadParams`. Once routed, every flag in
-this paragraph becomes available at server start.
+Today's serve path calls `chimera_sd::load_model(path, vae_decode_only=false)` — the simple overload. To unlock any of these, add `--enable-image-*` flag families and route through `chimera_sd::LoadParams`. Once routed, every flag in this paragraph becomes available at server start.
 
 ### Skip
 
-- `--disable-image-metadata` — already 🚫 in `cli-api-coverage.md`.
-  Chimera writes no PNG metadata.
-- Video-only flags (`--end-img`, full `--high-noise-*` family,
-  `--moe-boundary`, `--control-video`, `--video-frames`, `--fps`,
-  `--vace-strength`) — chimera-sd is img_gen-only.
-- Standalone-mode flags (`--upscale-repeats`, `--mode`) — chimera-sd
-  doesn't switch modes.
+- `--disable-image-metadata` — already 🚫 in `cli-api-coverage.md`. Chimera writes no PNG metadata.
+
+- Video-only flags (`--end-img`, full `--high-noise-*` family, `--moe-boundary`, `--control-video`, `--video-frames`, `--fps`, `--vace-strength`) — chimera-sd is img_gen-only.
+
+- Standalone-mode flags (`--upscale-repeats`, `--mode`) — chimera-sd doesn't switch modes.
 
 ---
 
@@ -234,156 +162,34 @@ this paragraph becomes available at server start.
 
 Pareto-shaped roadmap:
 
-1. ~~**Audio wave 1** — `temperature` (was inert), `beam_size`, `best_of`,
-   `no_fallback`, `offset_ms`, `duration_ms`, `diarize`, `max_len`,
-   `split_on_word`. Purely handler-side.~~ ✅ **Landed 2026-05-20** (~70 LOC
-   in `chimera_serve_audio.cpp`; ~50 LOC of the total was the diarize
-   energy-ratio classifier + post-transcribe segment stamping).
-2. ~~**Image wave 1** — `clip_skip`, `guidance`, `flow_shift`,
-   `img_cfg_scale`, `eta`, `timestep_shift`, `sigmas`, `vae_tiling`
-   (+ knobs), `skip_layers` / `slg_scale` / `skip_layer_start`/`_end`.
-   14 fields, all into the shared `fill_common_image_fields()` helper
-   so `/generations`, `/edits`, `/variations` pick them up at once.~~
-   ✅ **Landed 2026-05-20.** Same PR promoted `coerce_bool` from an
-   inlined lambda in the audio handler to the shared
-   `chimera_serve_internal.h` (two callers now). Array-or-CSV parsing
-   pattern is duplicated for `skip_layers` and `sigmas` (~25 LOC each)
-   — if a third caller wants the same shape, worth extracting
-   `parse_int_csv_or_array()` / `parse_float_csv_or_array()` helpers.
-3. ~~**Hires-fix** + **Cache/SCM**~~ (~50 LOC). Both landed together as
-   **image wave 2** on 2026-05-20. Hires-fix accepts the full 9-field
-   bundle; the `Model` upscaler still waits on step 5. Cache/SCM
-   reuses the CLI's `parse_cache_options` so HTTP errors are
-   byte-identical to CLI errors. The same `fill_common_image_fields()`
-   helper picks both bundles up for all three image endpoints.
-4. ~~**Audio wave 2** — `temperature_inc`, `entropy_thold`,
-   `logprob_thold`, `no_speech_thold`. Four decoder-fail thresholds,
-   all NaN-sentineled on `TranscribeRequest`. Mechanical.~~
-   ✅ **Landed 2026-05-20** (~8 LOC). VAD knobs were originally
-   slotted into wave 2 but split out — they need the VAD model loaded
-   at server start (step 5).
-5. **Server-init `LoadParams` routing** — structural. The simple
-   `load_model(path)` overloads in both `chimera_whisper` and
-   `chimera_sd` are bypassed in favor of the `LoadParams` forms, and
-   `chimera serve` grows `--audio-*` / `--sd-*` flag families that
-   populate them. **The gating step for every Tier-3 item** — once a
-   modality's `LoadParams` is plumbed, each subsequent flag is a
-   one-line addition. Phased rollout:
-   - **5a — Audio `LoadParams` + VAD on serve.** ✅ Landed 2026-05-20.
-     Four flags: `--audio-flash-attn`, `--audio-no-gpu`, `--audio-device`,
-     `--audio-vad-model`. Per-request `vad=true` (+ six tuning knobs)
-     wired in the audio handler with a precise 400 when no VAD model is
-     loaded. ~50 LOC across `chimera.h`, `chimera_serve.cpp`,
-     `chimera_serve_internal.h`, `chimera_serve_audio.cpp`,
-     `chimera_cli/chimera.cpp`.
-   - **5b — SD `LoadParams` + ControlNet on serve.** ✅ Landed
-     2026-05-20. One flag exposed (`--sd-control-net`) but the full
-     `chimera_sd::LoadParams` is now built in `command_serve`, so
-     phases 5c/5d become one-line-per-field additions. Per-request
-     `control_image` (multipart) + `control_strength` (JSON) wired in
-     all three image handlers via the new `maybe_attach_control()`
-     helper. Gated 400 when no ControlNet is loaded. ~70 LOC.
-   - **5c — SD split-checkpoint flags.** ✅ Landed 2026-05-20. 13
-     flags: `--sd-diffusion-model`, `--sd-vae`, `--sd-clip-l`,
-     `--sd-clip-g`, `--sd-t5xxl`, `--sd-llm`, `--sd-llm-vision`,
-     `--sd-clip-vision`, `--sd-taesd`, `--sd-embd-dir`, `--sd-type`,
-     `--sd-tensor-type-rules`, `--sd-high-noise-diffusion-model`.
-     `chimera serve --enable-image <path>` is now optional when
-     `--sd-diffusion-model <path>` is set — same combined-or-split
-     allowance as `chimera sd`. Mechanical landing (~50 LOC) thanks to
-     the 5b LoadParams plumbing — each flag was one line in three
-     places (`ServeOptions`, the LoadParams build, the CLI binding).
-     Unlocks serving Flux, SD3, Z-Image, and Qwen-Image; the existing
-     per-request fields from image waves 1+2 (`guidance`, `flow_shift`,
-     `img_cfg_scale`, etc.) Just Work for Flux/SD3-class models without
-     further wiring.
-   - **5d — SD perf/offload long-tail.** ✅ Landed 2026-05-20. 16
-     flags: `--sd-fa`, `--sd-diffusion-fa`, `--sd-diffusion-conv-direct`,
-     `--sd-vae-conv-direct`, `--sd-no-mmap`, `--sd-max-vram`,
-     `--sd-offload-to-cpu`, `--sd-clip-on-cpu`, `--sd-vae-on-cpu`,
-     `--sd-control-net-cpu`, `--sd-force-sdxl-vae-conv-scale`,
-     `--sd-rng`, `--sd-sampler-rng`, `--sd-prediction`,
-     `--sd-lora-apply-mode`, `--sd-threads`. Mechanical landing again
-     (~50 LOC); the four enum-string flags (`--sd-rng`,
-     `--sd-sampler-rng`, `--sd-prediction`, `--sd-lora-apply-mode`) get
-     `CLI::IsMember` validators that exit before model load with the
-     accepted-set listed in the error. `--sd-no-mmap` is inverted
-     polarity (chimera defaults mmap=on; the flag flips it off) — same
-     semantic as the CLI side. After 5d the full `chimera_sd::LoadParams`
-     surface is exposed on serve — 30 `--sd-*` flags total across 5b/5c/5d.
-   - **5e — PhotoMaker on serve.** ✅ Landed 2026-05-21. Three new
-     server-init flags (`--sd-photo-maker <path>`, `--sd-pm-id-dir
-     <dir>`, `--sd-pm-id-embed-path <file>`) and a per-request JSON
-     bundle (`pm_id_images`, `pm_id_image_set`, `pm_style_strength`).
-     The multipart-files-plural design question is sidestepped:
-     identity images travel as a **JSON base64 array** rather than
-     repeatable multipart parts. Two complementary shapes accepted —
-     **(C)** explicit `pm_id_images: ["<base64 or data-URI>", ...]`
-     for per-request identity images, and **(E)** `pm_id_image_set:
-     "<name>"` referencing a named subdirectory of `--sd-pm-id-dir`
-     scanned eagerly at startup. (C) wins if both are supplied —
-     explicit per-request beats admin-curated default, same precedence
-     as elsewhere in chimera. `--sd-pm-id-embed-path` is the
-     server-init default ID-embedding applied to every PM request.
-     Gating: any PM field against a server without `--sd-photo-maker`
-     returns 400 with the missing-flag hint; `pm_id_image_set` against
-     a server without `--sd-pm-id-dir` returns 400; an unknown set
-     name returns 400 listing the known names; a malformed base64
-     element returns 400 naming the offending index. Available on
-     all three image endpoints. ~250 LOC (the bulk is the
-     self-contained `base64_decode()` for the JSON array path and the
-     `PmIdSetCache` eager-scan at server start).
-6. **Per-request LoRA selection.** ✅ Landed 2026-05-21. Resolved in
-   favor of **option A (named aliases at startup)** — `--sd-lora
-   <name>=<path>` repeatable registers a closed allowlist; requests
-   use `loras: [{"name": "...", "scale": 0.7}, ...]`. ~140 LOC across
-   `chimera.h` (ServeOptions field), `chimera_serve.cpp` (alias-map
-   build + GET endpoint binding), `chimera_serve_images.cpp` (new
-   `maybe_attach_loras()` helper parallel to `maybe_attach_control` /
-   `maybe_attach_pm`), `chimera_cli/chimera.cpp` (CLI binding). SD
-   reloads LoRA tensors per-generate, so the alias map is pure
-   metadata — no files open at server start; malformed specs and
-   duplicate names fail-fast with `BadInput`. **Closed-set by design:**
-   request bodies cannot reference raw filesystem paths — paths are
-   server-side state, never reflected back to the client. A
-   `--sd-allow-lora-paths` opt-in flag would gate path-mode if a
-   future need emerges; today's behavior is "names only." New `GET
-   /v1/images/lora-adapters` returns `[{"name": "..."}, ...]` of
-   registered aliases. Gating 400s for: unknown alias name (listing
-   known names), non-array `loras`, non-object element, missing /
-   non-string `name`, non-numeric `scale`, and `loras` against a
-   server with no aliases registered (with the missing-flag hint).
-   Same opt-in shape as 5a (VAD), 5b (ControlNet), and 5e
-   (PhotoMaker). Four new integration tests in `scripts/test.py`.
+1. ~~**Audio wave 1** — `temperature` (was inert), `beam_size`, `best_of`, `no_fallback`, `offset_ms`, `duration_ms`, `diarize`, `max_len`, `split_on_word`. Purely handler-side.~~ ✅ **Landed 2026-05-20** (~70 LOC in `chimera_serve_audio.cpp`; ~50 LOC of the total was the diarize energy-ratio classifier + post-transcribe segment stamping).
 
-**Honest correction from the original roadmap:** `--sd-upscale-model`
-was originally listed in the "unblocking trio" — it isn't actually
-blocking anything. `sd_hires_params_t.model_path` is per-request and
-loads fresh each `generate_image()` call, so wave 2's
-`hires_upscale_model` per-request field already works without
-server-init plumbing. Removed from the roadmap.
+2. ~~**Image wave 1** — `clip_skip`, `guidance`, `flow_shift`, `img_cfg_scale`, `eta`, `timestep_shift`, `sigmas`, `vae_tiling` (+ knobs), `skip_layers` / `slg_scale` / `skip_layer_start`/`_end`. 14 fields, all into the shared `fill_common_image_fields()` helper so `/generations`, `/edits`, `/variations` pick them up at once.~~ ✅ **Landed 2026-05-20.** Same PR promoted `coerce_bool` from an inlined lambda in the audio handler to the shared `chimera_serve_internal.h` (two callers now). Array-or-CSV parsing pattern is duplicated for `skip_layers` and `sigmas` (~25 LOC each) — if a third caller wants the same shape, worth extracting `parse_int_csv_or_array()` / `parse_float_csv_or_array()` helpers.
 
-Steps 1–4 closed the entire per-request gap (40 fields). Steps 5a–5e
-closed the server-init gap: audio LoadParams + VAD (5a), sd LoadParams
+3. ~~**Hires-fix** + **Cache/SCM**~~ (~50 LOC). Both landed together as **image wave 2** on 2026-05-20. Hires-fix accepts the full 9-field bundle; the `Model` upscaler still waits on step 5. Cache/SCM reuses the CLI's `parse_cache_options` so HTTP errors are byte-identical to CLI errors. The same `fill_common_image_fields()` helper picks both bundles up for all three image endpoints.
 
-- ControlNet (5b), sd split-checkpoint flags (5c, 13 flags), sd
-perf/offload long-tail (5d, 16 flags), PhotoMaker (5e, 3 server-init
-flags + 3 per-request fields). Step 6 closed per-request LoRA via
-named aliases. The numbered roadmap is now complete.
+4. ~~**Audio wave 2** — `temperature_inc`, `entropy_thold`, `logprob_thold`, `no_speech_thold`. Four decoder-fail thresholds, all NaN-sentineled on `TranscribeRequest`. Mechanical.~~ ✅ **Landed 2026-05-20** (~8 LOC). VAD knobs were originally slotted into wave 2 but split out — they need the VAD model loaded at server start (step 5).
 
-Remaining work — none on the numbered roadmap. Tier-2 design-open
-items remaining: ref_image / IP-adapter style conditioning on the
-image side, and `grammar`/`grammar_rule`/`grammar_penalty` on the
-audio side. `detect_language` landed 2026-05-21 as
-`POST /v1/audio/detect-language`.
+5. **Server-init `LoadParams` routing** — structural. The simple `load_model(path)` overloads in both `chimera_whisper` and `chimera_sd` are bypassed in favor of the `LoadParams` forms, and `chimera serve` grows `--audio-*` / `--sd-*` flag families that populate them. **The gating step for every Tier-3 item** — once a modality's `LoadParams` is plumbed, each subsequent flag is a one-line addition. Phased rollout:
 
-~~Also worth a follow-up at some point: the image-serve gating tests
-in `scripts/test.py` exercise 400-class responses but not success
-paths.~~ ✅ Resolved 2026-05-21. Six opt-in fixture-driven tests
-added covering both CLI (`chimera sd --lora` / `--control-net` /
-`--photo-maker`) and serve (POST `/v1/images/*` with `loras: [...]`
-/ `control_image` / `pm_id_image_set`). Each gated on an env var
-pointing at a developer-supplied adapter / aux-model file; `SKIP`
-when unset, `FAIL` when set but the path doesn't exist. See "Opt-in
-fixture-driven tests" in `docs/dev/maintenance.md` for the env-var
-list and an example invocation.
+   - **5a — Audio `LoadParams` + VAD on serve.** ✅ Landed 2026-05-20. Four flags: `--audio-flash-attn`, `--audio-no-gpu`, `--audio-device`, `--audio-vad-model`. Per-request `vad=true` (+ six tuning knobs) wired in the audio handler with a precise 400 when no VAD model is loaded. ~50 LOC across `chimera.h`, `chimera_serve.cpp`, `chimera_serve_internal.h`, `chimera_serve_audio.cpp`, `chimera_cli/chimera.cpp`.
+
+   - **5b — SD `LoadParams` + ControlNet on serve.** ✅ Landed 2026-05-20. One flag exposed (`--sd-control-net`) but the full `chimera_sd::LoadParams` is now built in `command_serve`, so phases 5c/5d become one-line-per-field additions. Per-request `control_image` (multipart) + `control_strength` (JSON) wired in all three image handlers via the new `maybe_attach_control()` helper. Gated 400 when no ControlNet is loaded. ~70 LOC.
+
+   - **5c — SD split-checkpoint flags.** ✅ Landed 2026-05-20. 13 flags: `--sd-diffusion-model`, `--sd-vae`, `--sd-clip-l`, `--sd-clip-g`, `--sd-t5xxl`, `--sd-llm`, `--sd-llm-vision`, `--sd-clip-vision`, `--sd-taesd`, `--sd-embd-dir`, `--sd-type`, `--sd-tensor-type-rules`, `--sd-high-noise-diffusion-model`. `chimera serve --enable-image <path>` is now optional when `--sd-diffusion-model <path>` is set — same combined-or-split allowance as `chimera sd`. Mechanical landing (~50 LOC) thanks to the 5b LoadParams plumbing — each flag was one line in three places (`ServeOptions`, the LoadParams build, the CLI binding). Unlocks serving Flux, SD3, Z-Image, and Qwen-Image; the existing per-request fields from image waves 1+2 (`guidance`, `flow_shift`, `img_cfg_scale`, etc.) Just Work for Flux/SD3-class models without further wiring.
+
+   - **5d — SD perf/offload long-tail.** ✅ Landed 2026-05-20. 16 flags: `--sd-fa`, `--sd-diffusion-fa`, `--sd-diffusion-conv-direct`, `--sd-vae-conv-direct`, `--sd-no-mmap`, `--sd-max-vram`, `--sd-offload-to-cpu`, `--sd-clip-on-cpu`, `--sd-vae-on-cpu`, `--sd-control-net-cpu`, `--sd-force-sdxl-vae-conv-scale`, `--sd-rng`, `--sd-sampler-rng`, `--sd-prediction`, `--sd-lora-apply-mode`, `--sd-threads`. Mechanical landing again (~50 LOC); the four enum-string flags (`--sd-rng`, `--sd-sampler-rng`, `--sd-prediction`, `--sd-lora-apply-mode`) get `CLI::IsMember` validators that exit before model load with the accepted-set listed in the error. `--sd-no-mmap` is inverted polarity (chimera defaults mmap=on; the flag flips it off) — same semantic as the CLI side. After 5d the full `chimera_sd::LoadParams` surface is exposed on serve — 30 `--sd-*` flags total across 5b/5c/5d.
+
+   - **5e — PhotoMaker on serve.** ✅ Landed 2026-05-21. Three new server-init flags (`--sd-photo-maker <path>`, `--sd-pm-id-dir <dir>`, `--sd-pm-id-embed-path <file>`) and a per-request JSON bundle (`pm_id_images`, `pm_id_image_set`, `pm_style_strength`). The multipart-files-plural design question is sidestepped: identity images travel as a **JSON base64 array** rather than repeatable multipart parts. Two complementary shapes accepted — **(C)** explicit `pm_id_images: ["<base64 or data-URI>", ...]` for per-request identity images, and **(E)** `pm_id_image_set: "<name>"` referencing a named subdirectory of `--sd-pm-id-dir` scanned eagerly at startup. (C) wins if both are supplied — explicit per-request beats admin-curated default, same precedence as elsewhere in chimera. `--sd-pm-id-embed-path` is the server-init default ID-embedding applied to every PM request. Gating: any PM field against a server without `--sd-photo-maker` returns 400 with the missing-flag hint; `pm_id_image_set` against a server without `--sd-pm-id-dir` returns 400; an unknown set name returns 400 listing the known names; a malformed base64 element returns 400 naming the offending index. Available on all three image endpoints. ~250 LOC (the bulk is the self-contained `base64_decode()` for the JSON array path and the `PmIdSetCache` eager-scan at server start).
+
+6. **Per-request LoRA selection.** ✅ Landed 2026-05-21. Resolved in favor of **option A (named aliases at startup)** — `--sd-lora <name>=<path>` repeatable registers a closed allowlist; requests use `loras: [{"name": "...", "scale": 0.7}, ...]`. ~140 LOC across `chimera.h` (ServeOptions field), `chimera_serve.cpp` (alias-map build + GET endpoint binding), `chimera_serve_images.cpp` (new `maybe_attach_loras()` helper parallel to `maybe_attach_control` / `maybe_attach_pm`), `chimera_cli/chimera.cpp` (CLI binding). SD reloads LoRA tensors per-generate, so the alias map is pure metadata — no files open at server start; malformed specs and duplicate names fail-fast with `BadInput`. **Closed-set by design:** request bodies cannot reference raw filesystem paths — paths are server-side state, never reflected back to the client. A `--sd-allow-lora-paths` opt-in flag would gate path-mode if a future need emerges; today's behavior is "names only." New `GET /v1/images/lora-adapters` returns `[{"name": "..."}, ...]` of registered aliases. Gating 400s for: unknown alias name (listing known names), non-array `loras`, non-object element, missing / non-string `name`, non-numeric `scale`, and `loras` against a server with no aliases registered (with the missing-flag hint). Same opt-in shape as 5a (VAD), 5b (ControlNet), and 5e (PhotoMaker). Four new integration tests in `scripts/test.py`.
+
+**Honest correction from the original roadmap:** `--sd-upscale-model` was originally listed in the "unblocking trio" — it isn't actually blocking anything. `sd_hires_params_t.model_path` is per-request and loads fresh each `generate_image()` call, so wave 2's `hires_upscale_model` per-request field already works without server-init plumbing. Removed from the roadmap.
+
+Steps 1–4 closed the entire per-request gap (40 fields). Steps 5a–5e closed the server-init gap: audio LoadParams + VAD (5a), sd LoadParams
+
+- ControlNet (5b), sd split-checkpoint flags (5c, 13 flags), sd perf/offload long-tail (5d, 16 flags), PhotoMaker (5e, 3 server-init flags + 3 per-request fields). Step 6 closed per-request LoRA via named aliases. The numbered roadmap is now complete.
+
+Remaining work — none on the numbered roadmap. Tier-2 design-open items remaining: ref_image / IP-adapter style conditioning on the image side, and `grammar`/`grammar_rule`/`grammar_penalty` on the audio side. `detect_language` landed 2026-05-21 as `POST /v1/audio/detect-language`.
+
+~~Also worth a follow-up at some point: the image-serve gating tests in `scripts/test.py` exercise 400-class responses but not success paths.~~ ✅ Resolved 2026-05-21. Six opt-in fixture-driven tests added covering both CLI (`chimera sd --lora` / `--control-net` / `--photo-maker`) and serve (POST `/v1/images/*` with `loras: [...]` / `control_image` / `pm_id_image_set`). Each gated on an env var pointing at a developer-supplied adapter / aux-model file; `SKIP` when unset, `FAIL` when set but the path doesn't exist. See "Opt-in fixture-driven tests" in `docs/dev/maintenance.md` for the env-var list and an example invocation.

@@ -1,10 +1,11 @@
 # Chimera CLI / Upstream CLI Coverage Audit
 
-Report date: 2026-05-20
-Upstream versions compared against:
+Report date: 2026-05-20 Upstream versions compared against:
 
 - llama.cpp `b9119` (flag definitions in `common/arg.cpp`, CLI binary in `tools/cli/cli.cpp`)
+
 - whisper.cpp `v1.8.4` (`examples/cli/cli.cpp`)
+
 - stable-diffusion.cpp `master-596-90e87bc` (CLI shell in `examples/cli/main.cpp`, model/gen flags in `examples/common/common.cpp`)
 
 What triggered this audit: `chimera sd` had silently shipped without the entire split-checkpoint flag family (`--diffusion-model`, `--vae`, `--clip-l`, `--t5xxl`, `--llm`, `--offload-to-cpu`, `--diffusion-fa`), which made it impossible to run any Z-Image / Flux / SD3-class model. The hole was invisible because no one had cross-referenced sd's flag surface against ours; this audit closes that blind spot for the four CLI subcommands (`gen`/`chat`, `embed`, `whisper`, `sd`). `chimera serve` (wraps llama-server) is out of scope.
@@ -13,13 +14,7 @@ Status legend: ✅ exposed · 🔀 renamed · 🟡 partial · ❌ missing · �
 
 > Note: chimera's CLI definitions live in `src/chimera_cli/chimera.cpp` (`bind_*_cmd` helpers) and the option structs in `src/chimera/chimera.h`. Both files are referenced throughout this report.
 
-> **Status update 2026-05-20:** the 20 flag groups identified as Tier 1–4 priorities in the original llama section have all landed on `gen` / `chat` / `embed`. The tables and "Notable gaps" sections below have been edited in-place to reflect this; see the CHANGELOG entry under [Unreleased] for the full list.
->
-> **Whisper coverage closer 2026-05-20:** the remaining whisper gaps flagged below — VAD bundle, offset/duration, segment shaping, decoder-fail thresholds, audio-ctx, tinydiarize, token suppression, context-params (`--flash-attn` / `--no-gpu` / `--device`), and `--processors` — all landed on `whisper`. The whisper table rows are flipped to ✅ in-place; the "Notable gaps worth filing" list is now empty save for the documented out-of-scope items.
->
-> **sd partial:** skip-layer guidance + the `--high-noise-diffusion-model` model-loading slot landed; the rest of the `--high-noise-*` family stays out of scope (video-only).
->
-> **sd coverage closer 2026-05-20 (Rounds 1–8):** 38 additional flags landed — perf/offload (`--fa`, `--no-mmap`, `--max-vram`, per-component CPU offload, SDXL VAE fix), sampler/generation (`--img-cfg-scale`, `--eta`, `--timestep-shift`, `--sigmas`, `--prediction`, `--lora-apply-mode`), model-loading (`--taesd`, `--clip-vision`, `--llm-vision`, `--tensor-type-rules`, `--photo-maker`, `--embd-dir`), PhotoMaker bundle (`--pm-id-images-dir`/`--pm-id-embed-path`/`--pm-style-strength`), reference images (`--ref-image` + supporting flags), the full hires-fix bundle, and the cache/SCM bundle (`--cache-mode`, `--cache-option`, `--scm-mask`, `--scm-policy`). Tables below are flipped to ✅ in-place. **All sd ❌ rows are now resolved**: `--disable-image-metadata` is reclassified 🚫 (moot — chimera's stock `stb_image_write` writes no text chunks, so there's nothing to disable; the inverse "embed metadata" feature is a separate item not yet on the roadmap).
+> **Status update 2026-05-20:** the 20 flag groups identified as Tier 1–4 priorities in the original llama section have all landed on `gen` / `chat` / `embed`. The tables and "Notable gaps" sections below have been edited in-place to reflect this; see the CHANGELOG entry under [Unreleased] for the full list. > > **Whisper coverage closer 2026-05-20:** the remaining whisper gaps flagged below — VAD bundle, offset/duration, segment shaping, decoder-fail thresholds, audio-ctx, tinydiarize, token suppression, context-params (`--flash-attn` / `--no-gpu` / `--device`), and `--processors` — all landed on `whisper`. The whisper table rows are flipped to ✅ in-place; the "Notable gaps worth filing" list is now empty save for the documented out-of-scope items. > > **sd partial:** skip-layer guidance + the `--high-noise-diffusion-model` model-loading slot landed; the rest of the `--high-noise-*` family stays out of scope (video-only). > > **sd coverage closer 2026-05-20 (Rounds 1–8):** 38 additional flags landed — perf/offload (`--fa`, `--no-mmap`, `--max-vram`, per-component CPU offload, SDXL VAE fix), sampler/generation (`--img-cfg-scale`, `--eta`, `--timestep-shift`, `--sigmas`, `--prediction`, `--lora-apply-mode`), model-loading (`--taesd`, `--clip-vision`, `--llm-vision`, `--tensor-type-rules`, `--photo-maker`, `--embd-dir`), PhotoMaker bundle (`--pm-id-images-dir`/`--pm-id-embed-path`/`--pm-style-strength`), reference images (`--ref-image` + supporting flags), the full hires-fix bundle, and the cache/SCM bundle (`--cache-mode`, `--cache-option`, `--scm-mask`, `--scm-policy`). Tables below are flipped to ✅ in-place. **All sd ❌ rows are now resolved**: `--disable-image-metadata` is reclassified 🚫 (moot — chimera's stock `stb_image_write` writes no text chunks, so there's nothing to disable; the inverse "embed metadata" feature is a separate item not yet on the roadmap).
 
 ---
 
@@ -129,17 +124,25 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 All five priorities from the original audit landed on 2026-05-20 (`--flash-attn`, grammar/json-schema, DRY + repeat-last-n, `--lora` in gen/chat, reasoning family). Residual items:
 
 0. ~~**Long-tail gen/chat closer** — 19 flags landed: `--typical`, `--top-nsigma`, `--xtc-probability`/`--xtc-threshold`, `--dynatemp-range`/`--dynatemp-exp`, `--samplers`, `--threads-batch`, `--swa-full`, `--image-min-tokens`/`--image-max-tokens`, `--cpu-moe`/`--n-cpu-moe`, `--override-tensor`/`--override-kv`, full `--control-vector*` family.~~ ✅ Landed 2026-05-20. Four upstream flags (`--keep`, `--ctx-checkpoints`, `--checkpoint-every-n-tokens`, `--cache-ram`) reclassified 🚫 — `--keep` is upstream's context-shift loop (chimera uses KV-prefix reuse; no shift), the other three are server-only `common_params` fields not consumed by the CLI subcommands.
+
 1. ~~**`--reasoning-budget` enforcement**.~~ ✅ Landed 2026-05-20. The earlier "needs `chat_sample_loop` restructure" comment turned out to be wrong on closer reading: `common_sampler_init` itself chains `common_reasoning_budget_init` into the sampler whenever the `sampling.reasoning_budget_{tokens,start,end,forced}` fields are populated, so the integration is entirely upstream of `common_sampler_init` — no sample-loop changes needed. Implementation: `command_chat` probes the active chat template once at startup via a dummy `common_chat_templates_apply`, reads `thinking_{start,end}_tag`, tokenizes with `parse_special=true`, and stuffs the result into the sampling params before `make_sampler`. Forced-termination sequence = `--reasoning-budget-message + thinking_end_tag`. Templates without thinking tags warn and ignore the budget.
+
 2. ~~**`--list-devices`**~~ ✅ Landed 2026-05-20 as `chimera info --list-devices`.
+
 3. **`--mmproj-auto`** — not modeled by `mtmd_context_params` at llama.cpp `b9119`. Revisit on next pin bump.
 
 ### Deliberately omitted (do not re-flag)
 
 - Anything under "interactive REPL" or "prompt cache on disk" — chimera owns its own REPL via `chat` + linenoise and persists via SQLite.
+
 - HuggingFace/docker/network model fetch — chimera takes local paths.
+
 - Speculative-decoding and draft-model flags — out of scope until chimera adds a draft-model wrapper.
+
 - All training / perplexity / hellaswag / imatrix / cvector / pca / optimizer flags.
+
 - CPU mask / affinity / strict / poll / prio knobs (specialist usage).
+
 - llama.cpp's `--diffusion-*` flags — refer to diffusion-LMs, not stable-diffusion.cpp.
 
 ---
@@ -170,13 +173,17 @@ All five priorities from the original audit landed on 2026-05-20 (`--flash-attn`
 ### Chimera-specific extensions (no upstream)
 
 - `--cache-embeddings` / `--cache-db` — SQLite memoization layer. No upstream analogue.
+
 - `-o,--output` — chimera writes to a file/stdout instead of `embedding.txt` style upstream behavior. Cleaner.
 
 ### Notable gaps worth filing
 
 1. ~~`--embd-output-format`~~ ✅ Landed 2026-05-20.
+
 2. ~~`--embd-separator`~~ ✅ Landed 2026-05-20.
+
 3. ~~`--attention causal|non-causal`~~ ✅ Landed 2026-05-20.
+
 4. ~~Pooling `rank` value~~ ✅ Landed 2026-05-20.
 
 ### Also landed 2026-05-20 (carried over from the llama-shared option set)
@@ -186,6 +193,7 @@ All five priorities from the original audit landed on 2026-05-20 (`--flash-attn`
 ### Deliberately omitted
 
 - All chunking flags (`--chunk*`) — chimera handles chunking at the `index`/`search` layer.
+
 - `--cls-separator` and other retrieval-helper flags — same reasoning.
 
 ---
@@ -239,10 +247,15 @@ whisper-cli has a flat ~58-flag surface. Chimera exposes 5 of them. The result i
 ### Notable gaps worth filing
 
 1. ~~**Output-format family** (`-osrt/-ovtt/-oj/-ojf/-ocsv/-olrc`).~~ ✅ Landed 2026-05-20.
+
 2. ~~**VAD bundle** (`--vad` + the seven knobs).~~ ✅ Landed 2026-05-20. `--vad` requires `--vad-model`; tuning knobs use `-1` sentinels to inherit `whisper_vad_default_params()`.
+
 3. ~~**`--prompt` / `--carry-initial-prompt`**.~~ ✅ Landed 2026-05-20.
+
 4. ~~**Decoding strategy** (`--beam-size`, `--best-of`, `--temperature`, `--no-fallback`).~~ ✅ Landed 2026-05-20.
+
 5. ~~**Offset/duration** (`-ot`, `-d`).~~ ✅ Landed 2026-05-20 as `--offset` / `--duration` (ms-based). `-on` is internal to whisper-cli's WAV reader and not exposed by `whisper_full_params`, so deliberately skipped.
+
 6. ~~**Segment shaping + decoder thresholds + audio-ctx + tinydiarize + suppression + flash-attn/no-gpu/device + processors.**~~ ✅ Landed 2026-05-20 as Batches 1–3 of the whisper closer (see CHANGELOG).
 
 Remaining out-of-scope or deferred (do not re-flag): `--dtw` token-level DTW (niche), `-wt / --word-thold` (we already emit per-word timing in `--output-json-full`), OpenVINO device selection, and a handful of decoder-print toggles (`-pc/-pp/-ls/-debug/-np/-ps/--print-confidence`) where chimera owns its own logging. The `--grammar` family, stereo `--diarize`, and `--detect-language` were previously listed here; all three landed 2026-05-20 — see the whisper coverage table above.
@@ -250,8 +263,11 @@ Remaining out-of-scope or deferred (do not re-flag): `--dtw` token-level DTW (ni
 ### Deliberately omitted
 
 - Karaoke / `--font-path` plumbing.
+
 - OpenVINO device selection (`-oved`).
+
 - All debug-print toggles — chimera has its own log control.
+
 - `-dtw` (token-level DTW) — niche.
 
 ---
@@ -373,20 +389,35 @@ Even after closing the Z-Image/Flux/SD3 model-loading gap, sd remains the larges
 ### Notable gaps worth filing
 
 1. ~~**`--guidance` and `--flow-shift`**.~~ ✅ Landed 2026-05-20.
+
 2. ~~**`--clip_g` (alongside `--clip-l`)**.~~ ✅ Landed 2026-05-20 as `--clip-g`.
+
 3. ~~**`--control-image` + `--control-strength` + `--control-net`**.~~ ✅ Landed 2026-05-20 (ControlNet bundle).
+
 4. ~~**`--vae-tiling` family**.~~ ✅ Landed 2026-05-20.
+
 5. ~~**`--diffusion-conv-direct` / `--vae-conv-direct`**~~ ✅ Landed 2026-05-20.
+
 6. ~~**Sampler-RNG / `--rng`**~~ ✅ Landed 2026-05-20.
+
 7. ~~**`--lora-model-dir`**~~ ✅ Landed 2026-05-20 alongside `--lora <path[:scale]>` (repeatable). Note: prompt-side `<lora:foo:0.8>` extraction is **not** wired yet — `--lora` takes explicit paths. Follow-up.
+
 8. ~~**`--type`**~~ ✅ Landed 2026-05-20.
+
 9. ~~**Perf/offload bundle** (`--fa`, `--no-mmap`, `--max-vram`, `--clip-on-cpu`, `--vae-on-cpu`, `--control-net-cpu`, `--force-sdxl-vae-conv-scale`).~~ ✅ Landed 2026-05-20 (Round 1 of the closer).
+
 10. ~~**Sampler/generation core** (`--img-cfg-scale`, `--eta`, `--timestep-shift`, `--sigmas`, `--prediction`, `--lora-apply-mode`).~~ ✅ Landed 2026-05-20 (Round 2).
+
 11. ~~**Model-loading completers** (`--taesd`, `--clip-vision`, `--llm-vision`, `--tensor-type-rules`, `--photo-maker`).~~ ✅ Landed 2026-05-20 (Round 3).
+
 12. ~~**PhotoMaker bundle** (`--pm-id-images-dir`, `--pm-id-embed-path`, `--pm-style-strength`).~~ ✅ Landed 2026-05-20 (Round 4).
+
 13. ~~**Reference images** (`--ref-image`, `--increase-ref-index`, `--no-auto-resize-ref-image`).~~ ✅ Landed 2026-05-20 (Round 5).
+
 14. ~~**Hires-fix bundle** (`--hires`, `--hires-upscaler`, `--upscale-model`, `--hires-width/height/scale/steps/denoising-strength/upscale-tile-size`).~~ ✅ Landed 2026-05-20 (Round 6).
+
 15. ~~**Cache / SCM bundle** (`--cache-mode`, `--cache-option`, `--scm-mask`, `--scm-policy`).~~ ✅ Landed 2026-05-20 (Round 7). Mirrors sd-cli's 4-flag surface; the 15-key `--cache-option` kv-parser branches on the active mode just like sd-cli does.
+
 16. ~~**`--embd-dir`** (textual-inversion directory).~~ ✅ Landed 2026-05-20 (Round 8). Non-recursive scan for `.gguf`/`.safetensors`/`.pt`; filename stem becomes the prompt token; validated before `new_sd_ctx`.
 
 All sd items in this list are now resolved. `--disable-image-metadata` (the prior residual) was reclassified 🚫 in the table above — chimera's stock `stb_image_write` doesn't embed any metadata to begin with, so the flag has nothing to disable. A future "embed metadata" feature would be net-new functionality, not a port.
@@ -394,9 +425,13 @@ All sd items in this list are now resolved. `--disable-image-metadata` (the prio
 ### Deliberately omitted
 
 - Video mode (`vid_gen`, `--video-frames`, `--fps`, `--vace-strength`, `--end-img`, `--control-video`).
+
 - Upscale-only / convert-only / metadata-only sd modes (chimera-sd is img_gen-scoped).
+
 - Seamless-tile (`--circular*`).
+
 - sd-cli shell features: `--preview*`, `--metadata-*`, `--canny`, `--mode`.
+
 - Chroma-specific advanced flags (`--chroma-*`) unless we land Chroma support.
 
 ---
@@ -406,13 +441,17 @@ All sd items in this list are now resolved. `--disable-image-metadata` (the prio
 ### 1. Naming drift between chimera and upstreams
 
 - **Kebab vs underscore.** sd.cpp's text-encoder flags are underscored (`--clip_l`, `--clip_g`, `--llm_vision`, `--qwen2vl`); chimera normalizes everything to kebab (`--clip-l`). This is a defensible house style but should be called out in `--help` text so users porting sd command lines don't get a "no such option" surprise.
+
 - **`--sample-method` vs `--sampling-method`.** Minor drift, but the kind of thing that breaks copy-pasting from sd-cpp docs. Same for `--init-image` vs `--init-img`, `--mask-image` vs `--mask`, `--input` vs `--file` (whisper).
+
 - **whisper `--timestamps` flips polarity** vs upstream's `--no-timestamps` (chimera defaults to off, upstream to on). Document loudly; do not change.
 
 ### 2. Flags chimera handles inconsistently across the three subcommands
 
 - ~~**`--flash-attn`** — exists in upstream llama-cli, whisper-cli, *and* sd-cpp; not exposed in any of chimera's subcommands.~~ ✅ Landed everywhere (2026-05-20): `--flash-attn` on `gen`/`chat`/`embed` and `whisper`; on `sd`, both `--diffusion-fa` (sd-internal) and the generic global `--fa` are now exposed.
+
 - **`--lora`** — exposed in `serve` but not in `gen`/`chat`/`embed`/`sd`. The asymmetry is a footgun.
+
 - **Output formatting** — `embed` lacks `--embd-output-format`, `whisper` lacks `-oj/-osrt/-ovtt`. Both subcommands' output stories are unevenly developed compared to upstream.
 
 ### 3. Environment-variable fallbacks chimera doesn't honor
@@ -424,7 +463,9 @@ llama.cpp's `common_arg` machinery wires several flags to env vars (`LLAMA_ARG_C
 Three big slabs of upstream surface area are correctly out of scope and should stay that way:
 
 - llama-cli's interactive REPL (`-i`, `--in-prefix`, `--reverse-prompt`, `--multiline-input`, etc.) — chimera replaces it with `chat` + linenoise + SQLite persistence.
+
 - Speculative decoding (`--draft*`, `--spec-*`) — none of the chimera subcommands wrap a draft-model code path yet.
+
 - Training / perplexity / hellaswag / cvector-generator / imatrix flags — those upstream binaries don't have chimera analogs.
 
 ### 5. Top issues to file from this audit
@@ -432,16 +473,27 @@ Three big slabs of upstream surface area are correctly out of scope and should s
 In priority order (highest user impact first). Items struck through landed on 2026-05-20.
 
 1. ~~**sd: Flux/SD3 guidance pair** (`--guidance`, `--flow-shift`).~~ ✅ Landed 2026-05-20.
+
 2. ~~**sd: ControlNet bundle** (`--control-net`, `--control-image`, `--control-strength`).~~ ✅ Landed 2026-05-20.
+
 3. ~~**whisper: output-format family** (`-osrt`, `-oj`, `-ovtt`, `-ojf`, `-ocsv`, `-olrc`).~~ ✅
+
 4. ~~**sd: VAE-tiling bundle** (`--vae-tiling` + tile-size/overlap).~~ ✅ Landed 2026-05-20.
+
 5. ~~**llama: `--grammar` / `--json-schema` / `--json-schema-file`** in `gen`.~~ ✅
+
 6. ~~**All three: `--flash-attn`**.~~ ✅
+
 7. ~~**llama: `--lora` in `gen`/`chat`**.~~ ✅
+
 8. ~~**whisper: `--prompt` + decoding-strategy basics** (`--beam-size`, `--best-of`, `--temperature`, `--no-fallback`).~~ ✅ Landed 2026-05-20.
+
 9. ~~**sd: `--lora`, `--lora-model-dir`, `--clip_g`, `--type`**~~ ✅ Landed 2026-05-20.
+
 10. ~~**embed: `--embd-output-format` + `--embd-separator` + `--attention`**~~ ✅ Landed 2026-05-20 (also `--pooling rank`).
+
 11. ~~**sd coverage closer — Rounds 1–8 (38 flags).**~~ ✅ Landed 2026-05-20. Perf/offload (Round 1), sampler/generation (Round 2), model-loading completers (Round 3), PhotoMaker bundle (Round 4), reference images (Round 5), hires-fix bundle (Round 6), cache/SCM bundle (Round 7), `--embd-dir` (Round 8). See the per-section tables above and the CHANGELOG entry for the full enumeration.
+
 12. ~~**whisper coverage closer — Batches 1–3 + VAD + offset/duration (22 flags).**~~ ✅ Landed 2026-05-20.
 
 **No residual open items at the close of this audit cycle.** Every flag on the gen/chat/embed/whisper/sd surfaces is either landed, deliberately renamed, partial-with-explanation, or explicitly out-of-scope. The remaining 🚫 rows are documented in their per-section tables with a sentence each: video-only sd modes, server-only common_params fields, llama-cli's REPL plumbing (replaced by chimera's own `chat` + linenoise), speculative decoding, training/perplexity/imatrix flags, OpenVINO and chroma/qwen tuning, low-level decoder-print toggles, and a handful of niche items where the chimera path already supplies an equivalent (e.g. `--word-thold` is moot because `--output-json-full` already emits per-word timing). The 14 prior gen/chat residuals all closed in a long-tail batch the same day — 19 flags landed (sampler nibbles, MoE offload, override-tensor/kv, control vectors, etc.) and four upstream flags reclassified 🚫 (`--keep` for architecture mismatch — chimera uses KV-prefix reuse, not context-shift; `--ctx-checkpoints`, `--checkpoint-every-n-tokens`, `--cache-ram` for server-only `common_params` fields the CLI never touches). The prior `chat --reasoning-budget` enforcement gap was closed the same day — the integration turned out to be entirely upstream of `common_sampler_init`, not inside the sample loop. The prior sd `--disable-image-metadata` residual was reclassified 🚫 — chimera's stock `stb_image_write` doesn't embed any text chunks, so there is nothing to disable; a future "embed metadata" feature for parity with sd-cli's default is tracked as net-new functionality, not a port. The three remaining whisper items are wrapper-logic features rather than param plumbing, so they're deferred as bigger lifts rather than mechanical ports.

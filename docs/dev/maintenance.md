@@ -1,11 +1,6 @@
 # Maintaining chimera across upstream changes
 
-chimera bundles three large C++ projects (llama.cpp, whisper.cpp,
-stable-diffusion.cpp) plus SQLite + sqlite-vec + cpp-httplib + a handful of
-single-header utilities. Every bump in any of those is a potential
-breakage. This doc surveys where breakage actually lands, what we
-already do to contain it, and the highest-leverage things still
-missing.
+chimera bundles three large C++ projects (llama.cpp, whisper.cpp, stable-diffusion.cpp) plus SQLite + sqlite-vec + cpp-httplib + a handful of single-header utilities. Every bump in any of those is a potential breakage. This doc surveys where breakage actually lands, what we already do to contain it, and the highest-leverage things still missing.
 
 ## Source layout
 
@@ -57,11 +52,7 @@ docs/
   dev/webui.md                  things to watch for.
 ```
 
-The internal split is mostly about keeping native dependency headers
-isolated: llama.cpp, whisper.cpp, and stable-diffusion.cpp expose
-overlapping ggml symbols and cannot all be included in one translation
-unit. Maintainer-facing details also live in `docs/dev/server.md`,
-`docs/dev/sqlite.md`, `docs/dev/webui.md`, and `docs/dev/oop-layer.md`.
+The internal split is mostly about keeping native dependency headers isolated: llama.cpp, whisper.cpp, and stable-diffusion.cpp expose overlapping ggml symbols and cannot all be included in one translation unit. Maintainer-facing details also live in `docs/dev/server.md`, `docs/dev/sqlite.md`, `docs/dev/webui.md`, and `docs/dev/oop-layer.md`.
 
 ## Where breakage actually lands
 
@@ -77,40 +68,25 @@ Five categories, in roughly decreasing order of how much they hurt:
 
 ## What chimera already does well
 
-- **Pinned versions, vendored headers.** `LLAMACPP_VERSION = "b9119"`,
-  headers copied into `thirdparty/llama.cpp/include/` by
-  `manage.py`. We control when an upstream change lands.
-- **Per-modality TU isolation.** `chimera_whisper.cpp`,
-  `chimera_sd.cpp`, `chimera_embed.cpp`. One upstream project → one
-  chimera file, mostly localized.
-- **`make bump-check`.** Diffs the vendored
-  `server-context.h` / `server-http.h` against a target ref before you
-  change the pin; lists added/removed top-level symbols. See
-  `docs/dev/server.md` § 7.
-- **`make test-db-migrate`.** Builds a v1 chimera.db in a tempdir and
-  asserts it upgrades to current cleanly with all pre-existing rows
-  preserved.
-- **`make test`** — 62 tests hitting every subcommand: 56 PASS + 6
-  SKIP-when-fixture-missing on a fresh checkout. The 6 SKIPs are opt-in
-  success-path tests gated on adapter / aux-model env vars (see below).
-- **`chimera info`** — single command captures every version + backend
-  at runtime; useful for bug reports.
-- **`docs/dev/server.md` § 7** — explicit list of upstream types we
-  depend on.
-- **Link surgery contained.** `-Wl,--start-group` on Linux,
-  `-Wl,-force_load` on macOS, MSVC `/WHOLEARCHIVE` on Windows — all in
-  `src/chimera/CMakeLists.txt`, not scattered.
+- **Pinned versions, vendored headers.** `LLAMACPP_VERSION = "b9119"`, headers copied into `thirdparty/llama.cpp/include/` by `manage.py`. We control when an upstream change lands.
+
+- **Per-modality TU isolation.** `chimera_whisper.cpp`, `chimera_sd.cpp`, `chimera_embed.cpp`. One upstream project → one chimera file, mostly localized.
+
+- **`make bump-check`.** Diffs the vendored `server-context.h` / `server-http.h` against a target ref before you change the pin; lists added/removed top-level symbols. See `docs/dev/server.md` § 7.
+
+- **`make test-db-migrate`.** Builds a v1 chimera.db in a tempdir and asserts it upgrades to current cleanly with all pre-existing rows preserved.
+
+- **`make test`** — 62 tests hitting every subcommand: 56 PASS + 6 SKIP-when-fixture-missing on a fresh checkout. The 6 SKIPs are opt-in success-path tests gated on adapter / aux-model env vars (see below).
+
+- **`chimera info`** — single command captures every version + backend at runtime; useful for bug reports.
+
+- **`docs/dev/server.md` § 7** — explicit list of upstream types we depend on.
+
+- **Link surgery contained.** `-Wl,--start-group` on Linux, `-Wl,-force_load` on macOS, MSVC `/WHOLEARCHIVE` on Windows — all in `src/chimera/CMakeLists.txt`, not scattered.
 
 ### Opt-in fixture-driven tests
 
-`scripts/test.py` ships six success-path tests for the SD adapter /
-aux-model surfaces (LoRA, ControlNet, PhotoMaker) on **both** the CLI
-(`chimera sd`) and the HTTP server (`POST /v1/images/*`). These need
-real model files chimera intentionally doesn't ship — too large and
-shape-specific — so each test is gated on an environment variable
-pointing at a developer-supplied fixture. When the env var is unset
-the test emits `SKIP`; when it's set but the path doesn't exist the
-test emits `FAIL` (partial config is a misuse, not a SKIP).
+`scripts/test.py` ships six success-path tests for the SD adapter / aux-model surfaces (LoRA, ControlNet, PhotoMaker) on **both** the CLI (`chimera sd`) and the HTTP server (`POST /v1/images/*`). These need real model files chimera intentionally doesn't ship — too large and shape-specific — so each test is gated on an environment variable pointing at a developer-supplied fixture. When the env var is unset the test emits `SKIP`; when it's set but the path doesn't exist the test emits `FAIL` (partial config is a misuse, not a SKIP).
 
 | Env var | Required by | Purpose |
 |---------|-------------|---------|
@@ -120,13 +96,7 @@ test emits `FAIL` (partial config is a misuse, not a SKIP).
 | `CHIMERA_TEST_PHOTOMAKER` | `sd --photo-maker`, serve `pm_id_image_set` | Path to a `.safetensors` PhotoMaker model. |
 | `CHIMERA_TEST_PM_ID_DIR` | `sd --photo-maker`, serve `pm_id_image_set` | Directory of identity-set subdirectories (each subdir contains reference identity images). Required together with `CHIMERA_TEST_PHOTOMAKER`. The serve-side test picks the first subdirectory alphabetically as the `pm_id_image_set` value. |
 
-The bar for each success-path test is: exit 0 + non-empty output
-(CLI) or HTTP 200 + non-empty `b64_json` image (serve). No
-perceptual diff — the value is catching wiring regressions in the
-engine integration, not validating LoRA/CN/PM math. Step counts are
-minimal (`-s 2`) to keep tests fast; LoRA tensors are applied once at
-the start of generate(), so even 2 steps exercises the load + apply
-path.
+The bar for each success-path test is: exit 0 + non-empty output (CLI) or HTTP 200 + non-empty `b64_json` image (serve). No perceptual diff — the value is catching wiring regressions in the engine integration, not validating LoRA/CN/PM math. Step counts are minimal (`-s 2`) to keep tests fast; LoRA tensors are applied once at the start of generate(), so even 2 steps exercises the load + apply path.
 
 Example invocation with all three sets of fixtures:
 
@@ -139,15 +109,7 @@ CHIMERA_TEST_PM_ID_DIR=/data/identities \
     make test
 ```
 
-There's also a convenience wrapper at `scripts/test_fixtures.py` that
-probes the same env vars, validates the paths up-front, and invokes
-`scripts/test.py` with the right filter so only the six fixture-driven
-tests run. It's purely local — no CI surface — because adapter / aux-
-model fixtures are individually licensed and the public-availability of
-mirrors shifts (we tried wiring this up as a GitHub Actions workflow
-once; the SD-1.5 default mirror was gated within weeks, and chasing
-moving HF availability for hosted CI didn't pay off). Run it from a
-checkout that has whichever fixtures you've staged:
+There's also a convenience wrapper at `scripts/test_fixtures.py` that probes the same env vars, validates the paths up-front, and invokes `scripts/test.py` with the right filter so only the six fixture-driven tests run. It's purely local — no CI surface — because adapter / aux- model fixtures are individually licensed and the public-availability of mirrors shifts (we tried wiring this up as a GitHub Actions workflow once; the SD-1.5 default mirror was gated within weeks, and chasing moving HF availability for hosted CI didn't pay off). Run it from a checkout that has whichever fixtures you've staged:
 
 ```sh
 CHIMERA_TEST_LORA=/models/loras/pixelart.safetensors \
@@ -157,154 +119,64 @@ CHIMERA_TEST_LORA=/models/loras/pixelart.safetensors \
 Behavior:
 
 - All env vars unset → prints a "nothing to do" line and exits 0.
-- A fixture set's env vars are partially set, or point at a missing
-  path → exits 2 with a clear "partial or invalid configuration"
-  error. Same misuse-not-SKIP contract as `scripts/test.py`.
-- At least one set is fully present → forwards to `scripts/test.py
-  --filter '<regex>'` and exits with the test runner's exit code.
 
-Extra `scripts/test.py` flags can be appended after the script's own
-args, e.g. `python3 scripts/test_fixtures.py --no-color --verbose`.
+- A fixture set's env vars are partially set, or point at a missing path → exits 2 with a clear "partial or invalid configuration" error. Same misuse-not-SKIP contract as `scripts/test.py`.
+
+- At least one set is fully present → forwards to `scripts/test.py --filter '<regex>'` and exits with the test runner's exit code.
+
+Extra `scripts/test.py` flags can be appended after the script's own args, e.g. `python3 scripts/test_fixtures.py --no-color --verbose`.
 
 ## What's still weak, ranked by leverage
 
 ### 1. ~~HTTP-response golden tests~~ — DONE
 
-Implemented as `scripts/test_golden.py` + `tests/golden/`, driven by
-`make test-golden`. Spawns chimera serve against fixed models on a
-free port, hits 9 routes (`/v1/health`, `/v1/models`, `/props`,
-`/tokenize`, `/detokenize`, `/apply-template`, `/v1/embeddings`,
-`/v1/chat/completions`, `/v1/completions`), runs each response
-through a route-specific normalizer (redact volatile / shape-check
-generated text), and diffs against checked-in JSON. Pinned to CPU
-(`--gpu-layers 0`) so the goldens stay portable across machines.
-`UPDATE_GOLDEN=1` to refresh after a deliberate shape change.
+Implemented as `scripts/test_golden.py` + `tests/golden/`, driven by `make test-golden`. Spawns chimera serve against fixed models on a free port, hits 9 routes (`/v1/health`, `/v1/models`, `/props`, `/tokenize`, `/detokenize`, `/apply-template`, `/v1/embeddings`, `/v1/chat/completions`, `/v1/completions`), runs each response through a route-specific normalizer (redact volatile / shape-check generated text), and diffs against checked-in JSON. Pinned to CPU (`--gpu-layers 0`) so the goldens stay portable across machines. `UPDATE_GOLDEN=1` to refresh after a deliberate shape change.
 
 ### 2. ~~Widen `bump-check`~~ — DONE
 
 `make bump-check` now covers two upstream repos in one run:
 
-- **llama.cpp** (default ref `LLAMACPP_VERSION` in `manage.py`):
-  `include/llama.h`, `common/common.h`, `common/arg.h`, `common/chat.h`,
-  `tools/mtmd/mtmd.h`, plus the original
-  `tools/server/server-{context,http}.h`. Plus build-system path
-  probes (vendored sources + both webui layouts) — see § "Build-system
-  drift" below.
-- **stable-diffusion.cpp** (default ref `SDCPP_VERSION`,
-  `master-<count>-<sha>` format auto-extracted): `stable-diffusion.h`.
+- **llama.cpp** (default ref `LLAMACPP_VERSION` in `manage.py`): `include/llama.h`, `common/common.h`, `common/arg.h`, `common/chat.h`, `tools/mtmd/mtmd.h`, plus the original `tools/server/server-{context,http}.h`. Plus build-system path probes (vendored sources + both webui layouts) — see § "Build-system drift" below.
 
-Override either via `--llama-version` / `--sd-version`. Skip one repo
-with `--skip-llama` or `--skip-sd`. whisper.h isn't covered (whisper
-has been the most stable of the three deps; add a third comparison to
-`bump_check` in `manage.py` if a whisper bump ever bites).
+- **stable-diffusion.cpp** (default ref `SDCPP_VERSION`, `master-<count>-<sha>` format auto-extracted): `stable-diffusion.h`.
 
-**Build-system drift probe.** After the header diff, the script
-HEAD-probes a handful of named non-header paths (`tools/server/server-http.cpp`,
-`tools/ui/embed.cpp`, and the three webui asset layouts) and reports which
-layout the target ref uses. Catches drift in non-header files that
-header diffs miss — exactly the failure mode that bit the b9119 →
-b9264 bump (the webui asset directory disappeared without any header
-change) and again at b9318 (`scripts/xxd.cmake` + `tools/ui/ui.h` removed
-in favour of the `tools/ui/embed.cpp` generator). A missing required path fails bump-check with a clear
-`BUILD-SYSTEM ERROR` instead of surfacing as an opaque `make build`
-failure later.
+Override either via `--llama-version` / `--sd-version`. Skip one repo with `--skip-llama` or `--skip-sd`. whisper.h isn't covered (whisper has been the most stable of the three deps; add a third comparison to `bump_check` in `manage.py` if a whisper bump ever bites).
+
+**Build-system drift probe.** After the header diff, the script HEAD-probes a handful of named non-header paths (`tools/server/server-http.cpp`, `tools/ui/embed.cpp`, and the three webui asset layouts) and reports which layout the target ref uses. Catches drift in non-header files that header diffs miss — exactly the failure mode that bit the b9119 → b9264 bump (the webui asset directory disappeared without any header change) and again at b9318 (`scripts/xxd.cmake` + `tools/ui/ui.h` removed in favour of the `tools/ui/embed.cpp` generator). A missing required path fails bump-check with a clear `BUILD-SYSTEM ERROR` instead of surfacing as an opaque `make build` failure later.
 
 ### 3. ~~Compile-time pin assertions~~ — DONE
 
-`src/chimera/chimera_pin_check.cpp` for the llama.cpp surface
-(every `server_routes` handler_t field, `common_params` field types
-including `ui` — formerly `webui`, whose deprecated alias upstream
-dropped at b9741 — `LLAMA_POOLING_TYPE_*` enum values, key
-`llama_*` function signatures including the `llama_memory_t` API
-that the persistent `chimera::Llama` ctx relies on). Matching
-per-modality pin blocks live in `chimera_whisper.cpp`
-(`whisper_init_from_file_with_params`, `whisper_free`,
-`whisper_full`) and `chimera_sd.cpp` (struct fields: `sd_image_t`,
-`sd_lora_t`, `sd_pm_params_t`, `sd_sample_params_t`; sentinel enum
-values `SAMPLE_METHOD_COUNT` / `SCHEDULER_COUNT` / `PREDICTION_COUNT`;
-function signatures: `new_sd_ctx`, `free_sd_ctx`, `generate_image`,
-`sd_ctx_params_init`, `str_to_sample_method`, `str_to_scheduler`,
-`sd_ctx_supports_image_generation`). ggml.h collisions mean whisper
-/ sd can't share a TU with llama, so each modality owns its own
-pin-check function.
+`src/chimera/chimera_pin_check.cpp` for the llama.cpp surface (every `server_routes` handler_t field, `common_params` field types including `ui` — formerly `webui`, whose deprecated alias upstream dropped at b9741 — `LLAMA_POOLING_TYPE_*` enum values, key `llama_*` function signatures including the `llama_memory_t` API that the persistent `chimera::Llama` ctx relies on). Matching per-modality pin blocks live in `chimera_whisper.cpp` (`whisper_init_from_file_with_params`, `whisper_free`, `whisper_full`) and `chimera_sd.cpp` (struct fields: `sd_image_t`, `sd_lora_t`, `sd_pm_params_t`, `sd_sample_params_t`; sentinel enum values `SAMPLE_METHOD_COUNT` / `SCHEDULER_COUNT` / `PREDICTION_COUNT`; function signatures: `new_sd_ctx`, `free_sd_ctx`, `generate_image`, `sd_ctx_params_init`, `str_to_sample_method`, `str_to_scheduler`, `sd_ctx_supports_image_generation`). ggml.h collisions mean whisper / sd can't share a TU with llama, so each modality owns its own pin-check function.
 
-**Blind spot: field -> accessor drift.** Pin-checks assert member
-*types* via `decltype`; they cannot assert that a plain data member
-stayed a plain data member. When upstream converts a field into an
-accessor method, `decltype(common_params_model::name)` simply stops
-compiling rather than tripping a chimera-specific message — and there
-is no `static_assert` to keep ahead of it. This is exactly what bit
-the b9741 bump: `common_params_model::name` (a `std::string` field)
-became `get_name()` (derives the name from `hf_repo` / `docker_repo` /
-`path`), breaking the `model_alias` defaulting in `chimera_serve.cpp`.
-The catch is the `bump-check` header diff, not a pin: `bump-check`
-diffs `common/common.h`, so a `common_params_model` struct change
-shows up as added/removed symbols *before* you flip the pin. Add
-"scan the `common_params_model` diff for field <-> accessor changes
-(`name`/`get_name`, `path`, `hf_repo`, ...)" to the bump checklist —
-chimera reads these members directly and they are not statically
-pinned.
+**Blind spot: field -> accessor drift.** Pin-checks assert member *types* via `decltype`; they cannot assert that a plain data member stayed a plain data member. When upstream converts a field into an accessor method, `decltype(common_params_model::name)` simply stops compiling rather than tripping a chimera-specific message — and there is no `static_assert` to keep ahead of it. This is exactly what bit the b9741 bump: `common_params_model::name` (a `std::string` field) became `get_name()` (derives the name from `hf_repo` / `docker_repo` / `path`), breaking the `model_alias` defaulting in `chimera_serve.cpp`. The catch is the `bump-check` header diff, not a pin: `bump-check` diffs `common/common.h`, so a `common_params_model` struct change shows up as added/removed symbols *before* you flip the pin. Add "scan the `common_params_model` diff for field <-> accessor changes (`name`/`get_name`, `path`, `hf_repo`, ...)" to the bump checklist — chimera reads these members directly and they are not statically pinned.
 
 ### 4. Adapter shim between chimera_serve and `server_routes`
 
-`chimera_serve.cpp` directly references upstream lambda names. Wrap
-each binding in a one-line indirection —
-`chimera::routes::chat_completions(routes)` returning
-`routes.post_chat_completions` — so when upstream renames
-`post_chat_completions` → `chat_completions_post`, you change one line
-in a shim header rather than greping through `chimera_serve.cpp`.
-Modest churn, big localization win. Could land incrementally as
-bindings break.
+`chimera_serve.cpp` directly references upstream lambda names. Wrap each binding in a one-line indirection — `chimera::routes::chat_completions(routes)` returning `routes.post_chat_completions` — so when upstream renames `post_chat_completions` → `chat_completions_post`, you change one line in a shim header rather than greping through `chimera_serve.cpp`. Modest churn, big localization win. Could land incrementally as bindings break.
 
 ### 5. Bump PR template / checklist
 
-A `.github/PULL_REQUEST_TEMPLATE.md` (or a one-page doc) listing the
-steps for a version bump: run `make bump-check`, run `make test`, run
-`make test-db-migrate`, eyeball golden diffs, update CHANGELOG. Cheap,
-prevents the "I forgot" failure mode.
+A `.github/PULL_REQUEST_TEMPLATE.md` (or a one-page doc) listing the steps for a version bump: run `make bump-check`, run `make test`, run `make test-db-migrate`, eyeball golden diffs, update CHANGELOG. Cheap, prevents the "I forgot" failure mode.
 
 ### 6. Pin compatibility window in CI
 
-A nightly job that builds against `LLAMACPP_VERSION` *and* against
-`LLAMACPP_VERSION - 100` (some rolling old pin), then runs
-`make smoke`. If we accidentally start using a symbol only present in
-the new pin, the old-pin build flags it. Costs CI minutes; catches
-"subtle dependency widening" before a user hits it. Optional — only
-worth the cost if you want a real back-compat window.
+A nightly job that builds against `LLAMACPP_VERSION` *and* against `LLAMACPP_VERSION - 100` (some rolling old pin), then runs `make smoke`. If we accidentally start using a symbol only present in the new pin, the old-pin build flags it. Costs CI minutes; catches "subtle dependency widening" before a user hits it. Optional — only worth the cost if you want a real back-compat window.
 
 ### 7. Cross-component invariants
 
-The one runtime cross-component invariant today is
-`GGML_MAX_NAME=128` (SD requires it; llama.cpp defaults to 64; both
-must agree because they share ggml). Today the constraint lives in
-`manage.py` via `SD_USE_VENDORED_GGML=0` +
-`CMAKE_CXX_FLAGS=-DGGML_MAX_NAME=128`. A runtime assert at startup
-(`chimera info` already prints `ggml_version`; add a check that the
-two libraries report the same string) would surface a ggml mismatch
-before it manifests as silent tensor corruption. Tiny diff.
+The one runtime cross-component invariant today is `GGML_MAX_NAME=128` (SD requires it; llama.cpp defaults to 64; both must agree because they share ggml). Today the constraint lives in `manage.py` via `SD_USE_VENDORED_GGML=0` + `CMAKE_CXX_FLAGS=-DGGML_MAX_NAME=128`. A runtime assert at startup (`chimera info` already prints `ggml_version`; add a check that the two libraries report the same string) would surface a ggml mismatch before it manifests as silent tensor corruption. Tiny diff.
 
 ### 8. Reduce coupling to internal-API headers where possible
 
-Some upstream features have *both* a public C API and an internal C++
-API (`server_routes` is purely the latter). Where we have a choice,
-prefer the C API — `llama.h` is far more stable than `common.h` or
-`server-context.h`. Long-term refactor; only do this when a particular
-`server_routes` field becomes annoying enough to relocate.
+Some upstream features have *both* a public C API and an internal C++ API (`server_routes` is purely the latter). Where we have a choice, prefer the C API — `llama.h` is far more stable than `common.h` or `server-context.h`. Long-term refactor; only do this when a particular `server_routes` field becomes annoying enough to relocate.
 
 ## Status
 
-Items 1–3 above (golden tests, widened bump-check, pin assertions) +
-the bump PR checklist (`.github/PULL_REQUEST_TEMPLATE.md`) all landed.
-Items 4 (adapter shim) and beyond stay on the radar — only worth the
-churn when a specific bump actually hurts in a way the above don't
-already catch.
+Items 1–3 above (golden tests, widened bump-check, pin assertions) + the bump PR checklist (`.github/PULL_REQUEST_TEMPLATE.md`) all landed. Items 4 (adapter shim) and beyond stay on the radar — only worth the churn when a specific bump actually hurts in a way the above don't already catch.
 
 ## The pattern
 
-Keep the **boundary** of "upstream code we link against" small and
-explicit. **Test the behavior at the boundary** (golden files,
-compile asserts, schema fixtures). Almost everything else falls out
-of that.
+Keep the **boundary** of "upstream code we link against" small and explicit. **Test the behavior at the boundary** (golden files, compile asserts, schema fixtures). Almost everything else falls out of that.
 
 ## What's bespoke vs vendored — quick map
 
@@ -312,38 +184,32 @@ Useful when triaging "is this our bug or theirs":
 
 **Vendored (upstream owns the code)**
 
-- llama.cpp: text LLM engine, chat templating, mtmd, OpenAI-API
-  handlers in `server_routes`.
+- llama.cpp: text LLM engine, chat templating, mtmd, OpenAI-API handlers in `server_routes`.
+
 - whisper.cpp: ASR.
+
 - stable-diffusion.cpp: txt2img / img2img / VAE.
+
 - cpp-httplib (via llama.cpp): HTTP server.
-- SQLite + sqlite-vec: amalgamation drop-ins. FTS5, vec0 virtual
-  tables.
+
+- SQLite + sqlite-vec: amalgamation drop-ins. FTS5, vec0 virtual tables.
+
 - OpenSSL: TLS + `EVP_sha256` for embedding-cache fingerprints.
+
 - Header-only: nlohmann/json, CLI11, rang, linenoise, stb_image.
 
 **Bespoke (chimera owns)**
 
 - CLI surface: every subcommand and its flags.
-- `chimera serve` wiring: which upstream routes get bound, with what
-  overrides, all the per-modality handler factories
-  (`make_audio_transcribe_handler`, `make_image_*_handler`,
-  `make_vs_*_handler`), the SSE-aware persistence wrapper, the
-  `SecondaryServerCtx` machinery for `--enable-embeddings` /
-  `--reranking`.
-- `chimera_db` (schema + migrations), `chimera_vector_store`,
-  `chimera_embed` + `chimera_embed_cache`, `chimera_chat_store`,
-  `chimera_whisper` (WAV decode, resample, word timestamps),
-  `chimera_sd` (GenerateRequest, PNG i/o, log ring).
-- Chat REPL UX: slash commands, linenoise integration, ANSI color
-  layer, spinner, tok/sec stats.
-- Build system: `scripts/manage.py`, `CMakeLists.txt` glue, link-order
-  surgery, `bump-check`, release workflow.
-- Tests + docs: `scripts/test.py`, `scripts/test_db_migrate.py`,
-  `docs/`, `docs/dev/`.
 
-**Mental shortcut**: if it's about *running a model* (decode, sample,
-embed, transcribe, generate-image) it's upstream. If it's about *what
-subcommand does what, which routes are bound, what gets persisted,
-how chunks are sized, how the binary is built and shipped, or how the
-REPL feels* — that's chimera.
+- `chimera serve` wiring: which upstream routes get bound, with what overrides, all the per-modality handler factories (`make_audio_transcribe_handler`, `make_image_*_handler`, `make_vs_*_handler`), the SSE-aware persistence wrapper, the `SecondaryServerCtx` machinery for `--enable-embeddings` / `--reranking`.
+
+- `chimera_db` (schema + migrations), `chimera_vector_store`, `chimera_embed` + `chimera_embed_cache`, `chimera_chat_store`, `chimera_whisper` (WAV decode, resample, word timestamps), `chimera_sd` (GenerateRequest, PNG i/o, log ring).
+
+- Chat REPL UX: slash commands, linenoise integration, ANSI color layer, spinner, tok/sec stats.
+
+- Build system: `scripts/manage.py`, `CMakeLists.txt` glue, link-order surgery, `bump-check`, release workflow.
+
+- Tests + docs: `scripts/test.py`, `scripts/test_db_migrate.py`, `docs/`, `docs/dev/`.
+
+**Mental shortcut**: if it's about *running a model* (decode, sample, embed, transcribe, generate-image) it's upstream. If it's about *what subcommand does what, which routes are bound, what gets persisted, how chunks are sized, how the binary is built and shipped, or how the REPL feels* — that's chimera.
