@@ -7,7 +7,5 @@
 	--cfg-scale 1.0 \
 	--offload-to-cpu \
 	--diffusion-fa \
-	--clip-on-cpu \
-	--vae-on-cpu \
 	-H 1024 -W 512 \
 	-p "a lovely plump cat"

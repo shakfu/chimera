@@ -858,6 +858,39 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
             )
             _check_rc(t, rc, want=3, timeout=60)
 
+    # -v drops the sd stderr filter from SD_LOG_WARN to SD_LOG_DEBUG. sd.cpp
+    # hands every level to the callback and installs no printer of its own, so
+    # without this the INFO/DEBUG lines that carry weight residency
+    # ("total params memory size = ... (VRAM x, RAM y)") and the model_manager
+    # staging/release detail are dropped -- which makes a low-VRAM OOM
+    # impossible to tell apart from a placement problem. A missing model is
+    # enough to discriminate: the DEBUG line below precedes the load failure.
+    _V_DEBUG_LINE = "threads for model loading"
+    for label, argv in [
+        ("sd -v", ["sd", "-v"]),
+        ("-v sd", ["-v", "sd"]),
+    ]:
+        with maybe(rec, f"{label} echoes sd INFO/DEBUG to stderr") as t:
+            _rc, _out, err = run_capture(
+                [str(chimera), *argv, "-m", "/no/such/model.gguf", "-p", "hi",
+                 "-o", "/no/such/dir/out.png"],
+                timeout=60,
+            )
+            if _V_DEBUG_LINE not in err:
+                t.fail(f"{label}: no sd DEBUG line on stderr; got: {err!r}")
+
+    with maybe(rec, "sd without -v stays at warnings and above") as t:
+        _rc, _out, err = run_capture(
+            [str(chimera), "sd", "-m", "/no/such/model.gguf", "-p", "hi",
+             "-o", "/no/such/dir/out.png"],
+            timeout=60,
+        )
+        if _V_DEBUG_LINE in err:
+            t.fail(f"sd leaked a DEBUG line without -v: {err!r}")
+        # The failure itself must still be reported.
+        if "not found" not in err:
+            t.fail(f"sd swallowed the load error: {err!r}")
+
 
 # ============================================================================
 # End-to-end: gen + tokenize

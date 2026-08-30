@@ -133,6 +133,7 @@ void silence_all_logging() {
 #endif
 #ifdef CHIMERA_HAS_SD
     chimera_silence_sd_log();
+    chimera_set_sd_log_verbose(false);
 #endif
 }
 
@@ -145,6 +146,10 @@ void restore_default_logging() {
 #endif
 #ifdef CHIMERA_HAS_SD
     chimera_restore_sd_log();
+    // sd.cpp installs no default printer, so restoring its callback to null
+    // is not enough -- load_model() reinstalls chimera's, and this is what
+    // makes it echo INFO/DEBUG rather than warnings only.
+    chimera_set_sd_log_verbose(true);
 #endif
 }
 
@@ -3135,6 +3140,10 @@ int main(int argc, char ** argv) {
     // double blank line between description and usage. Setting an explicit
     // usage string skips that branch.
     app.usage("Usage: " + std::string(argv[0]) + " [OPTIONS] SUBCOMMAND");
+    // Let the global flags below bind after the subcommand as well, so both
+    // `chimera -v sd ...` and `chimera sd -v ...` work; every subcommand
+    // defines its own options first, so fallthrough only catches leftovers.
+    app.fallthrough();
     bool verbose = false;
     app.add_flag("-v,--verbose", verbose, "Enable native-backend logging");
     app.set_version_flag("-V,--version", &version_string,

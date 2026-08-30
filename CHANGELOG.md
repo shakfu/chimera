@@ -4,6 +4,16 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.2.15]
+
+### Fixed
+
+- **`-v` did not reach stable-diffusion, leaving every sd run diagnosable only by its errors.** `sd_log_callback()` hard-filtered at `SD_LOG_WARN`, and sd.cpp installs no printer of its own (`log_printf()` hands every level to the callback and returns), so `chimera sd` dropped the whole INFO/DEBUG tier no matter how it was invoked. That tier is where the lines that explain a low-VRAM failure live: `Found N backend devices`, `total params memory size = ... (VRAM x, RAM y)`, and the `model_manager` `prepared params backend buffer` / `staged compute params to CUDA0` / `releasing compute params` sequence. Without them an OOM from weights pinned to the compute backend -- sd's default, since `SDBackendManager::params_backend()` falls back to `runtime_backend()` when no `--params-backend` spec is given -- is indistinguishable from one caused by a placement flag that did not take effect, and the two have opposite fixes. The threshold is now settable (`chimera_set_sd_log_verbose()`), and `-v` drops it to `SD_LOG_DEBUG`. Warnings and errors are unaffected when the flag is absent.
+
+### Changed
+
+- **Global flags now bind after the subcommand as well as before it.** `app.fallthrough()`, so `chimera sd -v ...` works alongside `chimera -v sd ...`; previously the former exited with `The following argument was not expected: -v`. Subcommands bind their own options first, so fallthrough only catches what would otherwise have been an error.
+
 ## [0.2.14]
 
 Audit of chimera against the sibling cyllama (`0.4.0`--`0.4.2`) and inferna (`0.2.0`) releases, which fixed a set of defects in the same shared upstreams. Most of what those projects fixed chimera either fixed first (`GGML_MAX_NAME`, `0.2.12`) or never had (the placement flags were never routed onto `max_vram`), but five carried over. Two are sd.cpp defects chimera cannot reach from its own code, which is what the new patch machinery is for; see Added.

@@ -5,6 +5,7 @@
 // spinner, numbered-output-path helper) stays in the anonymous namespace.
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -294,12 +295,21 @@ void chimera_restore_sd_log() {
     sd_set_log_callback(nullptr, nullptr);
 }
 
+// sd.cpp's log_printf() hands every level to the callback unconditionally and
+// has no default printer of its own, so the stderr filter lives here.
+static std::atomic<int> g_sd_log_thold{static_cast<int>(SD_LOG_WARN)};
+
+void chimera_set_sd_log_verbose(bool verbose) {
+    g_sd_log_thold.store(static_cast<int>(verbose ? SD_LOG_DEBUG : SD_LOG_WARN),
+                         std::memory_order_relaxed);
+}
+
 namespace {
 
 void sd_log_callback(enum sd_log_level_t level, const char * text, void * user_data) {
     (void) user_data;
     push_log_line(text);
-    if (level >= SD_LOG_WARN) {
+    if (static_cast<int>(level) >= g_sd_log_thold.load(std::memory_order_relaxed)) {
         std::cerr << text;
     }
 }

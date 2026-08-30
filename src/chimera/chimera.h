@@ -739,6 +739,12 @@ void chimera_restore_whisper_log();
 #ifdef CHIMERA_HAS_SD
 void chimera_silence_sd_log();
 void chimera_restore_sd_log();
+// Lowest sd.cpp log level echoed to stderr by the chimera log callback.
+// Default is SD_LOG_WARN, which hides the INFO/DEBUG lines that carry the
+// weight-residency and model-manager staging detail; `-v` drops it to
+// SD_LOG_DEBUG. Independent of chimera_silence_sd_log(), which routes
+// everything to the ring buffer and nothing to stderr.
+void chimera_set_sd_log_verbose(bool verbose);
 #endif
 
 // Shared utility helpers, inlined here so all three TUs (chimera.cpp,
