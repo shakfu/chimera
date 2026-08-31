@@ -1,6 +1,7 @@
 # chimera cheatsheet
 
-Copy-pasteable one-liners. For prose, see [`serve.md`](serve.md).
+Copy-pasteable one-liners. For prose, see [`serve.md`](serve.md); for driving a
+chimera-hosted model with the hax coding agent, see [`agents/hax.md`](agents/hax.md).
 
 ```text
 chimera <subcommand> [flags]
@@ -661,3 +662,25 @@ make uninstall PREFIX=/usr/local
 make clean                         # remove build/
 make reset                         # clean + remove fetched thirdparty sources
 ```
+
+---
+
+## hax coding agent
+
+Runs [hax](https://github.com/shakfu/hax) against a model hosted by `chimera
+serve`. hax is an external binary on `PATH` (or `HAX=<path>`), not a bundled
+one. Details in [`agents/hax.md`](agents/hax.md).
+
+```sh
+make agent-hax-default                      # known-good model + GPU offload, no args
+make agent-hax-default HAX_ARGS='-p "list TODOs"'
+make agent-hax-default AGENT_MODEL=models/Qwen3.5-9B-Q4_K_M.gguf
+
+make agent-hax MODEL=models/Qwen3-4B-Q8_0.gguf \
+    CHIMERA_SERVE_ARGS="--gpu-layers 99 -c 32768"
+
+scripts/agent_hax.sh models/Qwen3-4B-Q8_0.gguf -p "prompt"   # without make
+```
+
+Needs a model that can drive tool calls: 4B is the floor, 8B-9B works. A 1B
+model loops until hax aborts.

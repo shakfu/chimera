@@ -3,7 +3,8 @@
 		test test-fast test-slow test-bench test-bench-fast smoke \
 		install uninstall release-notes bump-check test-db-migrate \
 		test-golden combine test-external-smoke test-external-oop \
-		bindings test-bindings test-bindings-pytest wheel clean-bindings
+		bindings test-bindings test-bindings-pytest wheel clean-bindings \
+		agent-hax agent-hax-default
 
 # Override with `make PYTHON=<cmd>` for
 # unusual environments (e.g. `PYTHON="uv run python"`).
@@ -351,6 +352,46 @@ clean-bindings:
 	@rm -rf bindings/build bindings/.venv $(WHEEL_OUT) \
 	    bindings/.pytest_cache bindings/tests/__pycache__
 	@echo "clean-bindings: removed bindings build/, .venv/, $(WHEEL_OUT)/, caches"
+
+# agent-hax: run the hax coding agent (https://github.com/shakfu/hax) against a
+# chimera-hosted model. hax stays an external binary found on PATH (or via
+# HAX=<path>) -- it is not vendored, linked, or version-pinned here. The two
+# meet over loopback HTTP: scripts/agent_hax.sh starts `chimera serve` on a free
+# port, waits for /health, points hax's llama.cpp provider at it, and kills
+# the server when hax exits.
+#
+#   make agent-hax MODEL=models/Qwen3-4B-Q8_0.gguf
+#   make agent-hax MODEL=models/Qwen3-4B-Q8_0.gguf HAX_ARGS='-p "list TODOs"'
+#   make agent-hax MODEL=... CHIMERA_SERVE_ARGS='--gpu-layers 99 -c 32768'
+#
+# The recipe forwards CHIMERA_SERVE_ARGS explicitly so it works whether it
+# arrives from the environment, the make command line, or a target-specific
+# assignment (as agent-hax-default uses; those are not auto-exported).
+MODEL ?=
+HAX_ARGS ?=
+CHIMERA_SERVE_ARGS ?=
+
+agent-hax: $(BUILD_DIR)/chimera
+	@[ -n "$(MODEL)" ] || { echo "usage: make agent-hax MODEL=path/to/model.gguf"; exit 1; }
+	@CHIMERA="$(BUILD_DIR)/chimera" CHIMERA_SERVE_ARGS="$(CHIMERA_SERVE_ARGS)" \
+	    scripts/agent_hax.sh "$(MODEL)" $(HAX_ARGS)
+
+# agent-hax-default: agent-hax with a known-good model and serve flags, so a
+# session needs no arguments. LFM2.5-8B is a mixture-of-experts model with ~1B
+# active parameters -- large enough to drive hax's tool protocol reliably (4B is
+# the floor; a 1B model loops), while decoding at roughly 1B speed. -c 32768
+# overrides chimera's n_ctx=0 default, which would request the model's full
+# training context and size a KV cache that does not fit beside the weights.
+#
+# Target-specific variables propagate to prerequisites, so this sets MODEL and
+# CHIMERA_SERVE_ARGS for the agent-hax run without duplicating its recipe.
+# Override either with AGENT_MODEL= / AGENT_SERVE_ARGS=; HAX_ARGS still applies.
+AGENT_MODEL ?= models/LFM2.5-8B-A1B-Q4_K_M.gguf
+AGENT_SERVE_ARGS ?= --gpu-layers 99 -c 32768
+
+agent-hax-default: MODEL := $(AGENT_MODEL)
+agent-hax-default: CHIMERA_SERVE_ARGS := $(AGENT_SERVE_ARGS)
+agent-hax-default: agent-hax
 
 # test-golden: HTTP response-shape regression tests against fixed
 # models. Spawns `chimera serve` on a free port, hits each route with a
