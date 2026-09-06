@@ -31,7 +31,13 @@ cycle for one backend, so a release can be checked on a machine that has
 nothing installed yet without three commands that must agree on which binary
 they mean. ``--fast`` swaps ``test-all`` for ``test-embed-1``, ``test-gen-1``
 and ``test-sd-4`` -- the same shape of coverage without the image cases that
-dominate the wall clock, or the one case whose model may not be downloadable.
+dominate the wall clock.
+
+Models are never fetched by a test. ``download all`` is the separate step that
+puts them (and jfk.wav, and the corpus) in the models dir; ``test`` uses what
+is on disk and reports a case whose model is missing as SKIP, so one absent
+model costs one case rather than the run. Downloading multiple GB in the
+middle of a timed test run is neither a test result nor a thing to wait for.
 
 The cases are the shell scripts that used to live in ``scripts/case/``,
 inlined here so they share one model registry, one timeout, one summary and
@@ -80,6 +86,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import platform
@@ -92,7 +99,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -106,7 +113,12 @@ SCRIPT_NAME = Path(__file__).name
 
 
 class ModelSourceUnavailable(RuntimeError):
-    """Raised when a model has no configured source and isn't on disk."""
+    """Raised when a model cannot be obtained.
+
+    Either it has no configured source and isn't on disk, or the download for
+    it failed. A test that needs such a model is skipped rather than failed:
+    an unreachable model says nothing about the binary under test.
+    """
 
 
 class AssetUnavailable(RuntimeError):
@@ -640,6 +652,11 @@ class ModelRegistry:
 
     JFK_WAV_URL = "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav"
 
+    # Per-socket-operation timeout, not a deadline for the whole transfer: a
+    # multi-GB model is minutes of 1 MiB reads, each of which must make
+    # progress within this.
+    NET_TIMEOUT = 60.0
+
     # Which tests need which models.
     SD_REQUIREMENTS: list[str] = ["z-image-turbo", "ae", "qwen3-4b"]
     RAG_REQUIREMENTS: list[str] = ["bge-small-en"]
@@ -664,8 +681,9 @@ class ModelRegistry:
         "Offloading model weights to the CPU trades throughput for VRAM headroom.",
     ]
 
-    def __init__(self, paths: Paths) -> None:
+    def __init__(self, paths: Paths, allow_download: bool = False) -> None:
         self.paths = paths
+        self.allow_download = allow_download
         self.sources = self.default_sources()
         self.apply_env_overrides()
 
@@ -732,6 +750,25 @@ class ModelRegistry:
     # -- downloads ----------------------------------------------------------
 
     @staticmethod
+    @contextlib.contextmanager
+    def unavailable_on_failure(what: str) -> "Iterator[None]":
+        """Re-raise any fetch failure as ModelSourceUnavailable, tagged with `what`.
+
+        KeyboardInterrupt is a BaseException and passes through: ^C means stop
+        the run, not skip this case.
+        """
+        try:
+            yield
+        except ModelSourceUnavailable:
+            raise
+        except urllib.error.HTTPError as e:
+            raise ModelSourceUnavailable(f"{what}: HTTP {e.code} fetching {e.url}") from e
+        except (urllib.error.URLError, OSError) as e:
+            raise ModelSourceUnavailable(f"{what}: download failed: {e}") from e
+        except Exception as e:  # huggingface_hub raises its own exception hierarchy
+            raise ModelSourceUnavailable(f"{what}: download failed: {e}") from e
+
+    @staticmethod
     def download_urllib(url: str, dest: Path) -> None:
         print(f"downloading {url} -> {dest}")
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -739,38 +776,43 @@ class ModelRegistry:
         last_report = time.monotonic()
         bytes_read = 0
         chunk = 1024 * 1024  # 1 MiB
-        with urllib.request.urlopen(url) as r, open(tmp, "wb") as f:
-            total_hdr = r.headers.get("Content-Length")
-            total = int(total_hdr) if total_hdr and total_hdr.isdigit() else None
-            while True:
-                buf = r.read(chunk)
-                if not buf:
-                    break
-                f.write(buf)
-                bytes_read += len(buf)
-                now = time.monotonic()
-                if now - last_report >= 2.0:
-                    if total:
-                        pct = 100.0 * bytes_read / total
-                        print(
-                            f"  {bytes_read / 1e6:.1f} / {total / 1e6:.1f} MB ({pct:.1f}%)",
-                            flush=True,
-                        )
-                    else:
-                        print(f"  {bytes_read / 1e6:.1f} MB", flush=True)
-                    last_report = now
+        try:
+            with urllib.request.urlopen(url, timeout=ModelRegistry.NET_TIMEOUT) as r, open(tmp, "wb") as f:
+                total_hdr = r.headers.get("Content-Length")
+                total = int(total_hdr) if total_hdr and total_hdr.isdigit() else None
+                while True:
+                    buf = r.read(chunk)
+                    if not buf:
+                        break
+                    f.write(buf)
+                    bytes_read += len(buf)
+                    now = time.monotonic()
+                    if now - last_report >= 2.0:
+                        if total:
+                            pct = 100.0 * bytes_read / total
+                            print(
+                                f"  {bytes_read / 1e6:.1f} / {total / 1e6:.1f} MB ({pct:.1f}%)",
+                                flush=True,
+                            )
+                        else:
+                            print(f"  {bytes_read / 1e6:.1f} MB", flush=True)
+                        last_report = now
+        except BaseException:
+            # A partial file must not be left where `ensure_model` would take it
+            # for a finished download on the next run. Includes KeyboardInterrupt:
+            # ^C during a multi-GB fetch is the common way this ends.
+            tmp.unlink(missing_ok=True)
+            raise
         tmp.rename(dest)
 
     @staticmethod
     def download_hf(repo_id: str, filename: str, dest: Path) -> None:
         try:
             from huggingface_hub import hf_hub_download
-        except ImportError:
-            print(
-                "error: huggingface_hub not installed. Install with: pip install huggingface_hub",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+        except ImportError as e:
+            raise ModelSourceUnavailable(
+                "huggingface_hub not installed. Install with: pip install huggingface_hub"
+            ) from e
         print(f"downloading {repo_id}:{filename} -> {dest}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Land the file directly in the models dir rather than copying from the
@@ -797,16 +839,28 @@ class ModelRegistry:
         return self.paths.models_dir / self.sources[key].filename
 
     def ensure_model(self, key: str) -> Path:
+        """Path to a model already in the models dir, fetching it only if allowed.
+
+        Raises ModelSourceUnavailable when the file is absent and this registry
+        may not download (every path but the `download` subcommand), or when a
+        permitted download fails.
+        """
         src = self.sources[key]
         dest = self.path_for(key)
         if dest.exists():
             return dest
-        if src.url:
-            self.download_urllib(src.url, dest)
-        elif src.repo_id:
-            self.download_hf(src.repo_id, src.hub_filename(), dest)
-        else:
-            raise ModelSourceUnavailable(f"no source configured for model '{key}' ({src.filename}). {src.notes}")
+        if not self.allow_download:
+            raise ModelSourceUnavailable(
+                f"{src.filename} not in {self.paths.models_dir}; fetch it first with"
+                f" `{SCRIPT_NAME} download {key}`"
+            )
+        with self.unavailable_on_failure(f"{key} ({src.filename})"):
+            if src.url:
+                self.download_urllib(src.url, dest)
+            elif src.repo_id:
+                self.download_hf(src.repo_id, src.hub_filename(), dest)
+            else:
+                raise ModelSourceUnavailable(f"no source configured for model '{key}' ({src.filename}). {src.notes}")
         return dest
 
     def ensure_models(self, keys: list[str]) -> dict[str, Path]:
@@ -816,9 +870,10 @@ class ModelRegistry:
     #
     # These are inputs rather than models. In a checkout that has run
     # `make deps`, jfk.wav already exists under build/whisper.cpp/samples;
-    # standalone it does not, so it is fetched from whisper.cpp. The corpus is
-    # synthesised rather than downloaded -- the suite has to have something to
-    # index even when the checkout's own docs are not there.
+    # standalone it does not, and `download all` fetches it from whisper.cpp
+    # alongside the models. The corpus is synthesised locally rather than
+    # downloaded -- the suite has to have something to index even when the
+    # checkout's own docs are not there, and it needs no network for it.
 
     def ensure_corpus(self) -> Path:
         """Path to a line-per-text corpus, preferring the checkout's own."""
@@ -833,12 +888,18 @@ class ModelRegistry:
         return generated
 
     def ensure_audio(self) -> Path:
-        """Path to the jfk.wav sample, downloading it if the checkout lacks one."""
+        """Path to the jfk.wav sample, from the checkout or the models dir."""
         repo_copy = self.paths.find_data_asset("jfk.wav")
         if repo_copy is not None:
             return repo_copy
         dest = self.paths.models_dir / "jfk.wav"
-        if not dest.exists():
+        if dest.exists():
+            return dest
+        if not self.allow_download:
+            raise ModelSourceUnavailable(
+                f"jfk.wav not in {self.paths.models_dir}; fetch it first with `{SCRIPT_NAME} download all`"
+            )
+        with self.unavailable_on_failure("jfk.wav"):
             self.download_urllib(self.JFK_WAV_URL, dest)
         return dest
 
@@ -879,10 +940,8 @@ class TestSuite:
     # wall clock and mostly re-exercise the same three modules, so the fourth --
     # cpu-offload plus flash-attn, the recipe an 8 GiB card actually needs --
     # stands in for all of them. gen-3 is left out rather than the family being
-    # named as a whole: `gemma-e4b` has no configured download source, so on a
-    # machine without that file already on disk the case is a skip, and a skip
-    # is rc=2 -- which would stop the sequence before `clean` over a missing
-    # model rather than a bad release.
+    # named as a whole: `gemma-e4b` is the largest model in the registry and the
+    # one least likely to be on a given machine.
     FAST_TARGETS: tuple[str, ...] = ("test-embed-1", "test-gen-1", "test-sd-4")
 
     # Human-readable section headings for the generated Makefile's help text.
@@ -1334,7 +1393,8 @@ class MakefileRenderer:
         add('\t@echo ""')
         add('\t@echo "  Models:"')
         add('\t@echo "    list-models  - list known models and whether they are on disk"')
-        add('\t@echo "    download     - download all known models (use $(PY) download <key> for one)"')
+        add('\t@echo "    download     - fetch all models + data assets (use $(PY) download <key> for one)"')
+        add('\t@echo "                   tests never download; a missing model makes its case SKIP"')
 
         for fam, mapping in self.suite.families.items():
             title = self.suite.FAMILY_TITLES.get(fam, fam)
@@ -1537,6 +1597,12 @@ class Cli:
     # -- registries ---------------------------------------------------------
 
     def cmd_download(self, args: argparse.Namespace) -> int:
+        """Fetch models into the models dir. The only subcommand that may.
+
+        Test cases read the models dir and skip what is missing, so this is the
+        step that decides how much of the suite can run.
+        """
+        self.models.allow_download = True
         keys = list(self.models.sources) if args.key == "all" else [args.key]
         failures = 0
         for k in keys:
@@ -1544,8 +1610,17 @@ class Cli:
                 path = self.models.ensure_model(k)
                 print(f"ok: {k} -> {path}")
             except ModelSourceUnavailable as e:
-                print(f"skip: {k}: {e}", file=sys.stderr)
+                print(f"error: {k}: {e}", file=sys.stderr)
                 failures += 1
+        if args.key == "all":
+            # The transcribe cases need jfk.wav and the rag cases a corpus;
+            # neither is a model, and both must be on disk before `test` runs.
+            for what, get in (("jfk.wav", self.models.ensure_audio), ("corpus", self.models.ensure_corpus)):
+                try:
+                    print(f"ok: {what} -> {get()}")
+                except ModelSourceUnavailable as e:
+                    print(f"error: {e}", file=sys.stderr)
+                    failures += 1
         return 1 if failures else 0
 
     def cmd_list_models(self, _args: argparse.Namespace) -> int:
@@ -1631,31 +1706,46 @@ class Cli:
         color = self._use_color(args.no_color)
         green = "\033[32m" if color else ""
         red = "\033[31m" if color else ""
+        yellow = "\033[33m" if color else ""
         reset = "\033[0m" if color else ""
 
-        results: list[tuple[str, str, int, float]] = []
+        # rc, plus the skip reason when the case never ran. A skip is held
+        # apart from an rc rather than encoded as one: `chimera` itself exits 2
+        # for its own reasons, and a missing model must not be read as one.
+        results: list[tuple[str, str, int, float, str | None]] = []
         for k, case in runs:
-            print(f"\n=== {k} test {case} (backend={backend}) ===")
+            print(f"\n=== {k} test {case} (backend={backend}) ===", flush=True)
             started = time.monotonic()
+            skipped: str | None = None
+            rc = 0
             try:
                 rc = self.suite.run_case(k, case, backend, args.timeout)
             except ModelSourceUnavailable as e:
                 print(f"skip: {e}", file=sys.stderr)
-                rc = 2
-            results.append((k, case, rc, time.monotonic() - started))
-            if rc != 0 and args.fail_fast:
+                skipped = str(e)
+            results.append((k, case, rc, time.monotonic() - started, skipped))
+            if rc != 0 and skipped is None and args.fail_fast:
                 break
 
         # Summary
         print("\n=== summary ===")
         worst = 0
-        for k, case, rc, secs in results:
-            status = f"{green}PASS{reset}" if rc == 0 else f"{red}FAIL (rc={rc}){reset}"
+        for k, case, rc, secs, skipped in results:
+            if skipped is not None:
+                status = f"{yellow}SKIP{reset}"
+            else:
+                status = f"{green}PASS{reset}" if rc == 0 else f"{red}FAIL (rc={rc}){reset}"
+                worst = max(worst, rc)
             print(f"  {k} {case}: {status}  ({secs:.1f}s)")
-            worst = max(worst, rc)
-        passed = sum(1 for r in results if r[2] == 0)
+        skips = sum(1 for r in results if r[4] is not None)
+        passed = sum(1 for r in results if r[4] is None and r[2] == 0)
         total = sum(r[3] for r in results)
-        print(f"{passed}/{len(results)} passed in {total:.1f}s")
+        ran = len(results) - skips
+        tail = f", {skips} skipped" if skips else ""
+        print(f"{passed}/{ran} passed{tail} in {total:.1f}s")
+        for k, case, _rc, _secs, skipped in results:
+            if skipped is not None:
+                print(f"  skipped {k} {case}: {skipped}")
         return worst
 
     # -- run ----------------------------------------------------------------
@@ -1887,7 +1977,10 @@ class Cli:
         )
         inst.set_defaults(func=self.cmd_install)
 
-        dl = sub.add_parser("download", help="download a model (or 'all')")
+        dl = sub.add_parser(
+            "download",
+            help="download a model (or 'all') into --models-dir; the only command that fetches models",
+        )
         dl.add_argument("key", choices=[*self.models.sources.keys(), "all"])
         dl.set_defaults(func=self.cmd_download)
 
