@@ -74,6 +74,13 @@ public:
     // Returns a single pooled vector for `text`. Length == n_embd().
     // Empty text returns an empty vector (caller decides whether to fail).
     //
+    // Input longer than the context (or than one ubatch, if --ubatch-size
+    // lowered it) is truncated, keeping the trailing separator token that
+    // `cls` / `last` pooling read. It cannot be rejected instead: the
+    // encoder path in llama_context asserts on the batch size, so an
+    // over-long input would abort the process. The first truncation in an
+    // Embedder's lifetime is reported on stderr.
+    //
     // When a cache is attached (`set_cache(...)`) and `text` is non-
     // empty, lookup happens before tokenize/decode; misses fall through
     // to the model and are written back on success.
@@ -103,6 +110,10 @@ public:
 
     // Maximum context size the embedding context was created with.
     // Token-window chunker uses this as the upper bound on chunk size.
+    //
+    // Note this counts *content* tokens only: embed() adds the model's
+    // special tokens on top, so a chunk of exactly n_ctx() tokens is
+    // truncated by that much. See the note on chunk_by_tokens below.
     int n_ctx() const;
 
 private:
@@ -125,8 +136,12 @@ struct TokenChunk {
 // `embedder` provides the vocab used for tokenize/detokenize. Empty
 // inputs return an empty vector; whitespace-only chunks are dropped.
 //
-// `chunk_tokens` is clamped to embedder.n_ctx() so the resulting chunks
-// always fit through `embed(text)` without truncation. `overlap_tokens`
+// `chunk_tokens` is clamped to embedder.n_ctx(). That bounds the chunk
+// but does not quite guarantee a lossless round-trip through
+// `embed(text)`: embed() re-tokenizes with `add_special`, which adds the
+// model's BOS/[CLS] and separator, so a chunk sized at exactly n_ctx()
+// comes back that many tokens over and embed() truncates the surplus.
+// Leave headroom for the specials when that matters. `overlap_tokens`
 // must be in [0, chunk_tokens).
 std::vector<TokenChunk> chunk_by_tokens(const std::string & text,
                                         const Embedder &    embedder,

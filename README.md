@@ -136,6 +136,15 @@ make test     # smoke + end-to-end runs gated on models/ presence
 
 `scripts/test.py` skips end-to-end checks when the matching model file is absent (see the script for the lookup paths), so a fresh clone reports SKIP rather than FAIL. 62 tests total — typically 56 PASS + 6 SKIP-when-fixture-missing on a fresh checkout.
 
+That tests the tree you just built. To test the artifact users download instead, `scripts/rwt.py` fetches a release archive from GitHub, unpacks the binary into `build/rwt/`, and drives it across every modality:
+
+```bash
+python3 scripts/rwt.py run --cuda --fast   # install the latest CUDA release, smoke it, clean up
+python3 scripts/rwt.py test --bin build/chimera test-all   # ...or point it at a local build
+```
+
+See [`docs/dev/rwt.md`](docs/dev/rwt.md) for the target list and the model registry.
+
 ### Backends
 
 On macOS, Metal is enabled by default. For other backends, use the matching one-shot build target — each one rebuilds the third-party deps with the right `GGML_<BACKEND>=1` and configures chimera with `-DGGML_<BACKEND>=ON`:
