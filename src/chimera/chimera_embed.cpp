@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string_view>
@@ -66,9 +67,14 @@ struct Embedder::Impl {
     LlamaModelPtr        model;
     LlamaContextPtr      ctx;
     enum llama_pooling_type ptype;
-    int                  n_embd_ = 0;
-    int                  n_ctx_  = 0;
+    int                  n_embd_   = 0;
+    int                  n_ctx_    = 0;
+    int                  n_ubatch_ = 0;
     bool                 normalize = true;
+    // Truncation is reported once per Embedder, not once per call: the
+    // vector-store path embeds thousands of chunks through one instance,
+    // and a per-chunk warning would bury the ingest output.
+    bool                 warned_truncate = false;
     chimera_embed_cache::Cache * cache = nullptr;  // not owned
 };
 
@@ -159,6 +165,7 @@ Embedder::Embedder(const Config & cfg) : impl_(std::make_unique<Impl>()) {
     impl_->ptype     = cparams.pooling_type;
     impl_->n_embd_   = llama_model_n_embd(impl_->model.get());
     impl_->n_ctx_    = static_cast<int>(cparams.n_ctx);
+    impl_->n_ubatch_ = static_cast<int>(cparams.n_ubatch);
     impl_->normalize = cfg.normalize;
 }
 
@@ -217,6 +224,42 @@ std::vector<float> Embedder::embed(const std::string & text) {
         vocab, text, /*add_special=*/true, /*parse_special=*/true);
     if (tokens.empty()) {
         fail(ExitCode::BadInput, "input tokenized to zero tokens");
+    }
+
+    // An embedding pass decodes the whole input as one batch, and
+    // llama_context asserts `n_ubatch >= n_tokens` for the encoder — an
+    // abort() inside llama.cpp, not a return code, so an over-long input
+    // has to be clamped here or it takes the process down. Same policy as
+    // the two guards in chimera_serve.cpp: clamp rather than fail.
+    //
+    // The limit is the smaller of the two bounds. They are equal by
+    // default (n_ubatch follows n_batch, which is raised to n_ctx in the
+    // constructor), but an explicit --ubatch-size can lower one without
+    // the other.
+    //
+    // This fires on any input past the model's context, and reliably on
+    // ingest: the chunkers budget `chunk_tokens` content tokens against
+    // n_ctx(), then `add_special` above adds the model's BOS/[CLS] and
+    // separator on top, so a full-width chunk arrives n_special tokens
+    // over the line. Re-seat that trailing separator after the resize --
+    // `cls` and `last` pooling both read the ends of the sequence, and
+    // dropping it would change what those two pool over.
+    const size_t limit =
+        static_cast<size_t>(std::max(1, std::min(impl_->n_ctx_, impl_->n_ubatch_)));
+    if (tokens.size() > limit) {
+        const llama_token tail = tokens.back();
+        const size_t      had  = tokens.size();
+        tokens.resize(limit);
+        if (llama_vocab_is_control(vocab, tail)) {
+            tokens.back() = tail;
+        }
+        if (!impl_->warned_truncate) {
+            impl_->warned_truncate = true;
+            std::fprintf(stderr,
+                         "chimera: warning: embedding input truncated to %zu tokens "
+                         "(had %zu); further truncations are not reported\n",
+                         limit, had);
+        }
     }
 
     // Each call processes a single sequence; clear any leftover KV from
