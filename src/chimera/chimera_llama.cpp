@@ -311,7 +311,7 @@ void apply_model_common(llama_model_params & params,
         extras.buft_overrides_storage.push_back(o);
     }
     for (int i = 0; i < n_cpu_moe; ++i) {
-        extras.buft_pattern_storage.push_back(llm_ffn_exps_block_regex(i));
+        extras.buft_pattern_storage.push_back(llm_ffn_block_regex(i, LLM_FFN_EXPS_REGEX));
         llama_model_tensor_buft_override o{};
         o.pattern = extras.buft_pattern_storage.back().c_str();
         o.buft    = ggml_backend_cpu_buffer_type();
@@ -820,7 +820,8 @@ std::string run_generation_mtmd(
         // Upstream returns a wrapper {bitmap, video_ctx}; placeholder=false so the
         // bitmap holds real data. video_ctx is non-null only for video files.
         mtmd_helper_bitmap_wrapper w =
-            mtmd_helper_bitmap_init_from_file(mctx.get(), path.c_str(), /*placeholder=*/false);
+            mtmd_helper_bitmap_init_from_file(mctx.get(), path.c_str(), /*placeholder=*/false,
+                                              mtmd_helper_init_opt_default());
         MtmdBitmapPtr bmp(w.bitmap);
         if (!bmp) {
             fail(ExitCode::BadInput, "failed to load image: " + path);

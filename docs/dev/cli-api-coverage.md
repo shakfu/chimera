@@ -75,7 +75,7 @@ Upstream llama-cli inherits ~330 `common_arg` declarations from `common/arg.cpp`
 | `--gpu-layers` | `--gpu-layers` | ✅ | |
 | `--main-gpu` / `--tensor-split` / `--split-mode` | same | ✅ | Landed 2026-05-20. `--split-mode` accepts none/layer/row/tensor; `--tensor-split` parses comma-separated floats. |
 | `--device` / `--list-devices` | `--device` only | 🟡 | `--device` landed 2026-05-20 (comma-separated device list). `--list-devices` skipped — better fit as a `chimera info` extension. |
-| `--n-cpu-moe` / `--cpu-moe` | same | ✅ | Landed 2026-05-20. Both manipulate `llama_model_params.tensor_buft_overrides` via the upstream inline helpers `llm_ffn_exps_cpu_override()` and `llm_ffn_exps_block_regex(i)`. They stack with `--override-tensor`. |
+| `--n-cpu-moe` / `--cpu-moe` | same | ✅ | Landed 2026-05-20. Both manipulate `llama_model_params.tensor_buft_overrides` via the upstream inline helpers `llm_ffn_exps_cpu_override()` and `llm_ffn_block_regex(i, LLM_FFN_EXPS_REGEX)`. They stack with `--override-tensor`. |
 | `--override-tensor` / `--override-kv` | same | ✅ | Landed 2026-05-20. `--override-tensor` parses `<pattern>=<buft_name>` (multiple, comma-separated; backend lookup via `ggml_backend_dev_buffer_type` enumeration). `--override-kv` reuses upstream's `string_parse_kv_override` so the `KEY=TYPE:VALUE` grammar matches exactly. Both repeatable on the CLI. |
 | `--cache-type-k` / `--cache-type-v` | same | ✅ | Landed 2026-05-20. Accepts f32/f16/bf16/q8_0/q5_0/q5_1/q4_0/q4_1/iq4_nl. End-to-end smoke verified. |
 | `--rope-freq-base` / `--rope-freq-scale` / `--rope-scaling` / `--rope-scale` | same | ✅ | Landed 2026-05-20. `--rope-scaling` accepts none/linear/yarn/longrope. |

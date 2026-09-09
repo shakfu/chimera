@@ -837,7 +837,8 @@ int command_chat(const LlamaCommonOptions & opts,
         // bitmap holds real data. video_ctx is non-null only when the file decoded
         // as video.
         mtmd_helper_bitmap_wrapper w =
-            mtmd_helper_bitmap_init_from_file(mctx.get(), path.c_str(), /*placeholder=*/false);
+            mtmd_helper_bitmap_init_from_file(mctx.get(), path.c_str(), /*placeholder=*/false,
+                                              mtmd_helper_init_opt_default());
         if (!w.bitmap) {
             std::cerr << Sem::Err << "failed to load media: " << path
                       << Sem::Reset << "\n";

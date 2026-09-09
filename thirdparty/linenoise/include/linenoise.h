@@ -56,6 +56,9 @@ extern "C" {
 /* Internal escape sequence buffer size. */
 #define LINENOISE_SEQ_SIZE 64
 
+/* Maximum number of folded (display-shortened) ranges per edited line. */
+#define LINENOISE_MAX_FOLDS 16
+
 /* ===== Error Handling ===== */
 
 /* Error codes returned by linenoise functions. */
@@ -138,6 +141,9 @@ typedef struct linenoise_state {
     size_t oldrows;
     int oldrpos;
     int history_index;
+    int fold_count;     /* Number of folded (display only) ranges. */
+    size_t fold_start[LINENOISE_MAX_FOLDS]; /* Folded range start offsets. */
+    size_t fold_end[LINENOISE_MAX_FOLDS];   /* Folded range end offsets. */
 } linenoise_state_t;
 
 /* ===== Context Management ===== */
