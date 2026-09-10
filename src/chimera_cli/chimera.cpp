@@ -1107,7 +1107,7 @@ int command_chat(const LlamaCommonOptions & opts,
             bitmaps_c.reserve(conv_media.size());
             for (const auto & m : conv_media) bitmaps_c.push_back(m.bitmap.get());
 
-            // text_len is load-bearing: newer mtmd bounds its media-marker
+            // text_len is structural: newer mtmd bounds its media-marker
             // scan by this length rather than strlen(text). Leaving it unset
             // makes mtmd_tokenize see zero markers and fail rc=2.
             mtmd_input_text input_text{};

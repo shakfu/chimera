@@ -542,7 +542,7 @@ if(GGML_SYCL)
     find_package(DNNL QUIET)
     # Strip the compile-side usage requirements off every SYCL/MKL/oneDNN target
     # we are about to link, so none of -fsycl/-DMKL_ILP64/-std=gnu++17 lands on a
-    # chimera TU. This is the load-bearing fix (confirmed on CI: the icx C
+    # chimera TU. This is the structural fix (confirmed on CI: the icx C
     # compile line is clean and the executable still links libsycl/MKL/oneDNN).
     foreach(_t IntelSYCL::SYCL_CXX MKL::MKL_SYCL::BLAS DNNL::dnnl)
         if(TARGET ${_t})
@@ -565,7 +565,7 @@ if(GGML_SYCL)
     list(APPEND SYSTEM_LIBS -fsycl)
     # Belt-and-suspenders: restore directory-scope compile vectors to their
     # pre-find_package values, in case a future Intel config also pollutes them
-    # (the target-property strip above is the load-bearing fix).
+    # (the target-property strip above is the structural fix).
     set(CMAKE_C_FLAGS   "${_CHIMERA_SAVED_C_FLAGS}")
     set(CMAKE_CXX_FLAGS "${_CHIMERA_SAVED_CXX_FLAGS}")
     set(CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}   "${_CHIMERA_SAVED_C_FLAGS_C}")

@@ -106,7 +106,7 @@ def http_json(method: str, port: int, path: str, body: dict | None = None) -> di
 # Each test case ends with a route-specific transform that strips fields
 # whose values genuinely shift run-to-run (timestamps, request ids,
 # resolved file paths, port-dependent URLs) and shape-checks fields
-# whose exact value isn't load-bearing (generated text, embedding
+# whose exact value isn't structural (generated text, embedding
 # floats). The goal is a golden that's stable across machines + dates
 # while still detecting structural drift.
 

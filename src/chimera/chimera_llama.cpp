@@ -873,7 +873,7 @@ std::string run_generation_mtmd(
         }
     }
 
-    // text_len is load-bearing: newer mtmd bounds its media-marker scan by
+    // text_len is structural: newer mtmd bounds its media-marker scan by
     // this length rather than strlen(text). Leaving it unset makes
     // mtmd_tokenize see zero markers and fail rc=2 ("markers != bitmaps").
     mtmd_input_text input_text{};

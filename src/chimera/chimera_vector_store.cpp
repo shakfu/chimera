@@ -507,7 +507,7 @@ std::vector<Hit> search_lexical(sqlite3 *           db,
 // Reciprocal-rank fusion. Classic formulation:
 //   rrf_score(d) = Σ_i  1 / (k_rrf + rank_i(d))
 // with k_rrf = 60 (the value from the original RRF paper; values in
-// 10..100 work in practice and the exact choice is not load-bearing).
+// 10..100 work in practice and the exact choice is not structural).
 //
 // We feed both legs with `k_internal = max(k_target, 30)` so neither
 // index starves the other before the merge.

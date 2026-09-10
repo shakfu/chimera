@@ -985,7 +985,7 @@ def e2e_embed_tests(rec: Recorder, chimera: Path) -> None:
     # Embedding cache: two calls with the same input must produce byte-
     # identical output. The cache flag enables read-through caching; the
     # second call should be a hit, but we can't time-assert that without
-    # extra plumbing — bit-equality is the load-bearing invariant.
+    # extra plumbing — bit-equality is the structural invariant.
     with maybe(rec, "embedding cache (bit-identical round trip)") as t:
         with (
             scratch_file(suffix=".db") as cache_db,
