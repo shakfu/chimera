@@ -1,8 +1,9 @@
-# `scripts/rwt.py` — release smoke tester
+# `scripts/rat.py` — run artifact tests
 
-`make test` (`scripts/test.py`) tests the tree you just built. `rwt.py` tests
-the artifact users actually download: it fetches a release archive from GitHub,
-unpacks the binary into `build/rwt/`, and drives that binary's CLI across every
+`make test` (`scripts/test.py`) tests the tree you just built. `rat.py` tests
+build artifacts, the binaries CI produces, so they can be checked before they
+are released. It takes a CI artifact, a local archive or a GitHub release,
+unpacks the binary into `build/rat/`, and drives that binary's CLI across every
 modality — embeddings, transcription, generation, vector store, image.
 
 It is the successor to the shell scripts that lived in `scripts/case/`; every
@@ -13,16 +14,16 @@ timeout, one summary, and one place that knows a GPU build needs
 ## The three commands
 
 ```sh
-python3 scripts/rwt.py install --cuda        # latest linux-x86_64-cuda release -> build/rwt/
-python3 scripts/rwt.py test --cuda test-all  # the whole matrix
-python3 scripts/rwt.py clean                 # remove the binary + everything it wrote
+python3 scripts/rat.py install --cuda        # latest linux-x86_64-cuda release -> build/rat/
+python3 scripts/rat.py test --cuda test-all  # the whole matrix
+python3 scripts/rat.py clean                 # remove the binary + everything it wrote
 ```
 
 `run` is all three in one, stopping at the first failure:
 
 ```sh
-python3 scripts/rwt.py run --cuda            # install, test-all, clean
-python3 scripts/rwt.py run --cuda --fast     # embed-1, gen-1, sd-4 instead of test-all
+python3 scripts/rat.py run --cuda            # install, test-all, clean
+python3 scripts/rat.py run --cuda --fast     # embed-1, gen-1, sd-3 instead of test-all
 ```
 
 A failing `run` deliberately leaves the binary in place — the thing worth
@@ -33,7 +34,7 @@ inspecting when a release fails is the binary it failed with.
 `--cpu` / `--metal` / `--cuda` / `--vulkan` / `--rocm` / `--sycl` name a
 backend; the host's OS and architecture pick the asset from there
 (`--cuda` on Linux → `chimera-<version>-linux-x86_64-cuda.tar.gz`). Only the
-pairs CI actually publishes are known — `python3 scripts/rwt.py list assets`
+pairs CI actually publishes are known — `python3 scripts/rat.py list assets`
 prints them for this machine, and asking for one that does not exist fails
 before anything is downloaded rather than on a 404.
 
@@ -42,22 +43,23 @@ before anything is downloaded rather than on a 404.
 or a bare asset name:
 
 ```sh
-python3 scripts/rwt.py install --asset dist/chimera-0.2.16-linux-x86_64-cuda.tar.gz
-python3 scripts/rwt.py install --asset https://github.com/shakfu/chimera/releases/download/0.2.16/chimera-0.2.16-linux-x86_64-cuda.tar.gz
+python3 scripts/rat.py install --asset dist/chimera-0.2.16-linux-x86_64-cuda.tar.gz
+python3 scripts/rat.py install --asset https://github.com/shakfu/chimera/releases/download/0.2.16/chimera-0.2.16-linux-x86_64-cuda.tar.gz
 ```
 
-To test something that is not a release artifact at all, skip `install` and
-point the suite at the binary:
+To test a bare executable (a downloaded CI artifact or a local build), skip
+`install` and point the suite at it; a `--bin` without its exec bits is
+`chmod +x`'d first:
 
 ```sh
-python3 scripts/rwt.py test --bin build/chimera test-all
+python3 scripts/rat.py test --bin build/chimera test-all
 ```
 
 `clean` never deletes a binary named with `--bin`.
 
 ## Test targets
 
-`python3 scripts/rwt.py list tests` prints them. One token per test, matching
+`python3 scripts/rat.py list tests` prints them. One token per test, matching
 the rules `gen-makefile` emits:
 
 | family | cases |
@@ -66,7 +68,7 @@ the rules `gen-makefile` emits:
 | `transcribe` | `jfk.wav` speech-to-text; the same with `--output-{srt,vtt,json}` files |
 | `gen` | Llama-3.2-1B; Qwen3-4B; Gemma-4-E4B with sampler knobs |
 | `rag` | `index create`/`ingest`/`search` via `$CHIMERA_DB`; the same with an explicit `--db`, all three retrieval modes, `stats`, `db status`, `drop` |
-| `sd` | Z-Image Turbo: baseline, flash-attn, cfg-1 + flash-attn, cfg-1 + offload + flash-attn |
+| `sd` | Z-Image Turbo: te-on-cpu + vae-tiling, cpu-offload + vae-on-cpu, cfg-1 + offload + flash-attn (mirrors cyllama) |
 
 `test-<family>-all` runs one family, `test-all` runs everything. Every case
 reports its own exit code and wall time in the summary; a missing model is a
@@ -85,12 +87,12 @@ Two things the suite knows that the bare CLI does not:
 
 ## Where things go
 
-The script's entire footprint is one directory, `build/rwt/`:
+The script's entire footprint is one directory, `build/rat/`:
 
 ```
-build/rwt/chimera      the installed binary
-build/rwt/downloads/   the release archives it was unpacked from
-build/rwt/out/         images, transcripts, scratch DBs
+build/rat/chimera      the installed binary
+build/rat/downloads/   the release archives it was unpacked from
+build/rat/out/         images, transcripts, scratch DBs
 ```
 
 `downloads/` is a sibling of `out/` rather than a child: an archive is the
@@ -100,14 +102,14 @@ produced.
 Under `build/` because it is already gitignored — a smoke run leaves nothing for
 the next `git status` to report — and already what `make clean` sweeps, so a
 tested binary is thrown away along with the build tree it was checked against.
-One directory under that, so what rwt.py owns inside a tree it shares with cmake
+One directory under that, so what rat.py owns inside a tree it shares with cmake
 is obvious at a glance.
 
 `--build-dir` moves the base (it also honours `BUILD_DIR`, the same variable the
 Makefile reads, so an out-of-tree build directory is named once and both agree
 on it). `--bin-dir` and `--out-dir` override the binary and the output directory
 individually, and win over `--build-dir` when both are given. `clean` removes
-the installed binary, the downloads and the output directory, then `build/rwt/`
+the installed binary, the downloads and the output directory, then `build/rat/`
 itself once nothing is left in it.
 
 `models/` is the deliberate exception: it stays at the project root, shared with
@@ -116,7 +118,7 @@ itself once nothing is left in it.
 
 ## Models
 
-`python3 scripts/rwt.py list models` shows what is needed and what is already
+`python3 scripts/rat.py list models` shows what is needed and what is already
 on disk; `download all` fetches the lot. Each source can be redirected with
 `CHIMERA_MODEL_<KEY>=<repo_id>:<filename>` — needed for `gemma-e4b` and
 `z-image-turbo`, whose default URLs are best-effort. `jfk.wav` comes from the
@@ -129,7 +131,7 @@ to a small generated corpus when the script is run standalone.
 The script has no dependencies beyond the standard library (`huggingface_hub`
 only if a model has to be fetched by repo id rather than URL), and finds its
 own root by walking up to the nearest `CMakeLists.txt` or `.git`. Copied into
-an empty directory it will create `models/` and `build/rwt/` there, which is
+an empty directory it will create `models/` and `build/rat/` there, which is
 the intended way to check a release on a machine that has no checkout.
 
 ## Regression coverage

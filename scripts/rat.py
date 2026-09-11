@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Self-contained smoke-test runner for released chimera binaries.
+"""Run artifact tests: a self-contained smoke-test runner for chimera build
+artifacts, meant to check a binary before it is released.
 
 chimera ships as one static executable, so there is nothing to `pip install`
-and no virtualenv to reason about: ``install`` downloads a release archive
-from GitHub and unpacks the binary into ``build/rwt/``, and every test target runs
-that binary's CLI. ``--bin`` points at an executable somewhere else (a local
-``build/chimera``, say) when the thing under test is not a release artifact.
+and no virtualenv to reason about: ``install`` unpacks an archive (local, by
+URL, or from a GitHub release) into ``build/rat/``, and every test target runs
+that binary's CLI. ``--bin`` points at a bare executable instead (a downloaded
+CI artifact or a local ``build/chimera``, say).
 
 ``--cuda`` (and ``--cpu`` / ``--metal`` / ``--vulkan`` / ``--rocm`` /
 ``--sycl``) names the backend, which selects the release asset for this
@@ -16,7 +17,7 @@ testing. ``--cpu`` and ``--metal`` name the same macOS asset: CI builds the
 macos-arm64 artifact with Metal on and there is no CPU-only macOS build, so a
 plain macos-arm64 binary is reported as ``metal``.
 
-``install`` is the only subcommand that writes to ``build/rwt/``: ``--asset`` says
+``install`` is the only subcommand that writes to ``build/rat/``: ``--asset`` says
 what to put there -- a local archive, a full URL, or a bare release-asset
 filename, told apart by shape -- and ``--version`` picks the release when it
 does not (default: whatever ``/releases/latest`` resolves to). Every test
@@ -30,7 +31,7 @@ the first step that fails and taking the options of all three. It is the whole
 cycle for one backend, so a release can be checked on a machine that has
 nothing installed yet without three commands that must agree on which binary
 they mean. ``--fast`` swaps ``test-all`` for ``test-embed-1``, ``test-gen-1``
-and ``test-sd-4`` -- the same shape of coverage without the image cases that
+and ``test-sd-3`` -- the same shape of coverage without the image cases that
 dominate the wall clock.
 
 Models are never fetched by a test. ``download all`` is the separate step that
@@ -52,35 +53,35 @@ argparse.
 
 Examples:
     # download the latest linux-x86_64-cuda release into ./bin and test it
-    python3 scripts/rwt.py install --cuda
-    python3 scripts/rwt.py test --cuda test-all
+    python3 scripts/rat.py install --cuda
+    python3 scripts/rat.py test --cuda test-all
 
     # a specific release, or a local artifact / explicit URL
-    python3 scripts/rwt.py install --cuda --version 0.2.16
-    python3 scripts/rwt.py install --asset dist/chimera-0.2.16-linux-x86_64-cuda.tar.gz
-    python3 scripts/rwt.py install --asset https://github.com/shakfu/chimera/releases/download/0.2.16/chimera-0.2.16-linux-x86_64-cuda.tar.gz
+    python3 scripts/rat.py install --cuda --version 0.2.16
+    python3 scripts/rat.py install --asset dist/chimera-0.2.16-linux-x86_64-cuda.tar.gz
+    python3 scripts/rat.py install --asset https://github.com/shakfu/chimera/releases/download/0.2.16/chimera-0.2.16-linux-x86_64-cuda.tar.gz
 
     # install, test everything, then remove the binary again -- one command
-    python3 scripts/rwt.py run --cuda
-    python3 scripts/rwt.py run --cuda --fast    # a short cycle instead of everything
-    python3 scripts/rwt.py run --vulkan test-sd-all --timeout 900
+    python3 scripts/rat.py run --cuda
+    python3 scripts/rat.py run --cuda --fast    # a short cycle instead of everything
+    python3 scripts/rat.py run --vulkan test-sd-all --timeout 900
 
     # run everything, one family, or one case
-    python3 scripts/rwt.py test test-all
-    python3 scripts/rwt.py test test-rag-all
-    python3 scripts/rwt.py test test-sd-4 --timeout 600
+    python3 scripts/rat.py test test-all
+    python3 scripts/rat.py test test-rag-all
+    python3 scripts/rat.py test test-sd-3 --timeout 600
 
     # against a binary that was not installed from a release; the backend is
     # detected from `chimera info`, so no --cuda/--vulkan/... is needed
-    python3 scripts/rwt.py test --bin build/chimera test-all
+    python3 scripts/rat.py test --bin build/chimera test-all
 
     # show the matrix without downloading or running anything
-    python3 scripts/rwt.py test --cuda test-all --dry-run
+    python3 scripts/rat.py test --cuda test-all --dry-run
 
     # environment, registry and target listings
-    python3 scripts/rwt.py info
-    python3 scripts/rwt.py list
-    python3 scripts/rwt.py download all --models-dir models
+    python3 scripts/rat.py info
+    python3 scripts/rat.py list
+    python3 scripts/rat.py download all --models-dir models
 """
 
 from __future__ import annotations
@@ -144,10 +145,10 @@ class Paths:
     # tens of GiB of weights after every `make clean` is not.
     build_dir: Path
     # One directory under it holds this script's whole footprint -- the
-    # installed binary at `<rwt_dir>/chimera`, everything a run produces in
-    # `<rwt_dir>/out` -- so it is obvious at a glance what rwt.py owns inside a
+    # installed binary at `<rat_dir>/chimera`, everything a run produces in
+    # `<rat_dir>/out` -- so it is obvious at a glance what rat.py owns inside a
     # build tree it shares with cmake.
-    rwt_dir: Path
+    rat_dir: Path
     models_dir: Path
     data_dir: Path
     bin_dir: Path
@@ -158,9 +159,9 @@ class Paths:
         """Locate the project root: the cwd for subprocesses, the parent of
         ``models/``, and what ``build/`` is resolved against.
 
-        This file is checked in as ``<repo>/scripts/rwt.py`` but is also meant
-        to be copied out standalone (as ``./rwt.py``) into a bare directory
-        that holds nothing but ``models/`` and a ``build/rwt/``. Walking up to the
+        This file is checked in as ``<repo>/scripts/rat.py`` but is also meant
+        to be copied out standalone (as ``./rat.py``) into a bare directory
+        that holds nothing but ``models/`` and a ``build/rat/``. Walking up to the
         nearest project marker handles both layouts; using ``__file__``'s own
         directory would resolve to ``<repo>/scripts`` in-repo and download
         models to ``scripts/models``.
@@ -184,15 +185,15 @@ class Paths:
     def from_environ(cls) -> Paths:
         root = cls.find_root()
         build = cls.resolve_build_dir(root)
-        rwt = Path(os.environ.get("CHIMERA_RWT_DIR", build / "rwt"))
+        rat = Path(os.environ.get("CHIMERA_RAT_DIR", build / "rat"))
         return cls(
             root=root,
             build_dir=build,
-            rwt_dir=rwt,
+            rat_dir=rat,
             models_dir=Path(os.environ.get("CHIMERA_MODELS_DIR", root / "models")),
             data_dir=Path(os.environ.get("CHIMERA_DATA_DIR", build / "whisper.cpp" / "samples")),
-            bin_dir=Path(os.environ.get("CHIMERA_BIN_DIR", rwt)),
-            out_dir=Path(os.environ.get("CHIMERA_RWT_OUT", rwt / "out")),
+            bin_dir=Path(os.environ.get("CHIMERA_BIN_DIR", rat)),
+            out_dir=Path(os.environ.get("CHIMERA_RAT_OUT", rat / "out")),
         )
 
     def rebase(self, build: Path) -> None:
@@ -204,7 +205,7 @@ class Paths:
         """
         old = self.build_dir
         self.build_dir = build
-        for attr in ("rwt_dir", "data_dir", "bin_dir", "out_dir"):
+        for attr in ("rat_dir", "data_dir", "bin_dir", "out_dir"):
             current = getattr(self, attr)
             try:
                 setattr(self, attr, build / current.relative_to(old))
@@ -218,7 +219,7 @@ class Paths:
         A sibling of `out_dir`, not a child: an archive is the *input* to a run
         -- the artifact under test -- while `out/` is what a run produced.
         """
-        return self.rwt_dir / "downloads"
+        return self.rat_dir / "downloads"
 
     @property
     def data_dirs(self) -> list[Path]:
@@ -277,7 +278,7 @@ class Release:
     }
 
     def __init__(self, repo: str | None = None) -> None:
-        self.repo = repo or os.environ.get("CHIMERA_RWT_REPO", self.DEFAULT_REPO)
+        self.repo = repo or os.environ.get("CHIMERA_RAT_REPO", self.DEFAULT_REPO)
 
     # -- naming -------------------------------------------------------------
 
@@ -937,12 +938,12 @@ class TestSuite:
     FAMILY_ORDER: tuple[str, ...] = ("embed", "transcribe", "gen", "rag", "sd")
 
     # What `run --fast` runs in place of `test-all`. The sd cases dominate the
-    # wall clock and mostly re-exercise the same three modules, so the fourth --
-    # cpu-offload plus flash-attn, the recipe an 8 GiB card actually needs --
+    # wall clock and mostly re-exercise the same three modules, so the third --
+    # cpu-offload plus flash-attn, the cheatsheet recipe for an 8 GiB card --
     # stands in for all of them. gen-3 is left out rather than the family being
     # named as a whole: `gemma-e4b` is the largest model in the registry and the
     # one least likely to be on a given machine.
-    FAST_TARGETS: tuple[str, ...] = ("test-embed-1", "test-gen-1", "test-sd-4")
+    FAST_TARGETS: tuple[str, ...] = ("test-embed-1", "test-gen-1", "test-sd-3")
 
     # Human-readable section headings for the generated Makefile's help text.
     FAMILY_TITLES: dict[str, str] = {
@@ -961,7 +962,7 @@ class TestSuite:
             "transcribe": {"1": self.transcribe_1, "2": self.transcribe_2},
             "gen": {"1": self.gen_1, "2": self.gen_2, "3": self.gen_3},
             "rag": {"1": self.rag_1, "2": self.rag_2},
-            "sd": {"1": self.sd_1, "2": self.sd_2, "3": self.sd_3, "4": self.sd_4},
+            "sd": {"1": self.sd_1, "2": self.sd_2, "3": self.sd_3},
         }
         # Declared separately from FAMILY_ORDER so a family added to one and not
         # the other is caught here rather than silently skipped by `test-all`.
@@ -991,11 +992,10 @@ class TestSuite:
 
     # -- stable diffusion ---------------------------------------------------
     #
-    # The four cases are the surviving distinct shapes of scripts/case/z_turbo*.sh:
-    # bare, flash-attn, cfg-1 + flash-attn, and cfg-1 + offload + flash-attn.
-    # Z-Image Turbo is a split-checkpoint model, so all four use the component
-    # flags (--diffusion-model / --vae / --llm) rather than -m, and none pass
-    # --gpu-layers: `sd` picks up the GPU on its own.
+    # Three cases: te-on-cpu + vae-tiling, cpu-offload + vae-on-cpu, and cfg-1 +
+    # offload + flash-attn. Z-Image Turbo is a split-checkpoint model, so all
+    # three use the component flags (--diffusion-model / --vae / --llm) rather
+    # than -m, and none pass --gpu-layers: `sd` picks up the GPU on its own.
 
     SD_SIZE: tuple[str, ...] = ("-H", "1024", "-W", "512")
     SD_PROMPT = "a lovely plump cat"
@@ -1021,31 +1021,33 @@ class TestSuite:
             timeout=timeout,
         )
 
+    # The three cases mirror cyllama's scripts/rwt.py so the two projects'
+    # results compare directly. Each fits an 8 GiB card: the unqualified
+    # all-on-GPU run needs ~9.4 GiB of weights (3.9 text encoder + 5.5
+    # diffusion) and OOMs there, so no case runs it.
+
     def sd_1(self, _backend: str, timeout: float | None) -> int:
-        """z_turbo baseline (all on GPU)."""
-        # The unqualified run: every module resident on the GPU, ~9.4 GiB of
-        # weights. It is here as the control, not because it fits everywhere --
-        # on an 8 GiB card this is the case that OOMs, and its failing while
-        # sd-4 passes is the useful signal rather than a bug in the release.
-        return self.sd_case("1", [], timeout)
+        """z_turbo te-on-cpu + vae-tiling."""
+        # Parks only the text encoder's weights in RAM; every module still
+        # computes on the GPU. --vae-tiling is not optional: without it the VAE
+        # decode wants a ~3.3 GiB compute buffer while the diffusion weights are
+        # still resident, and no --params-backend spelling helps because that is
+        # a compute buffer, not weights.
+        return self.sd_case("1", ["--params-backend", "te=cpu", "--vae-tiling"], timeout)
 
     def sd_2(self, _backend: str, timeout: float | None) -> int:
-        """z_turbo flash-attn."""
-        return self.sd_case("2", ["--diffusion-fa"], timeout)
+        """z_turbo cpu-offload + vae-on-cpu."""
+        # Moves all the weights to RAM and the VAE's compute to the CPU as well;
+        # expect it to be the slowest of the three.
+        return self.sd_case("2", ["--offload-to-cpu", "--vae-on-cpu"], timeout)
 
     def sd_3(self, _backend: str, timeout: float | None) -> int:
-        """z_turbo cfg-1 + flash-attn."""
-        # Z-Image Turbo is distilled: --cfg-scale 1.0 disables the negative
-        # pass, which is both correct for the model and roughly halves the work.
-        return self.sd_case("3", ["--cfg-scale", "1.0", "--diffusion-fa"], timeout)
-
-    def sd_4(self, _backend: str, timeout: float | None) -> int:
         """z_turbo cfg-1 + cpu-offload + flash-attn."""
-        # The recipe docs/cheatsheet.md gives for Z-Image Turbo, and the one an
-        # 8 GiB card needs: weights stream from RAM while compute stays on the
-        # GPU. Do not "improve" it with --clip-on-cpu / --vae-on-cpu -- those
-        # move the *compute* as well and make the run dramatically slower.
-        return self.sd_case("4", ["--cfg-scale", "1.0", "--offload-to-cpu", "--diffusion-fa"], timeout)
+        # The recipe docs/cheatsheet.md gives for Z-Image Turbo: weights stream
+        # from RAM while compute stays on the GPU. Z-Image Turbo is distilled, so
+        # --cfg-scale 1.0 disables the negative pass, which is both correct for
+        # the model and roughly halves the work.
+        return self.sd_case("3", ["--cfg-scale", "1.0", "--offload-to-cpu", "--diffusion-fa"], timeout)
 
     # -- generation ---------------------------------------------------------
 
@@ -1341,13 +1343,13 @@ class TestSuite:
 class MakefileRenderer:
     """Renders the Makefile whose rules mirror this script's own targets.
 
-    Written to a *separate* file (`-o rwt.mk`, included from the main Makefile
+    Written to a *separate* file (`-o rat.mk`, included from the main Makefile
     if wanted) rather than to ./Makefile: chimera's Makefile is the build
     system, and this one is a frontend for a script that tests binaries the
     build system has already produced.
     """
 
-    PY_VAR = "python3 scripts/rwt.py"
+    PY_VAR = "python3 scripts/rat.py"
 
     def __init__(self, env: Env, suite: TestSuite) -> None:
         self.env = env
@@ -1389,7 +1391,7 @@ class MakefileRenderer:
         add('\t@echo "    info         - show the binary under test and its backends"')
         add('\t@echo "    clean        - remove the installed binary and any test output"')
         for b in backends:
-            add(f'\t@echo "    install-{b:<7} - download the latest {b} release into build/rwt/"')
+            add(f'\t@echo "    install-{b:<7} - download the latest {b} release into build/rat/"')
         add('\t@echo ""')
         add('\t@echo "  Models:"')
         add('\t@echo "    list-models  - list known models and whether they are on disk"')
@@ -1480,7 +1482,24 @@ class Cli:
         # --bin wins over --bin-dir: it names the executable outright, which is
         # how a build/chimera or a system install is tested without an `install`.
         self.env.bin_path = Path(args.bin).expanduser().resolve() if getattr(args, "bin", None) else None
+        if self.env.bin_override is not None:
+            self._ensure_executable(self.env.bin_override)
         self.env.gpu_layers_override = getattr(args, "gpu_layers", None)
+
+    @staticmethod
+    def _ensure_executable(path: Path) -> None:
+        """Set the exec bits on a `--bin` that lacks them.
+
+        A binary downloaded as a GitHub Actions artifact arrives zipped without
+        its POSIX mode, so it cannot be run until it is chmod +x'd.
+        """
+        if os.name == "nt" or not path.is_file() or os.access(path, os.X_OK):
+            return
+        try:
+            path.chmod(path.stat().st_mode | 0o755)
+            print(f"made {path} executable")
+        except OSError as e:
+            print(f"warning: {path} is not executable and chmod failed: {e}", file=sys.stderr)
 
     # -- simple commands ----------------------------------------------------
 
@@ -1492,7 +1511,7 @@ class Cli:
         print(f"{'loaded:':<10}{loaded or '(unknown)'}")
         print(f"{'models:':<10}{self.paths.models_dir}")
         print(f"{'build:':<10}{self.paths.build_dir}")
-        print(f"{'rwt:':<10}{self.paths.rwt_dir}")
+        print(f"{'rat:':<10}{self.paths.rat_dir}")
         print(f"{'output:':<10}{self.paths.out_dir}")
         print(f"{'host:':<10}{'-'.join(Release.host())}")
         if version:
@@ -1514,13 +1533,13 @@ class Cli:
             if path.exists():
                 print(f"removing {path}")
                 shutil.rmtree(path)
-        # All of the above normally live in <build>/rwt, so once they are gone
+        # All of the above normally live in <build>/rat, so once they are gone
         # the directory itself is this script's last trace; drop it too. Guarded
         # on emptiness rather than removed outright, since --bin-dir / --out-dir
         # can point elsewhere and something else may own what is left.
-        if self.paths.rwt_dir.is_dir() and not any(self.paths.rwt_dir.iterdir()):
-            print(f"removing {self.paths.rwt_dir}")
-            self.paths.rwt_dir.rmdir()
+        if self.paths.rat_dir.is_dir() and not any(self.paths.rat_dir.iterdir()):
+            print(f"removing {self.paths.rat_dir}")
+            self.paths.rat_dir.rmdir()
         return 0
 
     # -- install ------------------------------------------------------------
@@ -1826,7 +1845,7 @@ class Cli:
             dest="build_dir",
             default=argparse.SUPPRESS,
             help=f"build tree this script works inside; it puts everything it creates -- the "
-            f"installed binary, downloaded archives, test output -- in <build-dir>/rwt "
+            f"installed binary, downloaded archives, test output -- in <build-dir>/rat "
             f"(default: {self.paths.build_dir}, following the Makefile's BUILD_DIR). Models are "
             "not under it and are not affected.",
         )
@@ -1884,7 +1903,7 @@ class Cli:
 
     @staticmethod
     def install_parser() -> argparse.ArgumentParser:
-        """Options that only mean something while writing to build/rwt/."""
+        """Options that only mean something while writing to build/rat/."""
         i = argparse.ArgumentParser(add_help=False)
         i.add_argument(
             "--version",
@@ -1950,7 +1969,7 @@ class Cli:
         p = argparse.ArgumentParser(
             description="chimera release tester",
             parents=[common],
-            epilog="example: rwt.py install --cuda && rwt.py test --cuda test-all --models-dir models",
+            epilog="example: rat.py install --cuda && rat.py test --cuda test-all --models-dir models",
         )
         _sub = p.add_subparsers(dest="cmd", required=True, metavar="<command>")
 
@@ -2000,10 +2019,10 @@ class Cli:
         sub.add_parser("list-tests").set_defaults(func=self.cmd_list_tests)
 
         gm = sub.add_parser("gen-makefile", help="generate a Makefile from this script's registries")
-        gm.add_argument("-o", "--output", help="write to file instead of stdout (e.g. -o rwt.mk)")
+        gm.add_argument("-o", "--output", help="write to file instead of stdout (e.g. -o rat.mk)")
         gm.set_defaults(func=self.cmd_gen_makefile)
 
-        # `test` takes one target name -- `test-sd-4` rather than `test sd 4`, so a
+        # `test` takes one target name -- `test-sd-3` rather than `test sd 3`, so a
         # target is a single token and matches the Makefile rule of the same name.
         t = sub.add_parser("test", parents=[self.test_parser()], help="run a test target (see `list tests`)")
         t.add_argument(
