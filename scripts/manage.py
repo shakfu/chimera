@@ -105,9 +105,8 @@ WHISPERCPP_VERSION = "v1.9.2"
 # fails from 817 on. Do not bump past this until those ops land in ggml proper.
 # (Observed by the sibling cyllama project at its 0.4.1; not re-verified here.)
 SDCPP_VERSION = "master-816-487de75"
-# linenoise: shakfu's fork. No tags yet, so we pin a branch and record the
-# commit in CHANGELOG for traceability.
-LINENOISE_VERSION = "master"
+# linenoise: shakfu's fork.
+LINENOISE_VERSION = "2.1"
 # SQLite amalgamation; upstream files live at sqlite.org/<year>/
 # sqlite-amalgamation-<digits>.zip, where the digits encode major*1000000 +
 # minor*10000 + patch*100. 3470000 == 3.47.0.

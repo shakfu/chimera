@@ -4,6 +4,10 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Changed
+
+- **Pin linenoise to tag `2.1`** (was the `master` branch), so fresh and local builds use the same commit. `thirdparty/linenoise/` is now untracked; `make deps` writes it.
+
 ## [0.3.0]
 
 ### Changed
