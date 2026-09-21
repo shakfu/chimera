@@ -4,9 +4,17 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.3.1]
+
 ### Changed
 
+- **Update llama.cpp to v0.4.1** (from v0.4.0) **and whisper.cpp to v1.9.4** (from v1.9.2); stable-diffusion.cpp unchanged. llama.cpp deleted `tools/ui/embed.cpp`, the generator for the `ui.cpp`/`ui.h` that `server-http.cpp` includes. `make deps` failed on the file copy even with the web UI off. chimera now stages upstream's `scripts/ui-assets.cmake` and `tools/ui/ui.{h,cpp}.in` and runs the script unmodified when `CHIMERA_WEBUI_EMBED=ON`. We reuse the script rather than write our own generator because the templates changed API too (`llama_ui_use_gzip()`, a fixed-size `std::array` from `llama_ui_get_assets()`). With embed OFF, CMake fills the templates with zero assets; the script would print a "no assets" warning on every build. Staged assets moved from `src-aux/webui/` to `src-aux/ui/tools/ui/dist/`.
+
+  Embedded assets are now gzip-compressed. The embedded UI adds about 3 MB to the binary, down from 7 MB. Requests without `Accept-Encoding: gzip` get 415 from upstream's handler. See [`docs/dev/webui.md` § 11](docs/dev/webui.md).
+
 - **Pin linenoise to tag `2.1`** (was the `master` branch), so fresh and local builds use the same commit. `thirdparty/linenoise/` is now untracked; `make deps` writes it.
+
+- **GPU CI and release jobs retry `apt-get update`.** It exits 0 when a mirror fetch fails, so a transient outage surfaced later as a missing package. The jobs now pass `--error-on=any`, set `Acquire::Retries "5"`, and retry up to 3 times with backoff.
 
 ## [0.3.0]
 

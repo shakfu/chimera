@@ -298,7 +298,7 @@ Implications for this sidecar plan:
 
 - The "**No xxd**" line under § 7 is now trivially true — xxd is gone upstream regardless. The stronger claim still holds: this sidecar adds **no CMake changes and no `CHIMERA_WEBUI_*` coupling**; it ships as static files mounted via `--public-path`, independent of the generated `ui.cpp`.
 
-- If § 9 graduation ever revisits embedding the sidecar, do *not* resurrect an xxd step — reuse the same `ui-embed` generator chimera already builds (extend it with the sidecar's asset names), so there is one embed path, not two.
+- If § 9 graduation ever revisits embedding the sidecar, do *not* resurrect an xxd step — reuse the same `ui-assets.cmake` generator chimera already runs (see [`webui.md` § 11](webui.md)), so there is one embed path, not two.
 
 - The `make webui-serve` recipe in § 7 is unaffected: `--public-path` mounting takes precedence over the embedded `GET /` handler and does not depend on the embed mechanism at all.
 

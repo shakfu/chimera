@@ -116,25 +116,25 @@ message(STATUS "linenoise:              ${CHIMERA_LINENOISE} -> link=${CHIMERA_L
 # -----------------------------------------------------------------------------
 # CHIMERA_WEBUI_EMBED:
 #   ON   = bake upstream llama.cpp's prebuilt web UI bundle into the binary
-#          (assets embedded in a generated ui.cpp via the staged ui-embed
-#          helper; see src/chimera/CMakeLists.txt). Adds
-#          ~7 MB to the binary; routes GET / + /bundle.{js,css} when the
+#          (assets embedded in a generated ui.cpp via the staged
+#          ui-assets.cmake; see src/chimera/CMakeLists.txt). Adds
+#          ~3 MB (gzip-compressed) to the binary; routes GET / + assets when the
 #          server is up. Compiled-in UI is pinned to whichever llama.cpp
 #          version chimera vendored, so the UI lifecycle is coupled to the
 #          chimera release cadence.
 #   OFF  = no webui routes; default. Binary stays lean.
-#   AUTO = ON if thirdparty/llama.cpp/src-aux/webui/ exists, else OFF.
+#   AUTO = ON if thirdparty/llama.cpp/src-aux/ui/tools/ui/dist/ exists, else OFF.
 # Disable at runtime regardless of build choice with `chimera serve --no-webui`.
 set(CHIMERA_WEBUI_EMBED "OFF" CACHE STRING "Embed llama.cpp web UI (ON / OFF / AUTO)")
 set_property(CACHE CHIMERA_WEBUI_EMBED PROPERTY STRINGS "AUTO" "ON" "OFF")
 
-set(_webui_probe "${CMAKE_SOURCE_DIR}/thirdparty/llama.cpp/src-aux/webui/index.html")
+set(_webui_probe "${CMAKE_SOURCE_DIR}/thirdparty/llama.cpp/src-aux/ui/tools/ui/dist/index.html")
 set(CHIMERA_LINK_WEBUI OFF)
 if("${CHIMERA_WEBUI_EMBED}" STREQUAL "ON")
     if(NOT EXISTS "${_webui_probe}")
         message(FATAL_ERROR
             "CHIMERA_WEBUI_EMBED=ON but ${_webui_probe} not found.\n"
-            "On llama.cpp b9318+ the prebuilt assets are no longer shipped in\n"
+            "llama.cpp no longer ships the prebuilt assets in\n"
             "the source tree; build them first, then re-stage:\n"
             "  (cd build/llama.cpp/tools/ui && npm install && npm run build)\n"
             "  python scripts/manage.py build --llama-cpp --sd-shared-ggml\n"

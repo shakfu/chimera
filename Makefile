@@ -38,7 +38,7 @@ remake: reset build test
 # build-with-webui: same as `build`, but flips the experimental
 # CHIMERA_WEBUI_EMBED option ON so the chimera binary bakes upstream's
 # prebuilt web UI bundle into itself (GET / + /bundle.{js,css}) via the
-# generated ui.cpp. Adds ~7 MB to the binary.
+# generated ui.cpp. Adds ~3 MB (gzip-compressed) to the binary.
 #
 # IMPORTANT (llama.cpp b9318+): upstream no longer ships prebuilt assets
 # in the source tree, so `deps` alone does NOT stage them and this target
