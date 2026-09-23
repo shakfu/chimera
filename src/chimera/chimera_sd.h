@@ -191,6 +191,7 @@ struct LoadParams {
     std::string taesd;             // tiny-autoencoder
     std::string clip_vision;       // CLIP-Vision encoder
     std::string llm_vision;        // LLM-Vision encoder
+    std::string tokenizer;         // tokenizer.json or main=/clip-l=/clip-g= assignments
     std::string tensor_type_rules; // per-tensor wtype override rules
     std::string photo_maker;       // PhotoMaker model
     // Textual-inversion / embedding directory. load_model scans it
@@ -219,10 +220,10 @@ struct LoadParams {
     bool  keep_control_net_on_cpu   = false;
     bool  force_sdxl_vae_conv_scale = false;
 
-    // Stream diffusion weights from CPU during generation (sd_cli's
-    // --stream-layers). Only takes effect alongside max_vram > 0; sd.cpp
-    // silently disables it otherwise. Default off = upstream default.
-    bool  stream_layers             = false;
+    // sd_cli's --disable-prefetch / --disable-segmented-compute. Both
+    // default off, matching upstream.
+    bool  disable_prefetch          = false;
+    bool  disable_segmented_compute = false;
 
     // Pre-load all params into the params backend at model-load time
     // instead of lazily on first use (sd_cli's --eager-load). Trades a
@@ -244,13 +245,10 @@ struct LoadParams {
     std::string backend;
     std::string params_backend;
 
-    // Let sd.cpp derive both specs from the model sizes and the per-device
-    // memory budgets (max_vram, defaulting to free memory minus a margin).
-    // Overrides `backend` and `params_backend` upstream-side, and may split a
-    // module across GPUs. On a single-GPU box it tends to resolve to placing
-    // everything on the CPU, which fits but is far slower than an explicit
-    // placement -- prefer `params_backend` when one is known.
-    bool  auto_fit                  = false;
+    // Let sd.cpp place weights on the compute GPU, RAM, another GPU or disk
+    // by free memory (max_vram caps GPU budgets). Upstream default. A
+    // non-empty params_backend spec, e.g. from offload_to_cpu, disables it.
+    bool  auto_fit                  = true;
 
     // Enum-string knobs resolved via sd.cpp's str_to_* helpers. Empty
     // leaves the upstream default in place; unknown values exit with

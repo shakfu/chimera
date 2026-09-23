@@ -4,6 +4,42 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.4.0]
+
+### Added
+
+- `--tokenizer` / `--sd-tokenizer` (required for PiD and Lens), `--disable-prefetch` / `--sd-disable-prefetch`, `--disable-segmented-compute` / `--sd-disable-segmented-compute`, and `--no-auto-fit` / `--sd-no-auto-fit`, with the matching `SdOptions` / `ServeOptions` fields and Python bindings.
+
+- **Python bindings for 13 option fields that had none**: `LlamaOptions.videos` / `video_fps` / `video_timestamp_ms` / `ffmpeg_dir` / `load_mode`, `EmbedOptions.load_mode`, `SdOptions.backend` / `params_backend` / `eager_load` / `ref_image_args`, and `ServeOptions.sd_backend` / `sd_params_backend` / `sd_eager_load`. `bindings/tests/test_binding_coverage.py` now fails when a `chimera.h` option field has no `def_rw`. Before this, coverage was checked only by hand, and `bindings/README.md` claimed it was complete.
+
+- **`make deps` fails if whisper.cpp's vendored ggml headers disagree with llama.cpp's on any enum value.** whisper compiles against its own ggml headers but links llama.cpp's ggml. A renumbered `ggml_op` or `ggml_type` would compile clean and build graphs with wrong op ids. Additions in llama.cpp's headers pass; `*_COUNT` sentinels are ignored. Tests: `tests/test_ggml_enum_abi.py`.
+
+### Changed
+
+- **Update stable-diffusion.cpp to master-898-2bb7294** (from master-816-487de75), following [cyllama#19](https://github.com/shakfu/cyllama/issues/19). From master-817, sd.cpp called ops that exist only in leejet's ggml fork, so it no longer compiled against llama.cpp's ggml. Upstream's `SD_USE_UPSTREAM_GGML` ([#1999](https://github.com/leejet/stable-diffusion.cpp/pull/1999)) compiles those calls out. Shared-ggml builds now pass it, with `SD_GGML_SOURCE_DIR` pointing at llama.cpp's ggml, instead of copying that tree over SD's checkout. The build dir is dropped only when those options change. Shared mode loses three fork-only features: INT8 ConvRot files are rejected, FP8 safetensors load as F16, and SageAttention is unavailable. None of them worked at the old pin. An existing `build/stable-diffusion.cpp` clone must be deleted (or `make reset`); the build fails with that instruction otherwise.
+
+- **Breaking: `auto_fit` now defaults to on**, matching upstream's new default. It places weights on the compute GPU, RAM, another GPU or disk by free memory. A non-empty params-backend spec disables it, so `--offload-to-cpu` and `--params-backend` behave as before.
+
+- **A source patch that no longer applies now fails `make deps`** with git's reason, instead of logging "no longer applies" and building without the fix. That is how 0.3.0 and 0.3.1 lost the Metal MSL pin (see Fixed). `ggml-*.patch` no longer go to stable-diffusion.cpp's vendored ggml in shared-ggml mode, since that tree is not compiled. Tests: `tests/test_manage_patches.py`.
+
+- **sd's per-load "Using upstream GGML" warning prints only with `-v`.** upstream logs it at WARN on every model load of an `SD_USE_UPSTREAM_GGML` build, and chimera always builds that way. It is still captured in the server's log ring. A default run no longer reports that FP8 weights are converted to F16. INT8 ConvRot files still fail with their own error.
+
+- `bindings/pyproject.toml`'s version had stayed at 0.2.5 since 0.2.6; it now matches `CHIMERA_VERSION`.
+
+### Fixed
+
+- **Restore the Metal MSL version pin** (`scripts/patches/ggml-metal-pin-msl-version-set-lang.patch`, rebased from cyllama). Both earlier Metal patches stopped matching at llama.cpp v0.4.0, and 0.3.0 and 0.3.1 shipped without the pin. On M5-class GPUs, ggml then compiles shaders at MSL 4.0 and enables the Metal tensor kernels. cyllama measured those kernels producing blank stable-diffusion images, so `chimera sd` 0.3.x on M5 very likely does too. M1-M4 were unaffected: ggml disables the tensor API on them. The pin caps MSL at 3.2 on every device. On 0.3.x, `GGML_METAL_TENSOR_DISABLE=1` has the same effect. Not verified on macOS.
+
+- `make test`: `sd without -v` matched sd.cpp's old "not found" wording and now matches the strerror text. `chat persistent KV cache` failed about 1 run in 5 when the sampled reply refused to repeat the password; it now runs with `--temp 0`.
+
+### Removed
+
+- **Breaking: `--stream-layers` / `--sd-stream-layers` and `SdOptions.stream_layers` / `ServeOptions.sd_stream_layers`.** Upstream dropped the field; prefetch is now on by default, and `--disable-prefetch` turns it off.
+
+- **`ggml-metal-pin-msl-version.patch` and `ggml-metal-pin-msl-version-perkind.patch`**, replaced by `-set-lang`.
+
+- **`stable-diffusion.cpp-conditioner-compute-failure.patch`, `-graph-cut-budget-clamp.patch` and `-msvc-bigobj.patch`.** All three are fixed upstream at master-898; see `scripts/patches/README.md`.
+
 ## [0.3.1]
 
 ### Changed

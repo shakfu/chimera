@@ -589,8 +589,8 @@ if(WIN32)
     # templated upstream headers push chimera's per-modality TUs (chimera_sd.cpp
     # pulls in sd.cpp's ggml_extend.hpp, chimera_llama.cpp pulls in mtmd +
     # server-context) toward that ceiling. sd.cpp's own src/stable-diffusion.cpp
-    # crossed it at master-795 with error C1128 -- see the matching /bigobj in
-    # scripts/patches/stable-diffusion.cpp-msvc-bigobj.patch. The flag only widens
+    # crossed it at master-795 with error C1128; upstream now sets /bigobj on its
+    # own target. The flag only widens
     # the object file's section table; no codegen or runtime effect.
     set(CXX_COMPILE_OPTIONS /std:c++17 /EHsc /MD /bigobj)
 else()

@@ -59,6 +59,10 @@ NB_MODULE(chimera, m) {
         .def_rw("model",              &LlamaCommonOptions::model)
         .def_rw("mmproj",             &LlamaCommonOptions::mmproj)
         .def_rw("images",             &LlamaCommonOptions::images)
+        .def_rw("videos",             &LlamaCommonOptions::videos)
+        .def_rw("video_fps",          &LlamaCommonOptions::video_fps)
+        .def_rw("video_timestamp_ms", &LlamaCommonOptions::video_timestamp_ms)
+        .def_rw("ffmpeg_dir",         &LlamaCommonOptions::ffmpeg_dir)
         // context / batching
         .def_rw("n_ctx",              &LlamaCommonOptions::n_ctx)
         .def_rw("n_batch",            &LlamaCommonOptions::n_batch)
@@ -102,6 +106,7 @@ NB_MODULE(chimera, m) {
         // model load / memory
         .def_rw("use_mmap",           &LlamaCommonOptions::use_mmap)
         .def_rw("use_mlock",          &LlamaCommonOptions::use_mlock)
+        .def_rw("load_mode",          &LlamaCommonOptions::load_mode)  // auto|none|mmap|mlock|mmap+mlock|dio
         .def_rw("flash_attn",         &LlamaCommonOptions::flash_attn)
         .def_rw("swa_full",           &LlamaCommonOptions::swa_full)
         .def_rw("cache_type_k",       &LlamaCommonOptions::cache_type_k)  // f16|q8_0|...
@@ -208,6 +213,7 @@ NB_MODULE(chimera, m) {
         .def_rw("normalize",         &EmbedOptions::normalize)
         .def_rw("use_mmap",          &EmbedOptions::use_mmap)
         .def_rw("use_mlock",         &EmbedOptions::use_mlock)
+        .def_rw("load_mode",         &EmbedOptions::load_mode)
         .def_rw("flash_attn",        &EmbedOptions::flash_attn)
         .def_rw("rope_freq_base",    &EmbedOptions::rope_freq_base)
         .def_rw("rope_freq_scale",   &EmbedOptions::rope_freq_scale)
@@ -284,6 +290,7 @@ NB_MODULE(chimera, m) {
         .def_rw("sd_t5xxl",                   &ServeOptions::sd_t5xxl)
         .def_rw("sd_llm",                     &ServeOptions::sd_llm)
         .def_rw("sd_llm_vision",              &ServeOptions::sd_llm_vision)
+        .def_rw("sd_tokenizer",               &ServeOptions::sd_tokenizer)
         .def_rw("sd_clip_vision",             &ServeOptions::sd_clip_vision)
         .def_rw("sd_taesd",                   &ServeOptions::sd_taesd)
         .def_rw("sd_embd_dir",                &ServeOptions::sd_embd_dir)
@@ -301,7 +308,12 @@ NB_MODULE(chimera, m) {
         .def_rw("sd_keep_vae_on_cpu",         &ServeOptions::sd_keep_vae_on_cpu)
         .def_rw("sd_keep_control_net_on_cpu", &ServeOptions::sd_keep_control_net_on_cpu)
         .def_rw("sd_force_sdxl_vae_conv_scale", &ServeOptions::sd_force_sdxl_vae_conv_scale)
-        .def_rw("sd_stream_layers",           &ServeOptions::sd_stream_layers)
+        .def_rw("sd_disable_prefetch",        &ServeOptions::sd_disable_prefetch)
+        .def_rw("sd_disable_segmented_compute", &ServeOptions::sd_disable_segmented_compute)
+        .def_rw("sd_auto_fit",                &ServeOptions::sd_auto_fit)
+        .def_rw("sd_backend",                 &ServeOptions::sd_backend)
+        .def_rw("sd_params_backend",          &ServeOptions::sd_params_backend)
+        .def_rw("sd_eager_load",              &ServeOptions::sd_eager_load)
         .def_rw("sd_rng",                     &ServeOptions::sd_rng)
         .def_rw("sd_sampler_rng",             &ServeOptions::sd_sampler_rng)
         .def_rw("sd_prediction",              &ServeOptions::sd_prediction)
@@ -365,6 +377,7 @@ NB_MODULE(chimera, m) {
         .def_rw("taesd",            &SdOptions::taesd)
         .def_rw("clip_vision",      &SdOptions::clip_vision)
         .def_rw("llm_vision",       &SdOptions::llm_vision)
+        .def_rw("tokenizer",        &SdOptions::tokenizer)
         .def_rw("tensor_type_rules",&SdOptions::tensor_type_rules)
         .def_rw("photo_maker",      &SdOptions::photo_maker)
         .def_rw("embd_dir",         &SdOptions::embd_dir)
@@ -416,7 +429,12 @@ NB_MODULE(chimera, m) {
         .def_rw("keep_vae_on_cpu",           &SdOptions::keep_vae_on_cpu)
         .def_rw("keep_control_net_on_cpu",   &SdOptions::keep_control_net_on_cpu)
         .def_rw("force_sdxl_vae_conv_scale", &SdOptions::force_sdxl_vae_conv_scale)
-        .def_rw("stream_layers",         &SdOptions::stream_layers)
+        .def_rw("disable_prefetch",          &SdOptions::disable_prefetch)
+        .def_rw("disable_segmented_compute", &SdOptions::disable_segmented_compute)
+        .def_rw("auto_fit",                  &SdOptions::auto_fit)
+        .def_rw("backend",                   &SdOptions::backend)
+        .def_rw("params_backend",            &SdOptions::params_backend)
+        .def_rw("eager_load",                &SdOptions::eager_load)
         .def_rw("prediction",            &SdOptions::prediction)       // string
         .def_rw("lora_apply_mode",       &SdOptions::lora_apply_mode)  // string
         .def_rw("vae_format",            &SdOptions::vae_format)       // auto|flux|sd3|flux2
@@ -431,6 +449,7 @@ NB_MODULE(chimera, m) {
         .def_rw("pm_style_strength", &SdOptions::pm_style_strength)
         // reference images
         .def_rw("ref_images",               &SdOptions::ref_images)
+        .def_rw("ref_image_args",           &SdOptions::ref_image_args)
         .def_rw("increase_ref_index",       &SdOptions::increase_ref_index)
         .def_rw("no_auto_resize_ref_image", &SdOptions::no_auto_resize_ref_image)
         // hires fix

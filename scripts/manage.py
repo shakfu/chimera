@@ -39,7 +39,7 @@ Environment variables:
 """
 
 import argparse
-import hashlib
+import ast
 import logging
 import os
 import platform
@@ -95,16 +95,14 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.3.1"
+CHIMERA_VERSION = "0.4.0"
 LLAMACPP_VERSION = "v0.4.1"
 WHISPERCPP_VERSION = "v1.9.4"
-# Ceiling, not staleness: from master-817 on, stable-diffusion.cpp calls
-# `ggml_mul_mat_i8_tensorwise` and `ggml_quantize_i8_convrot`, which exist only
-# in leejet's ggml fork. chimera compiles SD against llama.cpp's ggml (see
-# `_sync_ggml_abi`), where they are undeclared, so every SD translation unit
-# fails from 817 on. Do not bump past this until those ops land in ggml proper.
-# (Observed by the sibling cyllama project at its 0.4.1; not re-verified here.)
-SDCPP_VERSION = "master-816-487de75"
+# Floor: master-883. From master-817 sd.cpp calls ops that exist only in
+# leejet's ggml fork. master-883 (leejet/stable-diffusion.cpp#1999) added
+# SD_USE_UPSTREAM_GGML, which compiles those calls out, and SD_GGML_SOURCE_DIR;
+# see StableDiffusionCppBuilder._ggml_options.
+SDCPP_VERSION = "master-898-2bb7294"
 # linenoise: shakfu's fork.
 LINENOISE_VERSION = "2.1"
 # SQLite amalgamation; upstream files live at sqlite.org/<year>/
@@ -502,6 +500,80 @@ class Builder(AbstractBuilder):
             self.git_clone(self.repo_url, recurse=True, cwd=self.project.src)
 
 
+def _eval_enum_value(expr: str, known: dict[str, int]) -> int:
+    """Evaluate a C enum initializer: int literals, earlier enumerators, | << + - ~."""
+    ops: dict[type, Callable[..., int]] = {
+        ast.BitOr: lambda a, b: a | b,
+        ast.LShift: lambda a, b: a << b,
+        ast.Add: lambda a, b: a + b,
+        ast.Sub: lambda a, b: a - b,
+        ast.USub: lambda a: -a,
+        ast.Invert: lambda a: ~a,
+    }
+
+    def ev(node: ast.AST) -> int:
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return node.value
+        if isinstance(node, ast.Name) and node.id in known:
+            return known[node.id]
+        if isinstance(node, ast.BinOp) and type(node.op) in ops:
+            return ops[type(node.op)](ev(node.left), ev(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in ops:
+            return ops[type(node.op)](ev(node.operand))
+        raise ValueError(f"cannot evaluate enum initializer {expr!r}")
+
+    # C allows integer suffixes (1u, 2ULL); Python does not.
+    return ev(ast.parse(re.sub(r"\b(0x[0-9a-fA-F]+|\d+)[uUlL]+\b", r"\1", expr), mode="eval").body)
+
+
+def parse_c_enums(header: Path) -> dict[str, dict[str, int]]:
+    """Map each tagged `enum name { ... }` in a C header to {enumerator: value}."""
+    text = header.read_text(encoding="utf-8", errors="replace")
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    enums: dict[str, dict[str, int]] = {}
+    for m in re.finditer(r"\benum\s+(\w+)\s*\{(.*?)\}", text, flags=re.S):
+        values: dict[str, int] = {}
+        nxt = 0
+        for item in m.group(2).split(","):
+            item = item.strip()
+            if not item:
+                continue
+            name, _, expr = (part.strip() for part in item.partition("="))
+            nxt = _eval_enum_value(expr, values) if expr else nxt
+            values[name] = nxt
+            nxt += 1
+        enums[m.group(1)] = values
+    return enums
+
+
+def ggml_enum_mismatches(consumer: Path, provider: Path) -> list[str]:
+    """Enumerators whose value differs between two ggml include dirs.
+
+    `consumer` is the include dir a library compiles against; `provider` is the
+    one of the ggml it links. Every enumerator the consumer can name must exist
+    in the provider with the same value. Additions in the provider are fine.
+    `*_COUNT` sentinels are skipped: they grow with every addition.
+    """
+    problems: list[str] = []
+    for header in sorted(consumer.glob("*.h")):
+        other = provider / header.name
+        if not other.exists():
+            continue  # a backend header the provider does not build
+        theirs = parse_c_enums(other)
+        for enum, values in parse_c_enums(header).items():
+            if enum not in theirs:
+                problems.append(f"{header.name}: enum {enum} missing from {provider}")
+                continue
+            for name, value in values.items():
+                if name.endswith("_COUNT"):
+                    continue
+                got = theirs[enum].get(name)
+                if got != value:
+                    problems.append(f"{header.name}: {enum}::{name} = {value}, linked ggml has {got}")
+    return problems
+
+
 class GgmlBuilder(Builder):
     """Builder base for ggml-backed projects (llama.cpp / whisper.cpp / sd.cpp).
 
@@ -519,6 +591,10 @@ class GgmlBuilder(Builder):
     def get_backend_cmake_options(self) -> dict[str, Any]:
         raise NotImplementedError
 
+    def compiles_own_ggml(self) -> bool:
+        """True when this project's own ggml tree is compiled, so ggml-*.patch apply to it."""
+        return True
+
     def _apply_source_patches(self) -> None:
         """Apply chimera's local fixes to the vendored source before building.
 
@@ -528,18 +604,16 @@ class GgmlBuilder(Builder):
         ``stable-diffusion.cpp-*.patch``), specific to one upstream. Trees are
         wiped and re-fetched by ``make reset``, so these run on every build.
 
-        Each patch is idempotent and self-disabling: already-applied and
-        no-longer-applies are logged and skipped, never fatal, so a version bump
-        that lands an equivalent upstream fix does not break the build. The
-        ``.patch`` files are the single source of truth and double as the
-        upstream PR payload; see ``scripts/patches/README.md``.
+        An already-applied patch is skipped. One that no longer applies fails
+        the build; see `_apply_patch`. The ``.patch`` files are the single
+        source of truth and double as the upstream PR payload; see
+        ``scripts/patches/README.md``.
         """
         patch_dir = Path(__file__).resolve().parent / "patches"
         if not patch_dir.exists():
             return
-        patches = sorted(patch_dir.glob("ggml-*.patch")) + sorted(
-            patch_dir.glob(f"{self.name}-*.patch")
-        )
+        ggml_patches = sorted(patch_dir.glob("ggml-*.patch")) if self.compiles_own_ggml() else []
+        patches = ggml_patches + sorted(patch_dir.glob(f"{self.name}-*.patch"))
         for patch in patches:
             self._apply_patch(patch)
 
@@ -548,29 +622,36 @@ class GgmlBuilder(Builder):
 
         Uses ``git apply`` (which works with or without a git repo) and its
         ``--check`` / ``--reverse --check`` dry runs to tell apply,
-        already-applied and no-longer-applies apart -- without aborting the
-        build in the latter two cases, unlike ``self.cmd``.
+        already-applied and no-longer-applies apart.
+
+        A patch that no longer applies is fatal. Skipping it would ship the
+        build without the fix, which is how the Metal MSL pin was lost for two
+        releases after upstream moved the code it patched.
         """
 
-        def _git_apply(*flags: str) -> bool:
-            return (
-                subprocess.run(
-                    ["git", "apply", *flags, str(patch)],
-                    cwd=str(self.src_dir),
-                    capture_output=True,
-                ).returncode
-                == 0
+        def _git_apply(*flags: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "apply", *flags, str(patch)],
+                cwd=str(self.src_dir),
+                capture_output=True,
+                text=True,
             )
 
-        if _git_apply("--check"):
+        check = _git_apply("--check")
+        if check.returncode == 0:
             subprocess.run(
                 ["git", "apply", str(patch)], cwd=str(self.src_dir), check=True
             )
             self.log.info(f"applied patch: {patch.name}")
-        elif _git_apply("--reverse", "--check"):
+        elif _git_apply("--reverse", "--check").returncode == 0:
             self.log.debug(f"patch already applied, skipping: {patch.name}")
         else:
-            self.log.info(f"patch no longer applies, skipping: {patch.name}")
+            self.fail(
+                f"{patch.name} no longer applies to {self.name} {self.version} "
+                f"({self.src_dir}):\n{check.stderr.strip()}\n"
+                f"Rebase it onto this tree, or delete it if upstream fixed the "
+                f"defect, and record which in scripts/patches/README.md."
+            )
 
     def ggml_max_name_flags(self) -> dict[str, str]:
         """-DGGML_MAX_NAME for every language that compiles ggml_tensor code.
@@ -1064,12 +1145,32 @@ class WhisperCppBuilder(GgmlBuilder):
         self._apply_openmp(options)
         return options
 
+    def _verify_ggml_enum_abi(self) -> None:
+        """Fail if whisper's vendored ggml headers disagree with llama.cpp's on enum values.
+
+        whisper compiles against its own ggml headers but chimera links it to
+        llama.cpp's ggml. A renumbered `ggml_op` or `ggml_type` compiles clean
+        and builds graphs with wrong op ids at runtime.
+        """
+        llama_include = self.project.src / "llama.cpp" / "ggml" / "include"
+        if not llama_include.exists():
+            self.fail(f"Cannot check ggml ABI: {llama_include} is missing. Build llama.cpp first.")
+        problems = ggml_enum_mismatches(self.src_dir / "ggml" / "include", llama_include)
+        if problems:
+            self.fail(
+                f"{self.name} {self.version}'s vendored ggml headers disagree with "
+                f"llama.cpp {LLAMACPP_VERSION}'s, which chimera links:\n  "
+                + "\n  ".join(problems)
+            )
+        self.log.info("whisper.cpp's ggml enums match llama.cpp's")
+
     def build(self) -> None:
         if not self.src_dir.exists():
             self.setup()
         self.log.info(f"building {self.name}")
 
         self._apply_source_patches()
+        self._verify_ggml_enum_abi()
 
         self.prefix.mkdir(exist_ok=True)
         self.include.mkdir(exist_ok=True)
@@ -1176,6 +1277,10 @@ class StableDiffusionCppBuilder(GgmlBuilder):
     def uses_shared_ggml() -> bool:
         return os.environ.get("SD_USE_VENDORED_GGML") == "0"
 
+    def compiles_own_ggml(self) -> bool:
+        # Shared mode compiles llama.cpp's tree, which LlamaCppBuilder patched.
+        return not self.uses_shared_ggml()
+
     def get_backend_cmake_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {}
         sfx = " for stable-diffusion.cpp"
@@ -1204,86 +1309,61 @@ class StableDiffusionCppBuilder(GgmlBuilder):
         self._apply_openmp(options)
         return options
 
-    def _sync_ggml_abi(self) -> None:
-        """Replace SD's vendored ggml with llama.cpp's so enum values agree.
+    def _ggml_options(self) -> dict[str, Any]:
+        """CMake options selecting the ggml tree SD compiles against.
 
-        SD vendors its own ggml. When chimera links SD against llama.cpp's
-        ggml, ggml_op / ggml_type ids must match between header and runtime
-        or compute graphs build with wrong op ids and assert at runtime.
+        Shared mode: chimera links llama.cpp's ggml, so SD must compile against
+        the same headers or `ggml_op`/`ggml_type` ids diverge. `SD_GGML_SOURCE_DIR`
+        selects that tree; `SD_USE_UPSTREAM_GGML` compiles out the calls into
+        leejet's ggml fork (INT8 ConvRot, native FP8, SageAttention).
 
-        The swap also invalidates SD's cmake tree, which is dropped with it:
-        `copytree` preserves mtimes, so the incoming sources are not newer than
-        the objects already built from the tree being replaced, and make sees
-        nothing to redo. After a llama.cpp bump that leaves SD compiling against
-        the new ggml while linking objects built from the old one -- one
-        surviving `ggml-metal-device.m.o` from before llama.cpp split its Metal
-        library per op-source resolves `_ggml_metallib_start` against a tree
-        that only defines `_ggml_metallib_<name>_start`.
-
-        Dropping the tree unconditionally would mean a full SD rebuild on every
-        single build, so the swap is skipped when the ggml already in place is
-        the one we would copy: `_ggml_tree_stamp` fingerprints the source tree
-        and the result is recorded in the destination. Only a real change --
-        i.e. a llama.cpp bump, or a ggml-*.patch landing on llama.cpp's copy --
-        re-copies and invalidates the objects.
+        Both are CMake cache variables, so vendored mode passes them too:
+        omitting them keeps whatever an earlier shared configure cached.
         """
-        llama_ggml = self.project.src / "llama.cpp" / "ggml"
-        sd_ggml = self.src_dir / "ggml"
-        if not llama_ggml.exists() or not sd_ggml.exists():
-            self.log.warning("Cannot sync ggml ABI: llama.cpp or SD ggml dir missing")
-            return
-
-        stamp_path = sd_ggml / self.GGML_SYNC_STAMP
-        stamp = self._ggml_tree_stamp(llama_ggml)
-        if stamp_path.exists() and stamp_path.read_text().strip() == stamp:
-            self.log.info("SD's ggml already matches llama.cpp's; skipping sync")
-            return
-
-        shutil.rmtree(sd_ggml)
-        shutil.copytree(llama_ggml, sd_ggml)
-        stamp_path.write_text(stamp + "\n")
-        self.log.info(
-            "Replaced SD's vendored ggml with llama.cpp's ggml for ABI compatibility"
-        )
-        if self.build_dir.exists():
-            self.remove(self.build_dir)
-            self.log.info(
-                "Dropped %s: its objects were compiled against the replaced ggml",
-                self.build_dir,
+        if not self.uses_shared_ggml():
+            return {
+                "SD_USE_UPSTREAM_GGML": False,
+                "SD_GGML_SOURCE_DIR": str(self.src_dir / "ggml"),
+            }
+        # Both options arrived in master-883. An older checkout ignores them
+        # and silently compiles the fork, so fail instead.
+        if not (self.src_dir / "cmake" / "ggml.cmake").exists():
+            self.fail(
+                f"{self.src_dir} predates SD_GGML_SOURCE_DIR (master-883) and cannot "
+                f"be built against llama.cpp's ggml. Delete it (or run `make reset`) "
+                f"to re-clone {self.version}."
             )
+        llama_ggml = self.project.src / "llama.cpp" / "ggml"
+        if not llama_ggml.exists():
+            self.fail(f"Cannot share ggml: {llama_ggml} is missing. Build llama.cpp first.")
+        return {"SD_USE_UPSTREAM_GGML": True, "SD_GGML_SOURCE_DIR": str(llama_ggml)}
 
-    #: Written into SD's ggml dir to record which llama.cpp ggml is in place.
-    GGML_SYNC_STAMP: str = ".chimera-ggml-sync"
+    #: Written into SD's build dir to record the ggml options it was configured with.
+    GGML_OPTIONS_STAMP: str = ".chimera-ggml-options"
 
-    @classmethod
-    def _ggml_tree_stamp(cls, tree: Path) -> str:
-        """Fingerprint a ggml source tree: relative path, size and mtime.
+    def _drop_build_dir_on_ggml_change(self, ggml_options: dict[str, Any]) -> None:
+        """Drop SD's cmake tree when its ggml options differ from the last configure.
 
-        Cheap enough to run on every build and sensitive to exactly what makes
-        the copy stale -- a re-clone at a new ref, or a patch rewriting a file.
-        Content hashing would be stricter but reads the whole tree each time for
-        no practical gain here.
+        Every ggml source tree compiles into the same `ggml/` binary dir, and
+        make compares only mtimes, so objects from the previous tree survive
+        whenever they are newer than the incoming sources.
         """
-        h = hashlib.sha256()
-        for path in sorted(p for p in tree.rglob("*") if p.is_file()):
-            st = path.stat()
-            rel = path.relative_to(tree).as_posix()
-            h.update(f"{rel}\0{st.st_size}\0{int(st.st_mtime)}\n".encode())
-        return h.hexdigest()
+        stamp = self.build_dir / self.GGML_OPTIONS_STAMP
+        wanted = repr(sorted(ggml_options.items()))
+        if self.build_dir.exists() and not (stamp.exists() and stamp.read_text() == wanted):
+            self.remove(self.build_dir)
+            self.log.info("Dropped %s: it was configured against a different ggml", self.build_dir)
+        self.build_dir.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(wanted)
 
     def build(self, examples: bool = True) -> None:
         if not self.src_dir.exists():
             self.setup()
         self.log.info(f"building {self.name}")
 
-        # Sync ggml ABI from llama.cpp before compiling so SD and llama.cpp
-        # use the same ggml_op / ggml_type values. Only needed when SD links
-        # against llama.cpp's ggml (chimera's default, SD_USE_VENDORED_GGML=0).
-        if os.environ.get("SD_USE_VENDORED_GGML") == "0":
-            self._sync_ggml_abi()
+        ggml_options = self._ggml_options()
+        self._drop_build_dir_on_ggml_change(ggml_options)
 
-        # After _sync_ggml_abi(), so ggml-*.patch lands on whichever ggml copy
-        # is actually compiled (SD's vendored one or llama.cpp's).
         self._apply_source_patches()
 
         self.prefix.mkdir(exist_ok=True)
@@ -1299,18 +1379,6 @@ class StableDiffusionCppBuilder(GgmlBuilder):
                     self.log.info(f"Copied {stb_file} to include directory")
 
         backend_options = self.get_backend_cmake_options()
-
-        # MSVC caps an object file at 65535 sections and src/stable-diffusion.cpp
-        # blew past that at sd.cpp master-795 (error C1128), which is why the
-        # Windows CI leg started failing while macOS/Linux stayed green. This
-        # used to be handled by passing -DCMAKE_CXX_FLAGS=/bigobj here, the way
-        # upstream's own workflow does, but a command-line -D pre-seeds the
-        # cache so CMake's platform init never runs: that *replaces* the MSVC
-        # defaults rather than appending, silently dropping /EHsc (and /GR) from
-        # every SD translation unit. /bigobj is now added inside sd.cpp's own
-        # `if (MSVC)` block, next to the /MP and /utf-8 it already sets --
-        # see scripts/patches/stable-diffusion.cpp-msvc-bigobj.patch.
-        extra: dict[str, Any] = {}
 
         self.cmake_config(
             src_dir=self.src_dir,
@@ -1332,7 +1400,7 @@ class StableDiffusionCppBuilder(GgmlBuilder):
             # caller (SD_WEBP=1 / SD_WEBM=1 in the env) if you need them.
             SD_WEBP=getenv("SD_WEBP", default=False),
             SD_WEBM=getenv("SD_WEBM", default=False),
-            **extra,
+            **ggml_options,
             **backend_options,
         )
         self.cmake_build(build_dir=self.build_dir, release=True)

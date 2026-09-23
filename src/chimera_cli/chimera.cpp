@@ -2582,8 +2582,10 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Disable mmap for model loading (chimera defaults to mmap=on; this flips it off)");
     cmd->add_option("--max-vram", p.sd_opts.max_vram,
         "Soft cap on VRAM use in GiB (0 = leave the upstream default; sd.cpp may swap to CPU above the cap)");
-    cmd->add_flag("--stream-layers", p.sd_opts.stream_layers,
-        "Stream diffusion weights from CPU during generation (only engages with --max-vram > 0; ignored otherwise)");
+    cmd->add_flag("--disable-prefetch", p.sd_opts.disable_prefetch,
+        "Disable asynchronous next-segment weight prefetch");
+    cmd->add_flag("--disable-segmented-compute", p.sd_opts.disable_segmented_compute,
+        "Force monolithic graph execution even when automatic graph cutting would fit memory better");
     cmd->add_flag("--eager-load", p.sd_opts.eager_load,
         "Pre-load all weights into the params backend at model-load time instead of lazily on first use (slower load, no first-generation warmup)");
     cmd->add_flag("--clip-on-cpu", p.sd_opts.keep_clip_on_cpu,
@@ -2600,10 +2602,10 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "Per-module weight residency, same grammar as --backend and additionally "
         "accepting cpu / disk. Appended after --offload-to-cpu. On a single GPU that "
         "cannot hold every module, \"te=cpu\" is usually the fastest placement");
-    cmd->add_flag("--auto-fit", p.sd_opts.auto_fit,
-        "Let sd derive --backend and --params-backend from the model sizes and the "
-        "available VRAM (overriding both). Fits where an explicit placement would "
-        "not, but on a single-GPU box tends to resolve to all-CPU and is far slower");
+    cmd->add_flag("--auto-fit,!--no-auto-fit", p.sd_opts.auto_fit,
+        "Place weights on the compute GPU, RAM, another GPU or disk by free memory "
+        "(default on; --max-vram caps GPU budgets). Disabled by --params-backend "
+        "and --offload-to-cpu");
     cmd->add_flag("--force-sdxl-vae-conv-scale", p.sd_opts.force_sdxl_vae_conv_scale,
         "Apply the SDXL VAE conv-scale numerics fix (workaround for some SDXL VAE checkpoints)");
     // Round 2 sampler / generation core.
@@ -2632,6 +2634,8 @@ void bind_sd_cmd(CLI::App & app, ParsedCli & p) {
         "CLIP-Vision encoder (image-conditioning models)");
     cmd->add_option("--llm-vision", p.sd_opts.llm_vision,
         "LLM-Vision encoder (e.g. Qwen-Image vision-conditioning)");
+    cmd->add_option("--tokenizer", p.sd_opts.tokenizer,
+        "tokenizer.json path, or main=FILE,clip-l=FILE,clip-g=FILE assignments; required for PiD and Lens");
     cmd->add_option("--tensor-type-rules", p.sd_opts.tensor_type_rules,
         "Per-tensor wtype override rules (sd.cpp's --tensor-type-rules syntax)");
     cmd->add_option("--photo-maker", p.sd_opts.photo_maker,
@@ -2770,6 +2774,8 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "LLM text encoder (e.g. Qwen3 for Z-Image)");
     cmd->add_option("--sd-llm-vision", p.serve_opts.sd_llm_vision,
         "LLM-Vision encoder (e.g. Qwen-Image vision-conditioning)");
+    cmd->add_option("--sd-tokenizer", p.serve_opts.sd_tokenizer,
+        "tokenizer.json path, or main=FILE,clip-l=FILE,clip-g=FILE assignments; required for PiD and Lens");
     cmd->add_option("--sd-clip-vision", p.serve_opts.sd_clip_vision,
         "CLIP-Vision encoder (image-conditioning models)");
     cmd->add_option("--sd-taesd", p.serve_opts.sd_taesd,
@@ -2797,8 +2803,10 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "Disable mmap for sd model loading (chimera defaults to mmap=on)");
     cmd->add_option("--sd-max-vram", p.serve_opts.sd_max_vram,
         "Soft cap on VRAM use in GiB (0 = leave the upstream default; sd.cpp may swap to CPU above the cap)");
-    cmd->add_flag("--sd-stream-layers", p.serve_opts.sd_stream_layers,
-        "Stream diffusion weights from CPU during generation (only engages with --sd-max-vram > 0)");
+    cmd->add_flag("--sd-disable-prefetch", p.serve_opts.sd_disable_prefetch,
+        "Disable asynchronous next-segment weight prefetch");
+    cmd->add_flag("--sd-disable-segmented-compute", p.serve_opts.sd_disable_segmented_compute,
+        "Force monolithic graph execution even when automatic graph cutting would fit memory better");
     cmd->add_flag("--sd-eager-load", p.serve_opts.sd_eager_load,
         "Pre-load all sd weights into the params backend at model-load time instead of lazily on first use (slower load, no first-request warmup)");
     cmd->add_flag("--sd-offload-to-cpu", p.serve_opts.sd_offload_to_cpu,
@@ -2816,9 +2824,9 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--sd-params-backend", p.serve_opts.sd_params_backend,
         "Per-module weight residency, same grammar as --sd-backend and additionally "
         "accepting cpu / disk; resolved last-wins after --sd-offload-to-cpu");
-    cmd->add_flag("--sd-auto-fit", p.serve_opts.sd_auto_fit,
-        "Let sd derive --sd-backend and --sd-params-backend from the model sizes and "
-        "the available VRAM (overriding both)");
+    cmd->add_flag("--sd-auto-fit,!--sd-no-auto-fit", p.serve_opts.sd_auto_fit,
+        "Place sd weights by free memory (default on; --sd-max-vram caps GPU budgets). "
+        "Disabled by --sd-params-backend and --sd-offload-to-cpu");
     cmd->add_flag("--sd-force-sdxl-vae-conv-scale", p.serve_opts.sd_force_sdxl_vae_conv_scale,
         "Apply the SDXL VAE conv-scale numerics fix");
     cmd->add_option("--sd-rng", p.serve_opts.sd_rng,

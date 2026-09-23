@@ -142,7 +142,9 @@ static_assert(std::is_same_v<decltype(sd_ctx_params_t::diffusion_conv_direct),  
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::vae_conv_direct),                  bool>, "sd_ctx_params_t::vae_conv_direct retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::flash_attn),                       bool>, "sd_ctx_params_t::flash_attn retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::force_sdxl_vae_conv_scale),        bool>, "sd_ctx_params_t::force_sdxl_vae_conv_scale retyped.");
-static_assert(std::is_same_v<decltype(sd_ctx_params_t::stream_layers),                    bool>, "sd_ctx_params_t::stream_layers retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::disable_prefetch),                 bool>, "sd_ctx_params_t::disable_prefetch retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::disable_segmented_compute),        bool>, "sd_ctx_params_t::disable_segmented_compute retyped.");
+static_assert(std::is_same_v<decltype(sd_ctx_params_t::tokenizer),                        const char *>, "sd_ctx_params_t::tokenizer retyped.");
 static_assert(std::is_same_v<decltype(sd_ctx_params_t::eager_load),                       bool>, "sd_ctx_params_t::eager_load retyped.");
 // sd.cpp (master-700) dropped the per-component "keep on CPU" / decode-only
 // booleans (vae_decode_only, offload_params_to_cpu, keep_{clip,vae,control_net}_on_cpu)
@@ -309,6 +311,11 @@ namespace {
 void sd_log_callback(enum sd_log_level_t level, const char * text, void * user_data) {
     (void) user_data;
     push_log_line(text);
+    // Upstream warns on every load of an SD_USE_UPSTREAM_GGML build, which is
+    // chimera's only build; show it with -v only.
+    if (level == SD_LOG_WARN && text != nullptr && std::strstr(text, "Using upstream GGML:") != nullptr) {
+        level = SD_LOG_INFO;
+    }
     if (static_cast<int>(level) >= g_sd_log_thold.load(std::memory_order_relaxed)) {
         std::cerr << text;
     }
@@ -499,6 +506,7 @@ SdContextPtr load_model(const LoadParams & params) {
     ctx_params.taesd_path            = cstr(params.taesd);
     ctx_params.clip_vision_path      = cstr(params.clip_vision);
     ctx_params.llm_vision_path       = cstr(params.llm_vision);
+    ctx_params.tokenizer             = cstr(params.tokenizer);
     ctx_params.tensor_type_rules     = cstr(params.tensor_type_rules);
     ctx_params.photo_maker_path      = cstr(params.photo_maker);
     ctx_params.n_threads             = params.threads;
@@ -594,13 +602,11 @@ SdContextPtr load_model(const LoadParams & params) {
         ctx_params.vae_format = vf;
     }
 
-    // Weight streaming only engages when max_vram > 0; sd.cpp disables it
-    // otherwise and logs the reason through our sd_log_callback, so no
-    // extra guard is needed here.
-    ctx_params.stream_layers = params.stream_layers;
+    ctx_params.disable_prefetch          = params.disable_prefetch;
+    ctx_params.disable_segmented_compute = params.disable_segmented_compute;
 
     // Eager param residency: load every weight into the params backend now
-    // instead of on first use. Independent of max_vram / stream_layers.
+    // instead of on first use. Independent of max_vram.
     ctx_params.eager_load = params.eager_load;
 
     // Textual-inversion embedding directory. Scan non-recursively for
@@ -1105,6 +1111,7 @@ int command_sd(const SdOptions & opts) {
     lp.taesd                = opts.taesd;
     lp.clip_vision          = opts.clip_vision;
     lp.llm_vision           = opts.llm_vision;
+    lp.tokenizer            = opts.tokenizer;
     lp.tensor_type_rules    = opts.tensor_type_rules;
     lp.photo_maker          = opts.photo_maker;
     lp.embd_dir             = opts.embd_dir;
@@ -1134,7 +1141,8 @@ int command_sd(const SdOptions & opts) {
     lp.keep_vae_on_cpu           = opts.keep_vae_on_cpu;
     lp.keep_control_net_on_cpu   = opts.keep_control_net_on_cpu;
     lp.force_sdxl_vae_conv_scale = opts.force_sdxl_vae_conv_scale;
-    lp.stream_layers             = opts.stream_layers;
+    lp.disable_prefetch          = opts.disable_prefetch;
+    lp.disable_segmented_compute = opts.disable_segmented_compute;
     lp.eager_load                = opts.eager_load;
     lp.backend                   = opts.backend;
     lp.params_backend            = opts.params_backend;

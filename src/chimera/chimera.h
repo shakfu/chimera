@@ -365,6 +365,7 @@ struct SdOptions {
     std::string taesd;             // tiny-autoencoder (fast preview decode)
     std::string clip_vision;       // CLIP-Vision encoder
     std::string llm_vision;        // LLM-Vision encoder (Qwen-Image vision)
+    std::string tokenizer;         // tokenizer.json, or main=/clip-l=/clip-g= assignments; required for PiD and Lens
     std::string tensor_type_rules; // per-tensor wtype overrides (sd's --tensor-type-rules)
     std::string photo_maker;       // PhotoMaker model file
     std::string embd_dir;          // textual-inversion / embeddings directory
@@ -433,17 +434,18 @@ struct SdOptions {
     bool  keep_vae_on_cpu           = false;
     bool  keep_control_net_on_cpu   = false;
     bool  force_sdxl_vae_conv_scale = false;
-    // Stream diffusion weights from CPU during generation (sd_cli's
-    // --stream-layers). Only engages when max_vram > 0.
-    bool  stream_layers             = false;
+    // Turn off async next-segment weight prefetch (on upstream by default),
+    // and force monolithic graphs instead of automatic graph cutting.
+    bool  disable_prefetch          = false;
+    bool  disable_segmented_compute = false;
 
     // Explicit backend-assignment specs (sd_cli's --backend /
     // --params-backend) and the automatic placement solver (--auto-fit).
     // See chimera_sd::LoadParams for the spec grammar; passed through
-    // verbatim, sd validates them.
+    // verbatim, sd validates them. auto_fit matches upstream's default.
     std::string backend;
     std::string params_backend;
-    bool  auto_fit                  = false;
+    bool  auto_fit                  = true;
 
     // Pre-load all params into the params backend at model-load time
     // instead of lazily on first use (sd_cli's --eager-load). Trades a
@@ -582,6 +584,7 @@ struct ServeOptions {
     std::string sd_t5xxl;                      // --sd-t5xxl
     std::string sd_llm;                        // --sd-llm
     std::string sd_llm_vision;                 // --sd-llm-vision
+    std::string sd_tokenizer;                  // --sd-tokenizer
     std::string sd_clip_vision;                // --sd-clip-vision
     std::string sd_taesd;                      // --sd-taesd
     std::string sd_embd_dir;                   // --sd-embd-dir
@@ -604,11 +607,12 @@ struct ServeOptions {
     bool        sd_keep_vae_on_cpu           = false;
     bool        sd_keep_control_net_on_cpu   = false;
     bool        sd_force_sdxl_vae_conv_scale = false;
-    bool        sd_stream_layers             = false; // engages only with sd_max_vram > 0
+    bool        sd_disable_prefetch          = false; // turn off async next-segment weight prefetch
+    bool        sd_disable_segmented_compute = false; // force monolithic graphs
     bool        sd_eager_load                = false; // pre-load params at load time (vs lazy on first use)
     std::string sd_backend;                           // per-module compute placement spec
     std::string sd_params_backend;                    // per-module weight-residency spec
-    bool        sd_auto_fit                  = false; // let sd derive both specs from model size + VRAM
+    bool        sd_auto_fit                  = true;  // let sd place weights by free memory (upstream default)
     std::string sd_rng;                      // empty = upstream default
     std::string sd_sampler_rng;              // empty = upstream default
     std::string sd_prediction;               // empty = upstream default

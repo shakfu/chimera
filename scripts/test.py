@@ -848,6 +848,10 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
         ("--backend", ["--backend", "diffusion=cpu,te=cpu"]),
         ("--params-backend", ["--params-backend", "te=cpu"]),
         ("--auto-fit", ["--auto-fit"]),
+        ("--no-auto-fit", ["--no-auto-fit"]),
+        ("--disable-prefetch / --disable-segmented-compute",
+         ["--disable-prefetch", "--disable-segmented-compute"]),
+        ("--tokenizer", ["--tokenizer", "main=/no/such/tokenizer.json"]),
         ("--params-backend with --offload-to-cpu",
          ["--offload-to-cpu", "--params-backend", "te=cpu"]),
     ]:
@@ -867,6 +871,8 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
     # impossible to tell apart from a placement problem. A missing model is
     # enough to discriminate: the DEBUG line below precedes the load failure.
     _V_DEBUG_LINE = "threads for model loading"
+    # Warned by upstream on every load; chimera demotes it to the -v tier.
+    _UPSTREAM_GGML_LINE = "Using upstream GGML:"
     for label, argv in [
         ("sd -v", ["sd", "-v"]),
         ("-v sd", ["-v", "sd"]),
@@ -879,6 +885,8 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
             )
             if _V_DEBUG_LINE not in err:
                 t.fail(f"{label}: no sd DEBUG line on stderr; got: {err!r}")
+            if _UPSTREAM_GGML_LINE not in err:
+                t.fail(f"{label}: -v hid the upstream-ggml notice; got: {err!r}")
 
     with maybe(rec, "sd without -v stays at warnings and above") as t:
         _rc, _out, err = run_capture(
@@ -888,8 +896,11 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
         )
         if _V_DEBUG_LINE in err:
             t.fail(f"sd leaked a DEBUG line without -v: {err!r}")
-        # The failure itself must still be reported.
-        if "not found" not in err:
+        if _UPSTREAM_GGML_LINE in err:
+            t.fail(f"sd printed the upstream-ggml notice without -v: {err!r}")
+        # sd's own ERROR line must still pass the filter. Match the strerror
+        # text, not sd's wording, which changed at master-898.
+        if "No such file or directory" not in err:
             t.fail(f"sd swallowed the load error: {err!r}")
 
 
@@ -1602,8 +1613,9 @@ def e2e_chat_cli_tests(rec: Recorder, chimera: Path) -> None:
 
     with maybe(rec, "chat persistent KV cache (recalls 'zephyrine')") as t:
         # -n 64: the 1B model often pads the recall reply with preamble.
+        # --temp 0: sampled runs refuse to repeat the "password" ~1 in 5.
         rc, out, _ = run_capture(
-            [str(chimera), "chat", "-m", str(GEN_MODEL), "-n", "64"],
+            [str(chimera), "chat", "-m", str(GEN_MODEL), "-n", "64", "--temp", "0"],
             timeout=120,
             stdin=b"my secret password is zephyrine.\nrepeat my secret password exactly.\n/exit\n",
         )

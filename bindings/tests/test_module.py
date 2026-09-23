@@ -83,6 +83,14 @@ def test_llama_options_roundtrip(chimera_mod):
     assert o.ignore_eos is True
     assert o.samplers == "top_k;top_p;temperature"
     assert o.reasoning_control is True
+    o.videos = ["/clip.mp4"]
+    o.video_fps = 2.0
+    o.video_timestamp_ms = 0
+    o.ffmpeg_dir = "/opt/ffmpeg"
+    o.load_mode = "dio"
+    assert o.videos == ["/clip.mp4"]
+    assert o.video_fps == pytest.approx(2.0)
+    assert (o.video_timestamp_ms, o.ffmpeg_dir, o.load_mode) == (0, "/opt/ffmpeg", "dio")
 
 
 def test_embed_options_roundtrip(chimera_mod):
@@ -91,7 +99,10 @@ def test_embed_options_roundtrip(chimera_mod):
     o.pooling = "mean"
     o.normalize = True
     o.n_batch = 64
-    assert (o.model, o.pooling, o.normalize, o.n_batch) == ("/emb.gguf", "mean", True, 64)
+    o.load_mode = "mmap"
+    assert (o.model, o.pooling, o.normalize, o.n_batch, o.load_mode) == (
+        "/emb.gguf", "mean", True, 64, "mmap",
+    )
 
 
 def test_serve_options_roundtrip(chimera_mod):
@@ -103,13 +114,21 @@ def test_serve_options_roundtrip(chimera_mod):
     o.api_key = "secret"
     o.http_timeout = 120
     o.sse_ping_interval = 15
-    o.sd_stream_layers = True
+    assert o.sd_auto_fit is True  # upstream default
+    o.sd_disable_prefetch = True
+    o.sd_auto_fit = False
     o.sd_vae_format = "flux2"
+    o.sd_backend = "diffusion=cuda0,te=cpu"
+    o.sd_params_backend = "te=cpu"
+    o.sd_eager_load = True
     assert (o.host, o.port, o.n_ctx, o.embedding, o.api_key) == (
         "127.0.0.1", 8123, 2048, True, "secret",
     )
     assert (o.http_timeout, o.sse_ping_interval) == (120, 15)
-    assert (o.sd_stream_layers, o.sd_vae_format) == (True, "flux2")
+    assert (o.sd_disable_prefetch, o.sd_auto_fit, o.sd_vae_format) == (True, False, "flux2")
+    assert (o.sd_backend, o.sd_params_backend, o.sd_eager_load) == (
+        "diffusion=cuda0,te=cpu", "te=cpu", True,
+    )
 
 
 def test_sd_options_roundtrip(chimera_mod):
@@ -117,12 +136,22 @@ def test_sd_options_roundtrip(chimera_mod):
     if not hasattr(chimera_mod, "SdOptions"):
         pytest.skip("module built without SD modality")
     o = chimera_mod.SdOptions()
+    assert o.auto_fit is True  # upstream default
     o.max_vram = 8.0
-    o.stream_layers = True
+    o.disable_segmented_compute = True
+    o.tokenizer = "tokenizer.json"
     o.vae_format = "sd3"
     assert o.max_vram == pytest.approx(8.0)
-    assert o.stream_layers is True
+    assert o.disable_segmented_compute is True
+    assert o.tokenizer == "tokenizer.json"
     assert o.vae_format == "sd3"
+    o.backend = "cuda0"
+    o.params_backend = "te=cpu"
+    o.eager_load = True
+    o.ref_image_args = "scale=1.0"
+    assert (o.backend, o.params_backend, o.eager_load, o.ref_image_args) == (
+        "cuda0", "te=cpu", True, "scale=1.0",
+    )
 
 
 def test_options_handle_is_live_reference(chimera_mod):

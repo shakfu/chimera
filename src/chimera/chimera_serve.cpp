@@ -709,6 +709,7 @@ int command_serve(const ServeOptions & opts) {
         slp.t5xxl                      = opts.sd_t5xxl;
         slp.llm                        = opts.sd_llm;
         slp.llm_vision                 = opts.sd_llm_vision;
+        slp.tokenizer                  = opts.sd_tokenizer;
         slp.clip_vision                = opts.sd_clip_vision;
         slp.taesd                      = opts.sd_taesd;
         slp.embd_dir                   = opts.sd_embd_dir;
@@ -730,7 +731,8 @@ int command_serve(const ServeOptions & opts) {
         slp.keep_vae_on_cpu            = opts.sd_keep_vae_on_cpu;
         slp.keep_control_net_on_cpu    = opts.sd_keep_control_net_on_cpu;
         slp.force_sdxl_vae_conv_scale  = opts.sd_force_sdxl_vae_conv_scale;
-        slp.stream_layers              = opts.sd_stream_layers;
+        slp.disable_prefetch           = opts.sd_disable_prefetch;
+        slp.disable_segmented_compute  = opts.sd_disable_segmented_compute;
         slp.eager_load                 = opts.sd_eager_load;
         slp.backend                    = opts.sd_backend;
         slp.params_backend             = opts.sd_params_backend;

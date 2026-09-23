@@ -8,20 +8,18 @@ aborts the process, or a compile flag that has to be set inside upstream's own
 
 ## How they are applied
 
-- `ggml-*.patch` go to **all three** upstreams (llama.cpp, whisper.cpp,
-  stable-diffusion.cpp); `<project>-*.patch` go only to the matching one.
+- `ggml-*.patch` go to every ggml tree that is compiled: llama.cpp's and
+  whisper.cpp's. stable-diffusion.cpp compiles llama.cpp's tree in shared-ggml
+  mode (`SD_GGML_SOURCE_DIR`), so its vendored ggml gets them only under
+  `SD_USE_VENDORED_GGML=1`. `<project>-*.patch` go only to the matching tree.
 - Applied with `git apply -p1` from the tree root, in sorted filename order.
   Where two patches touch the same file, the later one's hunk offsets already
   account for the earlier one.
-- Idempotent and self-disabling. `git apply --check` decides; a patch that is
-  already applied, or that no longer applies (upstream landed an equivalent fix,
-  or refactored the context away), is logged and skipped, never fatal. A version
-  bump therefore cannot break the build on a stale patch — but it can silently
-  stop fixing something, so check the build log after every bump.
-- For stable-diffusion.cpp they run *after* `_sync_ggml_abi()`, so `ggml-*.patch`
-  land on whichever ggml is actually compiled. Since that sync copies llama.cpp's
-  already-patched ggml over SD's, the ggml patches normally register as
-  already-applied on the SD pass.
+- An already-applied patch is skipped. A patch that no longer applies fails the
+  build and prints git's reason. Rebase it, or delete it if upstream fixed the
+  defect, and record which under "Retired patches". A skipped patch ships the
+  build without its fix; chimera 0.3.0 and 0.3.1 shipped without the Metal MSL
+  pin this way.
 
 Trees are wiped and re-fetched by `make reset`, so nothing here is persistent
 state — the `.patch` files are the single source of truth, and double as the
@@ -29,47 +27,31 @@ payload for the corresponding upstream PR.
 
 ## Current patches
 
-### `stable-diffusion.cpp-conditioner-compute-failure.patch`
-
-A failed text-encoder graph aborted the process. `GGMLRunner::compute()` reports
-failure as an empty `std::optional`, `take_or_empty()` flattens that to an empty
-tensor, and the conditioners `GGML_ASSERT(!hidden_states.empty())` on the result
-— so any budget that pushes the text encoder through the graph-cut segmented
-path (e.g. `--max-vram 3.5`) killed `chimera sd`, and killed the whole server on
-a `chimera serve` image route rather than failing one request. Several of
-`compute()`'s failure paths also log nothing, so the abort arrived with no cause.
-The patch logs the dropped failure and propagates it through the LLM
-conditioner's existing error channel, so generation fails cleanly.
-
-### `stable-diffusion.cpp-graph-cut-budget-clamp.patch`
-
-`--max-vram` / `--sd-max-vram` budgets ignored VRAM that was already in use. The
-graph-cut planner clamps its budget to the VRAM actually free at plan time, but
-only under `--stream-layers`. Modules are budgeted once at init from *free* VRAM
-and a params storage block is only reclaimed when its tensors are disk-backed, so
-by the time the diffusion model plans its graph the text encoder's weights are
-still resident and several GiB of the init-time budget no longer exist. The patch
-ungates the clamp, so each module plans against what is genuinely free.
-
-### `stable-diffusion.cpp-msvc-bigobj.patch`
-
-`src/stable-diffusion.cpp` has grown past the COFF 65,279-section limit
-(`error C1128`). The flag has to go inside upstream's own `if (MSVC)` block:
-passing `-DCMAKE_CXX_FLAGS=/bigobj` on the command line pre-seeds the cache so
-CMake's platform init never runs, which *replaces* the MSVC defaults instead of
-appending and silently drops `/EHsc` from every SD translation unit.
-
-### `ggml-metal-pin-msl-version.patch` / `ggml-metal-pin-msl-version-perkind.patch`
+### `ggml-metal-pin-msl-version-set-lang.patch`
 
 Metal derives the MSL version from the SDK the *host process* linked against
 whenever `MTLCompileOptions.languageVersion` is unset, so shader compilation
 depended on the binary rather than on the machine. Below MSL 3.1 the embedded
 library fails to compile outright (`no matching constructor for ... 'threadgroup
 metal::half4x4[512]'`) and the Metal backend never initializes; below 3.1 the
-bf16 kernels are also `#undef`'d while `props.has_bfloat` stays true. Both
-variants install the same `@available` ladder (3.2 on macOS 15+, 3.1 on 14+, 3.0
-on 13+, deliberately stopping below 4.0 so the Metal 4 tensor kernels stay off);
-they differ only in the surrounding context. `-perkind` matches trees that have
-llama.cpp's per-kind Metal library split (llama.cpp `v0.3.0`), the plain one
-matches trees that have not (whisper.cpp `v1.9.2`). Exactly one applies per tree;
-the other self-disables.
+bf16 kernels are also `#undef`'d while `props.has_bfloat` stays true. The patch
+pins an `@available` ladder (3.2 on macOS 15+, 3.1 on 14+, 3.0 on 13+) inside
+`ggml_metal_compile_options_set_lang()`.
+
+It stops below 4.0. llama.cpp v0.4.0+ otherwise requests MSL 4.0 on
+tensor-capable GPUs (M5/M6/A19/A20), and the MSL 4.0 tensor kernels blank
+stable-diffusion output. It matches llama.cpp v0.4.1 and whisper.cpp v1.9.4.
+
+## Retired patches
+
+The three stable-diffusion.cpp patches were dropped at `master-898-2bb7294`,
+each fixed upstream. The two older Metal patches were replaced.
+
+- `conditioner-compute-failure`: `LLMEmbedder` returns an empty condition
+  instead of asserting, and the pipeline fails the generation.
+- `graph-cut-budget-clamp`: segmentation is now planned per run against live
+  free VRAM ([#1878](https://github.com/leejet/stable-diffusion.cpp/pull/1878)).
+- `msvc-bigobj`: upstream adds `/bigobj` to the `stable-diffusion` target.
+- `ggml-metal-pin-msl-version{,-perkind}.patch`: stopped matching at llama.cpp
+  v0.4.0 and whisper.cpp v1.9.4, which moved both compile sites into
+  `ggml_metal_compile_options_set_lang()`. Replaced by `-set-lang`.
