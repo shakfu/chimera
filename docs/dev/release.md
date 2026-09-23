@@ -21,6 +21,8 @@ git push origin 0.2.4
 
 That one push fans out to both workflows. Each can also be re-run manually via `workflow_dispatch` with a `tag` input (the tag must already exist on origin -- `release-gpu.yml`'s `preflight` job verifies this before any expensive build starts, failing fast with a copy-pasteable fix instead of an opaque checkout error).
 
+To test the workflows before tagging, dispatch with `tag` empty on the branch to test. The build legs run, archives are named `chimera-dev-<sha7>-<target>.<ext>` and uploaded to the run, and `publish` is skipped.
+
 ## How the two workflows share one release
 
 `release.yml` is fast (CPU/Metal builds finish in minutes) and **owns the release body**: its `publish` job extracts the version's section from `CHANGELOG.md` via `scripts/release_notes.py` and sets it as the release notes (falling back to GitHub's auto-generated notes when no section is found).

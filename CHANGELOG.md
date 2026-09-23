@@ -4,6 +4,10 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Changed
+
+- **`release.yml` and `release-gpu.yml` accept a tagless `workflow_dispatch`.** An empty `tag` builds the dispatched branch as `chimera-dev-<sha7>-*` artifacts and skips `publish`, so the workflows can be tested before tagging.
+
 ## [0.4.0]
 
 ### Added
@@ -20,7 +24,7 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 - **Breaking: `auto_fit` now defaults to on**, matching upstream's new default. It places weights on the compute GPU, RAM, another GPU or disk by free memory. A non-empty params-backend spec disables it, so `--offload-to-cpu` and `--params-backend` behave as before.
 
-- **A source patch that no longer applies now fails `make deps`** with git's reason, instead of logging "no longer applies" and building without the fix. That is how 0.3.0 and 0.3.1 lost the Metal MSL pin (see Fixed). `ggml-*.patch` no longer go to stable-diffusion.cpp's vendored ggml in shared-ggml mode, since that tree is not compiled. Tests: `tests/test_manage_patches.py`.
+- **A source patch that no longer applies now fails `make deps`** with git's reason, instead of logging "no longer applies" and building without the fix. That is how 0.3.0 and 0.3.1 lost the Metal MSL pin (see Fixed). `ggml-*.patch` no longer go to stable-diffusion.cpp's vendored ggml: shared-ggml mode does not compile it, and vendored mode compiles leejet's fork, whose layout they do not match. Tests: `tests/test_manage_patches.py`.
 
 - **sd's per-load "Using upstream GGML" warning prints only with `-v`.** upstream logs it at WARN on every model load of an `SD_USE_UPSTREAM_GGML` build, and chimera always builds that way. It is still captured in the server's log ring. A default run no longer reports that FP8 weights are converted to F16. INT8 ConvRot files still fail with their own error.
 

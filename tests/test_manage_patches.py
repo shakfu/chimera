@@ -61,17 +61,17 @@ def test_non_matching_patch_fails_the_build(builder, caplog):
     assert (builder.src_dir / "src.c").read_text() == "int a;\nint moved;\nint c;\n"
 
 
-@pytest.mark.parametrize("vendored, expect_ggml", [("0", False), ("1", True)])
-def test_sd_gets_ggml_patches_only_when_compiling_its_own_ggml(
-    tmp_path, monkeypatch, vendored, expect_ggml
-):
+@pytest.mark.parametrize("vendored", ["0", "1"])
+def test_sd_never_gets_ggml_patches(tmp_path, monkeypatch, vendored):
+    # Shared mode compiles llama.cpp's patched tree; vendored mode compiles
+    # leejet's fork, which upstream-ggml patches do not match.
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SD_USE_VENDORED_GGML", vendored)
-    seen: list[str] = []
     monkeypatch.setattr(manage.GgmlBuilder, "_apply_patch", lambda self, p: seen.append(p.name))
+    seen: list[str] = []
     manage.StableDiffusionCppBuilder()._apply_source_patches()
-    assert any(n.startswith("ggml-") for n in seen) is expect_ggml
-    assert all(n.startswith(("ggml-", "stable-diffusion.cpp-")) for n in seen)
+    assert list((Path(manage.__file__).parent / "patches").glob("ggml-*.patch"))  # not vacuous
+    assert not any(n.startswith("ggml-") for n in seen)
 
 
 def test_other_trees_always_get_ggml_patches(tmp_path, monkeypatch):

@@ -8,10 +8,12 @@ aborts the process, or a compile flag that has to be set inside upstream's own
 
 ## How they are applied
 
-- `ggml-*.patch` go to every ggml tree that is compiled: llama.cpp's and
-  whisper.cpp's. stable-diffusion.cpp compiles llama.cpp's tree in shared-ggml
-  mode (`SD_GGML_SOURCE_DIR`), so its vendored ggml gets them only under
-  `SD_USE_VENDORED_GGML=1`. `<project>-*.patch` go only to the matching tree.
+- `ggml-*.patch` go to llama.cpp's and whisper.cpp's trees, which vendor
+  upstream ggml. Not to stable-diffusion.cpp: shared-ggml mode compiles
+  llama.cpp's patched tree (`SD_GGML_SOURCE_DIR`), and `SD_USE_VENDORED_GGML=1`
+  compiles leejet's fork, whose layout they do not match. A vendored Metal build
+  therefore ships sd.cpp without the MSL pin. `<project>-*.patch` go only to the
+  matching tree.
 - Applied with `git apply -p1` from the tree root, in sorted filename order.
   Where two patches touch the same file, the later one's hunk offsets already
   account for the earlier one.

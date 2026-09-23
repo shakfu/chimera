@@ -591,8 +591,8 @@ class GgmlBuilder(Builder):
     def get_backend_cmake_options(self) -> dict[str, Any]:
         raise NotImplementedError
 
-    def compiles_own_ggml(self) -> bool:
-        """True when this project's own ggml tree is compiled, so ggml-*.patch apply to it."""
+    def takes_ggml_patches(self) -> bool:
+        """True when ggml-*.patch apply to this tree; they target upstream ggml's layout."""
         return True
 
     def _apply_source_patches(self) -> None:
@@ -612,7 +612,7 @@ class GgmlBuilder(Builder):
         patch_dir = Path(__file__).resolve().parent / "patches"
         if not patch_dir.exists():
             return
-        ggml_patches = sorted(patch_dir.glob("ggml-*.patch")) if self.compiles_own_ggml() else []
+        ggml_patches = sorted(patch_dir.glob("ggml-*.patch")) if self.takes_ggml_patches() else []
         patches = ggml_patches + sorted(patch_dir.glob(f"{self.name}-*.patch"))
         for patch in patches:
             self._apply_patch(patch)
@@ -1277,9 +1277,10 @@ class StableDiffusionCppBuilder(GgmlBuilder):
     def uses_shared_ggml() -> bool:
         return os.environ.get("SD_USE_VENDORED_GGML") == "0"
 
-    def compiles_own_ggml(self) -> bool:
-        # Shared mode compiles llama.cpp's tree, which LlamaCppBuilder patched.
-        return not self.uses_shared_ggml()
+    def takes_ggml_patches(self) -> bool:
+        # Shared mode compiles llama.cpp's already-patched tree. Vendored mode
+        # compiles leejet's fork, which upstream-ggml patches do not match.
+        return False
 
     def get_backend_cmake_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {}

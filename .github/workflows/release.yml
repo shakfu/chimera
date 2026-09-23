@@ -11,8 +11,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g. 0.1.2 or v0.1.2). Must already exist.'
-        required: true
+        description: 'Tag to release (e.g. 0.1.2 or v0.1.2). Must already exist. Leave empty for a test build of the selected branch: artifacts are uploaded to the run, nothing is published.'
+        required: false
+        default: ''
+
+# Empty on a tagless dispatch: builds are versioned `dev-<sha7>` and publish is skipped.
+env:
+  TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
 
 jobs:
   build:
@@ -50,8 +55,8 @@ jobs:
       # the available tags helps when the user mistyped (`0.17` vs
       # `0.1.7`, or forgot the `v` prefix).
       - name: verify tag exists on origin
+        if: env.TAG != ''
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
           TAG="${TAG#refs/tags/}"   # tolerate either bare name or refspec
           REMOTE="${{ github.server_url }}/${{ github.repository }}"
           echo "Verifying tag '$TAG' on $REMOTE..."
@@ -112,8 +117,8 @@ jobs:
         # produced; the GitHub release UI already displays a SHA-256 for
         # every uploaded asset.
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          VERSION="${TAG#v}"
+          VERSION="${TAG:-dev-${GITHUB_SHA::7}}"
+          VERSION="${VERSION#v}"
           STEM="chimera-${VERSION}-${{ matrix.target }}"
 
           mkdir -p dist stage
@@ -170,6 +175,7 @@ jobs:
           if-no-files-found: error
 
   publish:
+    if: inputs.tag || github.ref_type == 'tag'
     needs: build
     # Strict: only publish when every matrix leg succeeded. A failure on
     # any platform (including Windows) aborts the release; no partial
@@ -199,7 +205,6 @@ jobs:
         # to use (release body falls back to GitHub's auto-generated
         # commit-list notes).
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
           if python3 scripts/release_notes.py "${VERSION}"; then
             echo "FOUND=1" >> "$GITHUB_ENV"
@@ -212,7 +217,7 @@ jobs:
       - name: create / update GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ env.TAG }}
           # Use our extracted CHANGELOG section when we found one; let
           # action-gh-release auto-generate notes otherwise.
           body_path: ${{ env.FOUND == '1' && 'release-notes.md' || '' }}
