@@ -30,7 +30,7 @@ jobs:
           - os: macos-14
             backend: metal
             target: macos-arm64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             backend: cpu
             target: linux-x86_64
           - os: windows-latest
