@@ -899,8 +899,9 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
         if _UPSTREAM_GGML_LINE in err:
             t.fail(f"sd printed the upstream-ggml notice without -v: {err!r}")
         # sd's own ERROR line must still pass the filter. Match the strerror
-        # text, not sd's wording, which changed at master-898.
-        if "No such file or directory" not in err:
+        # text, not sd's wording, which changed at master-898. POSIX, Windows.
+        if not any(s in err for s in ("No such file or directory",
+                                      "cannot find the path specified")):
             t.fail(f"sd swallowed the load error: {err!r}")
 
 
