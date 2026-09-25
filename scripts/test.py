@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import http.client
 import io
 import json
 import os
@@ -2016,6 +2017,84 @@ def e2e_slots_lora_tests(rec: Recorder, chimera: Path) -> None:
 
 
 # ============================================================================
+# End-to-end: OpenAI-shape token counting + resumable stream sessions
+# ============================================================================
+
+
+def e2e_stream_session_tests(rec: Recorder, chimera: Path) -> None:
+    names = [
+        "POST /v1/chat/completions/input_tokens -> input_tokens > 0",
+        "POST /v1/responses/input_tokens -> input_tokens > 0",
+        "POST /v1/streams/lookup finds a live X-Conversation-Id stream",
+        "DELETE /v1/stream -> 204 and ends the X-Conversation-Id stream",
+    ]
+    if not GEN_MODEL.is_file():
+        for n in names:
+            rec.skip(n, f"missing {GEN_MODEL}")
+        return
+    if not any(rec.matches(n) for n in names):
+        return
+    try:
+        with chimera_serve(chimera, ["-m", str(GEN_MODEL)]) as srv:
+            for name, path, body in [
+                (names[0], "/v1/chat/completions/input_tokens",
+                 {"messages": [{"role": "user", "content": "Hello world"}]}),
+                (names[1], "/v1/responses/input_tokens", {"input": "Hello world"}),
+            ]:
+                with maybe(rec, name) as t:
+                    r = http_post_json(f"{srv.base_url}{path}", body)
+                    n_tok = r.json().get("input_tokens", 0) if r.status == 200 else 0
+                    if n_tok <= 0:
+                        t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+
+            if not (rec.matches(names[2]) or rec.matches(names[3])):
+                return
+            # A request tagged with X-Conversation-Id is not cancelled by client
+            # disconnect, only by DELETE /v1/stream. ignore_eos keeps it running
+            # (~100 s on CPU) so an unbound DELETE shows up as a slow drain.
+            conv = "chimera-test-" + uuid.uuid4().hex
+            c = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=180)
+            try:
+                c.request(
+                    "POST",
+                    "/v1/chat/completions",
+                    json.dumps({
+                        "messages": [{"role": "user", "content": "Count to 5000."}],
+                        "max_tokens": 4000,
+                        "stream": True,
+                        "ignore_eos": True,
+                    }),
+                    {"Content-Type": "application/json", "X-Conversation-Id": conv},
+                )
+                resp = c.getresponse()
+                resp.read(200)  # generation has started
+
+                with maybe(rec, names[2]) as t:
+                    r = http_post_json(
+                        f"{srv.base_url}/v1/streams/lookup", {"conversation_ids": [conv]}
+                    )
+                    ids = [e.get("conversation_id") for e in r.json()] if r.status == 200 else []
+                    if ids != [conv]:
+                        t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+
+                with maybe(rec, names[3]) as t:
+                    req = urllib.request.Request(
+                        f"{srv.base_url}/v1/stream?conv_id={conv}", method="DELETE"
+                    )
+                    r = _do_request(req, 10)
+                    t0 = time.monotonic()
+                    resp.read()
+                    drain = time.monotonic() - t0
+                    if r.status != 204 or drain > 10:
+                        t.fail(f"HTTP {r.status}, stream drained in {drain:.1f}s")
+            finally:
+                c.close()
+    except RuntimeError as e:
+        for n in names:
+            rec.fail(n, 0.0, str(e))
+
+
+# ============================================================================
 # End-to-end: POST /v1/audio/detect-language
 # ============================================================================
 
@@ -2563,6 +2642,7 @@ _SECTIONS = [
     ("chat_id_header", e2e_chat_id_header_tests),
     ("chats_endpoints", e2e_chats_endpoints_tests),
     ("slots_lora", e2e_slots_lora_tests),
+    ("stream_session", e2e_stream_session_tests),
     ("detect_language", e2e_detect_language_test),
     ("audio_input_validation", e2e_audio_input_validation),
     ("image_serve_enum_validators", e2e_image_serve_enum_validators),

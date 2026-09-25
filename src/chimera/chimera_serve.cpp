@@ -20,6 +20,11 @@
 //   POST /v1/embeddings                 OpenAI Embeddings (only when --embeddings)
 //   POST /v1/messages                   Anthropic Messages API compat
 //   POST /v1/messages/count_tokens      Anthropic token counting
+//   POST /v1/chat/completions/input_tokens
+//        + /v1/responses/input_tokens   OpenAI-shape token counting
+//   GET, DELETE /v1/stream
+//        + POST /v1/streams/lookup      resumable SSE: replay, cancel, and find a
+//                                       stream started with X-Conversation-Id
 //   POST /infill                        fill-in-the-middle for code models
 //   POST /tokenize, /detokenize         vocab helpers
 //   POST /apply-template                render the chat template against messages
@@ -111,6 +116,11 @@
 //       POST /v1/messages                        server_routes.post_anthropic_messages
 //       POST /v1/messages/count_tokens           server_routes.post_anthropic_count_tokens
 //       POST /v1/responses                       server_routes.post_responses_oai
+//       POST /v1/chat/completions/input_tokens   server_routes.post_chat_completions_tok
+//       POST /v1/responses/input_tokens          server_routes.post_responses_tok_oai
+//       GET  /v1/stream, DELETE /v1/stream       server_stream_make_{get,delete}_handler
+//       POST /v1/streams/lookup                  server_stream_make_lookup_handler
+//                                                (resumable SSE, opt in via X-Conversation-Id)
 //       POST /infill                             server_routes.post_infill
 //       POST /tokenize, /detokenize              server_routes.post_{tokenize,detokenize}
 //       POST /apply-template                     server_routes.post_apply_template
@@ -186,8 +196,6 @@
 //                                       a fundamentally different pipeline
 //                                       (LLM-with-audio-tokens vs dedicated ASR).
 //   POST /embedding, /embeddings        non-/v1 embeddings variants — redundant.
-//   POST /rerank, /v1/rerank            document reranking via cross-encoder
-//                                       models. Niche; bind on request.
 //   POST /props                         mutating server props at runtime
 //                                       conflicts with chimera serve's
 //                                       "CLI is the config" stance. Read
@@ -255,6 +263,7 @@
 
 #include "server-context.h"
 #include "server-http.h"
+#include "server-stream.h"
 
 #include <nlohmann/json.hpp>
 
@@ -442,7 +451,7 @@ common_params build_common_params(const ServeOptions & opts) {
     postprocess_cpu_params(params.cpuparams, nullptr);
     postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
     params.n_parallel           = opts.parallel;
-    params.hostname             = opts.host;
+    params.hostnames            = {opts.host};
     params.port                 = opts.port;
     params.embedding            = opts.embedding;
     // HTTP timeouts. Leave the upstream defaults (read/write 3600s, SSE
@@ -968,6 +977,12 @@ int command_serve(const ServeOptions & opts) {
     // request JSON, so binding the upstream control handler is the whole
     // integration. Returns an error if the flag was not armed for that id.
     ctx_http.post("/v1/chat/completions/control", ex_wrapper(routes.post_control));
+    // Resumable streams. A request carrying X-Conversation-Id (the embedded
+    // web UI sends it) is cancelled only via DELETE /v1/stream, not by
+    // client disconnect, so these routes must be bound whenever it can arrive.
+    ctx_http.get ("/v1/stream",         ex_wrapper(server_stream_make_get_handler()));
+    ctx_http.post("/v1/streams/lookup", ex_wrapper(server_stream_make_lookup_handler()));
+    ctx_http.del ("/v1/stream",         ex_wrapper(server_stream_make_delete_handler()));
     ctx_http.post("/v1/completions",      ex_wrapper(routes.post_completions_oai));
     // When --enable-embeddings was passed, route /v1/embeddings to the
     // dedicated embedding context's handler instead of the primary LLM.
@@ -985,6 +1000,10 @@ int command_serve(const ServeOptions & opts) {
     // write to the chats table; the Responses API itself is layered on
     // top of that and inherits the same persistence.
     ctx_http.post("/v1/responses",        ex_wrapper(routes.post_responses_oai));
+
+    // Token counting for the OpenAI shapes, matching the Anthropic route below.
+    ctx_http.post("/v1/chat/completions/input_tokens", ex_wrapper(routes.post_chat_completions_tok));
+    ctx_http.post("/v1/responses/input_tokens",        ex_wrapper(routes.post_responses_tok_oai));
 
     // Anthropic Messages API compat — lets the Anthropic Python SDK and
     // claude-code-shaped clients point at chimera serve unchanged.
@@ -1116,6 +1135,8 @@ int command_serve(const ServeOptions & opts) {
     }
 
     auto clean_up = [&]() {
+        // Finalizes live stream sessions and wakes blocked GET /v1/stream readers.
+        server_stream_session_manager_stop();
         ctx_http.stop();
         ctx_server.terminate();
     };
@@ -1131,6 +1152,8 @@ int command_serve(const ServeOptions & opts) {
                       ctx_server.terminate();
                   })));
 
+    server_stream_session_manager_start();
+
     // Start HTTP before loading the model so /health responds early.
     if (!ctx_http.start()) {
         clean_up();
@@ -1141,9 +1164,7 @@ int command_serve(const ServeOptions & opts) {
     if (!ctx_server.load_model(params)) {
         std::cerr << "chimera serve: failed to load model: " << opts.model << "\n";
         clean_up();
-        if (ctx_http.thread.joinable()) {
-            ctx_http.thread.join();
-        }
+        ctx_http.join();
         return static_cast<int>(ExitCode::Load);
     }
 
@@ -1165,7 +1186,9 @@ int command_serve(const ServeOptions & opts) {
     };
     install_signal_handlers();
 
-    std::cout << "chimera serve: listening on " << ctx_http.listening_address << "\n"
+    std::cout << "chimera serve: listening on";
+    for (const auto & addr : ctx_http.listening_addresses) std::cout << " " << addr;
+    std::cout << "\n"
               << "  LLM:   /v1/chat/completions  /v1/completions  /v1/embeddings\n"
               << "  meta:  /v1/models  /health  /metrics  /props  /slots  /lora-adapters\n"
               << "  tools: /infill  /tokenize  /detokenize  /apply-template\n"
@@ -1220,9 +1243,7 @@ int command_serve(const ServeOptions & opts) {
     ctx_server.start_loop();
 
     clean_up();
-    if (ctx_http.thread.joinable()) {
-        ctx_http.thread.join();
-    }
+    ctx_http.join();
     // Secondary loops were signaled to terminate in the shutdown handler;
     // wait for them to actually return before tearing down their owning
     // unique_ptrs.
