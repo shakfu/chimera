@@ -4,9 +4,23 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.4.1]
+
+### Added
+
+- **`serve` binds `POST /v1/chat/completions/input_tokens` and `/v1/responses/input_tokens`**, the OpenAI-shape counterparts of `/v1/messages/count_tokens`.
+
 ### Changed
 
+- **Update llama.cpp to b11146 (v0.5.0)** (from v0.4.1). Upstream's HTTP server now listens on a list of addresses. `--host` still takes one.
+
 - **`release.yml` and `release-gpu.yml` accept a tagless `workflow_dispatch`.** An empty `tag` builds the dispatched branch as `chimera-dev-<sha7>-*` artifacts and skips `publish`, so the workflows can be tested before tagging.
+
+### Fixed
+
+- **The embedded web UI's Stop button now stops generation.** The UI tags each chat stream with `X-Conversation-Id`, which makes upstream keep the generation running after client disconnect and cancel it only through `DELETE /v1/stream`. `serve` did not bind that route, so Stop got a 404 and generation ran to `max_tokens`. `serve` now binds `GET`/`DELETE /v1/stream` and `POST /v1/streams/lookup`. Tagged streams still survive disconnect by design, so a reloaded tab can reattach.
+
+- **SIGTERM no longer hangs `serve` while a tagged stream is running.** Shutdown finalized stream sessions without cancelling them. The request's HTTP worker then waited for results from the stopped task loop, and exit required a second signal. `scripts/patches/llama.cpp-stream-cancel-on-shutdown.patch` cancels them first; see `scripts/patches/README.md`.
 
 ## [0.4.0]
 

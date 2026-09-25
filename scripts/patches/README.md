@@ -44,6 +44,18 @@ It stops below 4.0. llama.cpp v0.4.0+ otherwise requests MSL 4.0 on
 tensor-capable GPUs (M5/M6/A19/A20), and the MSL 4.0 tensor kernels blank
 stable-diffusion output. It matches llama.cpp v0.4.1 and whisper.cpp v1.9.4.
 
+### `llama.cpp-stream-cancel-on-shutdown.patch`
+
+A request with `X-Conversation-Id` survives client disconnect: after the
+connection ends, its HTTP worker keeps draining generation results into the
+session. That drain stops only when the session is cancelled.
+`stream_session_manager::stop_gc()` finalized sessions at shutdown but never
+cancelled them. The task loop had already exited, so no result arrived and
+`ctx_http.join()` blocked until a second signal. The patch cancels each
+session before finalizing it. Upstream `llama-server` shuts down in the same
+order and hangs the same way (reproduced on b11146). Matches llama.cpp b11146.
+Upstream PR brief: `llama.cpp-stream-cancel-on-shutdown.md`.
+
 ## Retired patches
 
 The three stable-diffusion.cpp patches were dropped at `master-898-2bb7294`,

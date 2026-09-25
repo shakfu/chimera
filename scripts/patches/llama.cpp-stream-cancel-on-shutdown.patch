@@ -1,0 +1,21 @@
+diff --git a/tools/server/server-stream.cpp b/tools/server/server-stream.cpp
+index f6b9b8a..99f7447 100644
+--- a/tools/server/server-stream.cpp
++++ b/tools/server/server-stream.cpp
+@@ -338,7 +338,7 @@ void stream_session_manager::stop_gc() {
+             gc_thread.join();
+         }
+     }
+-    // finalize all live sessions so no reader ever hangs
++    // cancel and finalize all live sessions, so no reader or detached producer ever hangs
+     std::vector<stream_session_ptr> snapshot;
+     {
+         std::unique_lock<std::shared_mutex> lock(map_mu);
+@@ -349,6 +349,7 @@ void stream_session_manager::stop_gc() {
+         sessions.clear();
+     }
+     for (auto & s : snapshot) {
++        s->cancel();
+         s->finalize();
+     }
+ }

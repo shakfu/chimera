@@ -488,6 +488,7 @@ class ServeHandle:
     base_url: str
     port: int
     log_path: Path
+    proc: subprocess.Popen
 
 
 @contextlib.contextmanager
@@ -564,7 +565,7 @@ def chimera_serve(
                 f"(log tail: {_tail(log_path, 10)!r})"
             )
 
-        yield ServeHandle(base_url=base, port=port, log_path=log_path)
+        yield ServeHandle(base_url=base, port=port, log_path=log_path, proc=proc)
 
     finally:
         if proc.poll() is None:
@@ -2027,6 +2028,7 @@ def e2e_stream_session_tests(rec: Recorder, chimera: Path) -> None:
         "POST /v1/responses/input_tokens -> input_tokens > 0",
         "POST /v1/streams/lookup finds a live X-Conversation-Id stream",
         "DELETE /v1/stream -> 204 and ends the X-Conversation-Id stream",
+        "SIGTERM exits serve during an X-Conversation-Id stream",
     ]
     if not GEN_MODEL.is_file():
         for n in names:
@@ -2047,51 +2049,71 @@ def e2e_stream_session_tests(rec: Recorder, chimera: Path) -> None:
                     if n_tok <= 0:
                         t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
 
-            if not (rec.matches(names[2]) or rec.matches(names[3])):
-                return
-            # A request tagged with X-Conversation-Id is not cancelled by client
-            # disconnect, only by DELETE /v1/stream. ignore_eos keeps it running
-            # (~100 s on CPU) so an unbound DELETE shows up as a slow drain.
-            conv = "chimera-test-" + uuid.uuid4().hex
-            c = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=180)
-            try:
-                c.request(
-                    "POST",
-                    "/v1/chat/completions",
-                    json.dumps({
-                        "messages": [{"role": "user", "content": "Count to 5000."}],
-                        "max_tokens": 4000,
-                        "stream": True,
-                        "ignore_eos": True,
-                    }),
-                    {"Content-Type": "application/json", "X-Conversation-Id": conv},
-                )
-                resp = c.getresponse()
-                resp.read(200)  # generation has started
+            if rec.matches(names[2]) or rec.matches(names[3]):
+                conv = "chimera-test-" + uuid.uuid4().hex
+                c, resp = _start_conv_stream(srv.port, conv)
+                try:
+                    with maybe(rec, names[2]) as t:
+                        r = http_post_json(
+                            f"{srv.base_url}/v1/streams/lookup", {"conversation_ids": [conv]}
+                        )
+                        ids = [e.get("conversation_id") for e in r.json()] if r.status == 200 else []
+                        if ids != [conv]:
+                            t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
 
-                with maybe(rec, names[2]) as t:
-                    r = http_post_json(
-                        f"{srv.base_url}/v1/streams/lookup", {"conversation_ids": [conv]}
-                    )
-                    ids = [e.get("conversation_id") for e in r.json()] if r.status == 200 else []
-                    if ids != [conv]:
-                        t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+                    with maybe(rec, names[3]) as t:
+                        req = urllib.request.Request(
+                            f"{srv.base_url}/v1/stream?conv_id={conv}", method="DELETE"
+                        )
+                        r = _do_request(req, 10)
+                        t0 = time.monotonic()
+                        resp.read()
+                        drain = time.monotonic() - t0
+                        if r.status != 204 or drain > 10:
+                            t.fail(f"HTTP {r.status}, stream drained in {drain:.1f}s")
+                finally:
+                    c.close()
 
-                with maybe(rec, names[3]) as t:
-                    req = urllib.request.Request(
-                        f"{srv.base_url}/v1/stream?conv_id={conv}", method="DELETE"
-                    )
-                    r = _do_request(req, 10)
-                    t0 = time.monotonic()
-                    resp.read()
-                    drain = time.monotonic() - t0
-                    if r.status != 204 or drain > 10:
-                        t.fail(f"HTTP {r.status}, stream drained in {drain:.1f}s")
-            finally:
-                c.close()
+        # Before llama.cpp-stream-cancel-on-shutdown.patch, the producer kept
+        # draining a terminated task loop and SIGTERM never returned.
+        if rec.matches(names[4]):
+            with chimera_serve(chimera, ["-m", str(GEN_MODEL)]) as srv:
+                with maybe(rec, names[4]) as t:
+                    c, _ = _start_conv_stream(srv.port, "chimera-test-" + uuid.uuid4().hex)
+                    try:
+                        srv.proc.terminate()
+                        try:
+                            srv.proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            t.fail("still running 10s after SIGTERM")
+                    finally:
+                        c.close()
     except RuntimeError as e:
         for n in names:
             rec.fail(n, 0.0, str(e))
+
+
+def _start_conv_stream(port: int, conv: str):
+    """Start a long streaming chat tagged with X-Conversation-Id.
+
+    Such a request is not cancelled by client disconnect, only by DELETE
+    /v1/stream. ignore_eos keeps it running (~100 s on CPU).
+    """
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=180)
+    c.request(
+        "POST",
+        "/v1/chat/completions",
+        json.dumps({
+            "messages": [{"role": "user", "content": "Count to 5000."}],
+            "max_tokens": 4000,
+            "stream": True,
+            "ignore_eos": True,
+        }),
+        {"Content-Type": "application/json", "X-Conversation-Id": conv},
+    )
+    resp = c.getresponse()
+    resp.read(200)  # generation has started
+    return c, resp
 
 
 # ============================================================================

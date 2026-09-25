@@ -207,6 +207,7 @@ The UI was designed against the full `llama-server` route surface; chimera expos
 | `./v1/models`                       | GET         | model picker / model info        | ✓ bound  |
 | `./props`                           | GET         | server capability detection      | ✓ bound (GET only — `POST /props` for runtime mutation is wontfix per `chimera_serve.cpp` top-of-file list) |
 | `./slots` (+ optional `?model=`)    | GET         | slot status panel                | ✓ bound  |
+| `./v1/stream`, `./v1/streams/lookup` | GET, DELETE, POST | Stop button, reattach after reload | ✓ bound |
 | `/models/load`                      | POST        | router-mode model switch         | ✗ — chimera is single-model by design (wontfix) |
 | `/models/unload`                    | POST        | router-mode model switch         | ✗ — same |
 | `/tools`                            | GET + POST  | built-in tool plugins panel      | ✗ — upstream `--server-tools` is EXPERIMENTAL; not exposed |
@@ -218,7 +219,9 @@ The UI was designed against the full `llama-server` route surface; chimera expos
 
 2. **MCP (Model Context Protocol) integration.** The webui can talk to external MCP servers, but only when chimera proxies cross-origin requests via `/cors-proxy`. Since chimera doesn't expose that route, MCP either works only against same-origin servers (rare) or fails outright. Pyodide (Python-in-browser, which is client-side only) is unaffected.
 
-3. **Built-in tool plugins panel.** The webui's tool-plugin UI talks to `/tools`. That endpoint isn't bound. Note: tool *calling* — the model emitting tool-use blocks inside chat completions — still works because the parsing lives in `/v1/chat/completions` server-side. The missing route is only for the panel that *configures* tools.
+3. **Built-in tool plugins panel.** The webui's tool-plugin UI talks to `/tools`. That endpoint isn't bound; the UI logs a 404 and falls back to browser tools. Tool *calling* still works: parsing lives in `/v1/chat/completions` server-side.
+
+4. **Llama 3.x models fail every chat until tools are disabled.** The UI adds its browser tools (`get_datetime`, a browser `get_info`) to every request. With tools present, the Llama 3.1/3.2 template tells the model to reply only with a JSON function call. A plain-text reply then fails upstream's parser with a 500 (`does not match the expected peg-native format`). The UI shows this as "Stream resume produced no new bytes". Upstream `llama-server` fails the same way. Fix: turn the tools off in the UI's tool picker; the choice persists in localStorage. `--ui-config` cannot set this default. Qwen3-4B and gemma-4-E4B handle the tools correctly. Measured at b11146.
 
 Before binding any of the missing routes in response to a user complaint, re-read the "deliberately not exposed" list at the top of `chimera_serve.cpp` — most of those omissions were reasoned through (`POST /completion` legacy shape, `POST /props` mutation, router-mode, the experimental tools + MCP plugins). Adding them piecemeal in response to "the UI panel is empty" reports is how chimera's busybox identity gets diluted.
 
@@ -412,7 +415,7 @@ There are currently no automated tests for the webui path. The `scripts/test.py`
 
 The minimum useful addition would be the conditional smoke test sketched in § 7 item 1: probe whether the binary has the webui, and if so assert the three endpoints respond correctly. Keep it short — a full browser-driven test (Playwright, etc.) is overkill for an opt-in experimental feature.
 
-Until that lands, the manual verification recipe in § 4 is what we have.
+Until that lands, the manual verification recipe in § 4 is what we have. At b11146 a one-off Playwright run in headless Chromium passed: page load, chat, Stop, reattach after reload, and SIGINT during a stream. It removed `tools` from requests because of § 5.5 item 4.
 
 ---
 
