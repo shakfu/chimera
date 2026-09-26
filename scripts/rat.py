@@ -89,10 +89,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import platform
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -100,6 +102,8 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
+from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,6 +128,89 @@ class ModelSourceUnavailable(RuntimeError):
 
 class AssetUnavailable(RuntimeError):
     """Raised when no release asset exists for a backend/platform pair."""
+
+
+# ---------------------------------------------------------------------------
+# image checks
+# ---------------------------------------------------------------------------
+
+
+def read_png(path: Path) -> tuple[int, int, int, bytes]:
+    """Decode an 8-bit, non-interlaced PNG to (width, height, channels, pixels).
+
+    Stdlib only: the script must run standalone, with no image library. That
+    covers what stb_image_write produces.
+
+    Raises:
+        OSError: the file cannot be read.
+        ValueError, zlib.error: the file is not a PNG this can decode.
+    """
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    header: tuple[int, ...] | None = None
+    idat = bytearray()
+    pos = 8
+    while pos + 8 <= len(data):
+        length, ctype = struct.unpack(">I4s", data[pos : pos + 8])
+        body = data[pos + 8 : pos + 8 + length]
+        if ctype == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif ctype == b"IDAT":
+            idat += body
+        elif ctype == b"IEND":
+            break
+        pos += 12 + length
+    if header is None:
+        raise ValueError("no IHDR chunk")
+    width, height, depth, color, _, _, interlace = header
+    channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(color)
+    if depth != 8 or channels is None or interlace:
+        raise ValueError(f"unsupported PNG (bit depth {depth}, color type {color}, interlace {interlace})")
+
+    raw = zlib.decompress(idat)
+    stride = width * channels
+    if len(raw) != height * (stride + 1):
+        raise ValueError(f"image data is {len(raw)} bytes, expected {height * (stride + 1)}")
+    pixels = bytearray()
+    prev = bytearray(stride)
+    for y in range(height):
+        start = y * (stride + 1) + 1
+        ftype = raw[start - 1]
+        row = bytearray(raw[start : start + stride])
+        if ftype == 1:  # Sub
+            for i in range(channels, stride):
+                row[i] = (row[i] + row[i - channels]) & 0xFF
+        elif ftype == 2:  # Up
+            for i in range(stride):
+                row[i] = (row[i] + prev[i]) & 0xFF
+        elif ftype == 3:  # Average
+            for i in range(stride):
+                left = row[i - channels] if i >= channels else 0
+                row[i] = (row[i] + (left + prev[i]) // 2) & 0xFF
+        elif ftype == 4:  # Paeth
+            for i in range(stride):
+                a = row[i - channels] if i >= channels else 0
+                b = prev[i]
+                c = prev[i - channels] if i >= channels else 0
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                row[i] = (row[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 0xFF
+        elif ftype != 0:
+            raise ValueError(f"row {y} has unknown filter type {ftype}")
+        pixels += row
+        prev = row
+    return width, height, channels, bytes(pixels)
+
+
+def channel_stddevs(pixels: bytes, channels: int) -> list[float]:
+    """Population standard deviation of each channel of interleaved 8-bit pixels."""
+    result = []
+    for ch in range(channels):
+        hist = Counter(pixels[ch::channels])
+        n = sum(hist.values())
+        mean = sum(v * k for v, k in hist.items()) / n
+        result.append(math.sqrt(sum(k * (v - mean) ** 2 for v, k in hist.items()) / n))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -992,17 +1079,29 @@ class TestSuite:
 
     # -- stable diffusion ---------------------------------------------------
     #
-    # Three cases: te-on-cpu + vae-tiling, cpu-offload + vae-on-cpu, and cfg-1 +
+    # Three cases: te-on-cpu + vae-tiling, cpu-offload + vae-on-cpu, and
     # offload + flash-attn. Z-Image Turbo is a split-checkpoint model, so all
     # three use the component flags (--diffusion-model / --vae / --llm) rather
     # than -m, and none pass --gpu-layers: `sd` picks up the GPU on its own.
 
-    SD_SIZE: tuple[str, ...] = ("-H", "1024", "-W", "512")
+    # Z-Image Turbo is distilled for 8 steps without guidance. chimera's
+    # defaults (20 steps, cfg 7.0, random seed) cost ~5x the passes, and the
+    # fixed seed makes a backend's images comparable from one release to the next.
+    SD_SAMPLING: tuple[str, ...] = ("--steps", "8", "--cfg-scale", "1.0", "--seed", "42")
+    SD_WIDTH, SD_HEIGHT = 512, 1024
     SD_PROMPT = "a lovely plump cat"
+    # Below this in every channel an image is blank: black from a NaN render, or
+    # one flat colour. A real render is in the tens.
+    SD_MIN_STDDEV = 2.0
+
+    def sd_output(self, n: str) -> Path:
+        return self.out_dir / f"z_turbo_{n}.png"
 
     def sd_case(self, n: str, extra: list[str], timeout: float | None) -> int:
         paths = self.models.ensure_models(ModelRegistry.SD_REQUIREMENTS)
-        return self.env.chimera(
+        out = self.sd_output(n)
+        out.unlink(missing_ok=True)  # a stale image would otherwise pass the check
+        rc = self.env.chimera(
             [
                 "sd",
                 "--diffusion-model",
@@ -1011,15 +1110,46 @@ class TestSuite:
                 str(paths["ae"]),
                 "--llm",
                 str(paths["qwen3-4b"]),
+                *self.SD_SAMPLING,
                 *extra,
-                *self.SD_SIZE,
+                "-H",
+                str(self.SD_HEIGHT),
+                "-W",
+                str(self.SD_WIDTH),
                 "-o",
-                str(self.out_dir / f"z_turbo_{n}.png"),
+                str(out),
                 "-p",
                 self.SD_PROMPT,
             ],
             timeout=timeout,
         )
+        return rc or self.check_image(out)
+
+    def check_image(self, path: Path) -> int:
+        """Fail an image of the wrong size, or one with no variation in any channel.
+
+        Exit 0 from the CLI only means an image was written; a NaN render still
+        writes one, all black.
+        """
+        try:
+            width, height, channels, pixels = read_png(path)
+        except (OSError, ValueError, zlib.error) as e:
+            print(f"error: {path.name}: {e}", file=sys.stderr)
+            return 1
+        if (width, height) != (self.SD_WIDTH, self.SD_HEIGHT):
+            print(
+                f"error: {path.name} is {width}x{height}, expected {self.SD_WIDTH}x{self.SD_HEIGHT}",
+                file=sys.stderr,
+            )
+            return 1
+        spread = max(channel_stddevs(pixels, channels))
+        print(f"-- {path.name}: {width}x{height}, max channel stddev {spread:.1f}")
+        if spread < self.SD_MIN_STDDEV:
+            print(
+                f"error: {path.name} is blank (max channel stddev {spread:.2f} < {self.SD_MIN_STDDEV})", file=sys.stderr
+            )
+            return 1
+        return 0
 
     # The three cases mirror cyllama's scripts/rwt.py so the two projects'
     # results compare directly. Each fits an 8 GiB card: the unqualified
@@ -1042,12 +1172,10 @@ class TestSuite:
         return self.sd_case("2", ["--offload-to-cpu", "--vae-on-cpu"], timeout)
 
     def sd_3(self, _backend: str, timeout: float | None) -> int:
-        """z_turbo cfg-1 + cpu-offload + flash-attn."""
+        """z_turbo cpu-offload + flash-attn."""
         # The recipe docs/cheatsheet.md gives for Z-Image Turbo: weights stream
-        # from RAM while compute stays on the GPU. Z-Image Turbo is distilled, so
-        # --cfg-scale 1.0 disables the negative pass, which is both correct for
-        # the model and roughly halves the work.
-        return self.sd_case("3", ["--cfg-scale", "1.0", "--offload-to-cpu", "--diffusion-fa"], timeout)
+        # from RAM while compute stays on the GPU.
+        return self.sd_case("3", ["--offload-to-cpu", "--diffusion-fa"], timeout)
 
     # -- generation ---------------------------------------------------------
 
@@ -1519,7 +1647,7 @@ class Cli:
             self.env.chimera(["info"])
         return 0
 
-    def cmd_clean(self, _args: argparse.Namespace) -> int:
+    def cmd_clean(self, args: argparse.Namespace) -> int:
         # Only ever removes the binary this script installed. An explicit --bin
         # points at something the caller owns -- a build/chimera, a system
         # install -- and deleting that would be a nasty surprise.
@@ -1529,8 +1657,13 @@ class Cli:
         elif installed.exists():
             print(f"removing {installed}")
             installed.unlink()
+        keep_output = getattr(args, "keep_output", False)
         for path in (self.paths.out_dir, self.paths.cache_dir):
-            if path.exists():
+            if not path.exists():
+                continue
+            if path == self.paths.out_dir and keep_output:
+                print(f"keeping {path}")
+            else:
                 print(f"removing {path}")
                 shutil.rmtree(path)
         # All of the above normally live in <build>/rat, so once they are gone
@@ -1573,12 +1706,16 @@ class Cli:
         return Release.DOWNLOAD.format(repo=self.release.repo, tag=tag, asset=value), None
 
     def cmd_install(self, args: argparse.Namespace) -> int:
+        if self.env.bin_override is not None:
+            print("error: --bin names the binary under test; there is nothing to install", file=sys.stderr)
+            return 2
         target = self.paths.bin_dir / self.env.exe_name
         if target.exists() and not args.force:
             # Re-installing over a binary the caller may be mid-investigation on
-            # is the kind of thing worth asking for explicitly.
-            print(f"{target} already exists; pass --force to replace it")
-            return 0
+            # is worth asking for explicitly. It is an error, not a no-op, so
+            # `run` does not go on to test a binary other than the one asked for.
+            print(f"error: {target} already exists; pass --force to replace it", file=sys.stderr)
+            return 2
 
         try:
             url, local = self.resolve_asset(args)
@@ -1798,8 +1935,10 @@ class Cli:
             return step
 
         targets = self.run_targets(args)
+        # --bin names the binary under test, so there is nothing to install.
+        installs = [("install", self.cmd_install)] if self.env.bin_override is None else []
         steps: list[tuple[str, Callable[[argparse.Namespace], int]]] = [
-            ("install", self.cmd_install),
+            *installs,
             *((f"test {t}", test_step(t)) for t in targets),
             ("clean", self.cmd_clean),
         ]
@@ -1810,9 +1949,11 @@ class Cli:
             where = f" --bin {self.env.bin_path}" if self.env.bin_override is not None else ""
             for name, _ in steps:
                 verb, _, target = name.partition(" ")
+                if verb == "clean" and args.keep_output:
+                    target = "--keep-output"
                 print(f"would run: {SCRIPT_NAME} {verb}{where}{' ' + target if target else ''}")
             print()
-            for _, step in steps[1 : 1 + len(targets)]:
+            for _, step in steps[len(installs) : len(installs) + len(targets)]:
                 step(args)
             return 0
 
@@ -1928,6 +2069,17 @@ class Cli:
         )
         return i
 
+    @staticmethod
+    def clean_parser() -> argparse.ArgumentParser:
+        """Options for what `clean` removes; shared by `clean` and `run`."""
+        c = argparse.ArgumentParser(add_help=False)
+        c.add_argument(
+            "--keep-output",
+            action="store_true",
+            help="leave --out-dir (sd images, transcripts, scratch DBs) in place for inspection",
+        )
+        return c
+
     def test_parser(self) -> argparse.ArgumentParser:
         """Options that shape a test run; shared by `test` and `run`."""
         t = argparse.ArgumentParser(add_help=False)
@@ -1985,7 +2137,11 @@ class Cli:
         sub.add_parser("info", help="show the binary under test, its backends and the models dir").set_defaults(
             func=self.cmd_info
         )
-        sub.add_parser("clean", help="remove the installed binary and everything the suite wrote").set_defaults(
+        sub.add_parser(
+            "clean",
+            parents=[self.clean_parser()],
+            help="remove the installed binary and everything the suite wrote",
+        ).set_defaults(
             func=self.cmd_clean
         )
 
@@ -2037,7 +2193,7 @@ class Cli:
         # a clean machine without three invocations that must agree on the backend.
         r = sub.add_parser(
             "run",
-            parents=[self.install_parser(), self.test_parser()],
+            parents=[self.install_parser(), self.clean_parser(), self.test_parser()],
             help="install, test, then clean -- stopping at the first failure",
         )
         r.add_argument(
