@@ -2734,6 +2734,8 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "Number of concurrent request slots");
     cmd->add_option("--api-key", p.serve_opts.api_key,
         "Bearer token required on /v1/* requests (empty = no auth)");
+    cmd->add_option("-a,--alias", p.serve_opts.alias,
+        "Model name aliases for the API, comma-separated (default: the --model path)");
     cmd->add_flag("--embeddings", p.serve_opts.embedding,
         "Load the model in embedding mode (enables /v1/embeddings)");
 #ifdef CHIMERA_HAS_WHISPER

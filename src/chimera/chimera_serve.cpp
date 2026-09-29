@@ -11,24 +11,27 @@
 // ----------------------------------------------------------------------------
 // LLM (text):
 //   GET  /health, /v1/health            liveness probe
-//   GET  /v1/models                     list loaded model + aliases
+//   GET  /models, /v1/models            list loaded model + aliases
 //   GET  /metrics                       Prometheus-style telemetry
 //   GET  /props                         read server props (template kwargs, ...)
 //   POST /chat/completions
 //        + /v1/chat/completions         OpenAI Chat Completions (streaming + non-streaming SSE)
 //   POST /v1/completions                OpenAI legacy text Completions
+//   POST /completion, /completions      llama.cpp native completion shape
 //   POST /v1/embeddings                 OpenAI Embeddings (only when --embeddings)
+//   POST /embedding, /embeddings        llama.cpp native embeddings shape
 //   POST /v1/messages                   Anthropic Messages API compat
 //   POST /v1/messages/count_tokens      Anthropic token counting
-//   POST /v1/chat/completions/input_tokens
-//        + /v1/responses/input_tokens   OpenAI-shape token counting
+//   POST [/v1]/chat/completions/input_tokens
+//        + [/v1]/responses/input_tokens OpenAI-shape token counting
+//   GET, POST /tools, /cors-proxy       403, as upstream without its enabling flags
 //   GET, DELETE /v1/stream
 //        + POST /v1/streams/lookup      resumable SSE: replay, cancel, and find a
 //                                       stream started with X-Conversation-Id
 //   POST /infill                        fill-in-the-middle for code models
 //   POST /tokenize, /detokenize         vocab helpers
 //   POST /apply-template                render the chat template against messages
-//   POST /v1/responses                  OpenAI Responses API (server-context's
+//   POST /responses, /v1/responses      OpenAI Responses API (server-context's
 //                                       built-in handler). Stateful within a
 //                                       single chimera serve invocation; state
 //                                       is held in-process and lost on restart.
@@ -48,7 +51,7 @@
 //                                       ?limit=N (default 20)
 //
 // Audio (only when --enable-audio):
-//   POST /v1/audio/transcriptions       transcribe in source language (whisper.cpp)
+//   POST [/v1]/audio/transcriptions     transcribe in source language (whisper.cpp)
 //   POST /v1/audio/translations         translate to English regardless of input
 //                                       language (whisper's built-in translate mode)
 //                                       — both currently WAV-only; see handler comment
@@ -63,7 +66,7 @@
 //                                       embedding handler when this flag is set)
 //
 // Cross-encoder reranker (only when --reranking):
-//   POST /v1/rerank, /rerank            documents reranked against a query;
+//   POST [/v1]/rerank, [/v1]/reranking  documents reranked against a query;
 //                                       request shape:
 //                                       {"model": "...", "query": "...",
 //                                        "documents": ["..."], "top_n": N}
@@ -97,7 +100,7 @@
 //     `make test-golden` matters.
 //
 //       GET  /health, /v1/health                 server_routes.get_health
-//       GET  /v1/models                          server_routes.get_models
+//       GET  /models, /v1/models                 server_routes.get_models
 //       GET  /metrics                            server_routes.get_metrics
 //       GET  /props                              server_routes.get_props
 //       POST /chat/completions
@@ -110,21 +113,23 @@
 //                                                originating request to set
 //                                                "reasoning_control": true)
 //       POST /v1/completions                     server_routes.post_completions_oai
+//       POST /completion, /completions           server_routes.post_completions
 //       POST /v1/embeddings                      server_routes.post_embeddings_oai
+//       POST /embedding, /embeddings             server_routes.post_embeddings
 //                                                (or the dedicated emb_ctx variant
 //                                                when --enable-embeddings is set)
 //       POST /v1/messages                        server_routes.post_anthropic_messages
 //       POST /v1/messages/count_tokens           server_routes.post_anthropic_count_tokens
-//       POST /v1/responses                       server_routes.post_responses_oai
-//       POST /v1/chat/completions/input_tokens   server_routes.post_chat_completions_tok
-//       POST /v1/responses/input_tokens          server_routes.post_responses_tok_oai
+//       POST [/v1]/responses                     server_routes.post_responses_oai
+//       POST [/v1]/chat/completions/input_tokens server_routes.post_chat_completions_tok
+//       POST [/v1]/responses/input_tokens        server_routes.post_responses_tok_oai
 //       GET  /v1/stream, DELETE /v1/stream       server_stream_make_{get,delete}_handler
 //       POST /v1/streams/lookup                  server_stream_make_lookup_handler
 //                                                (resumable SSE, opt in via X-Conversation-Id)
 //       POST /infill                             server_routes.post_infill
 //       POST /tokenize, /detokenize              server_routes.post_{tokenize,detokenize}
 //       POST /apply-template                     server_routes.post_apply_template
-//       POST /v1/rerank, /rerank                 rrk_ctx->routes->post_rerank
+//       POST [/v1]/rerank, [/v1]/reranking       rrk_ctx->routes->post_rerank
 //       GET  /slots                              server_routes.get_slots
 //       POST /slots/:id_slot                     server_routes.post_slots
 //       GET  /lora-adapters                      server_routes.get_lora_adapters
@@ -143,7 +148,7 @@
 //     cannot change these shapes; OpenAI changing their spec can. Drift
 //     surface = the external spec, not the vendored library.
 //
-//       POST /v1/audio/transcriptions            chimera_whisper, via
+//       POST [/v1]/audio/transcriptions          chimera_whisper, via
 //       POST /v1/audio/translations              make_audio_transcribe_handler
 //                                                (upstream routes audio through
 //                                                mtmd's audio mmproj — different
@@ -185,9 +190,6 @@
 // few lines of `ctx_http.post(...)` away if/when we decide to surface it; the
 // list is explicit so the omission is a design choice, not an oversight.
 //
-//   POST /completion, /completions      legacy llama.cpp completion shape
-//                                       (different from /v1/completions).
-//                                       Practically nobody calls this in 2025.
 //   POST /v1/audio/transcriptions       server_routes' built-in handler is NOT
 //                                       bound. We expose this path ourselves
 //                                       via whisper.cpp when --enable-audio
@@ -195,7 +197,6 @@
 //                                       audio through mtmd's audio mmproj —
 //                                       a fundamentally different pipeline
 //                                       (LLM-with-audio-tokens vs dedicated ASR).
-//   POST /embedding, /embeddings        non-/v1 embeddings variants — redundant.
 //   POST /props                         mutating server props at runtime
 //                                       conflicts with chimera serve's
 //                                       "CLI is the config" stance. Read
@@ -205,8 +206,9 @@
 //
 //   - Router/multi-model mode (`is_router_server` branch in llama-server's
 //     server.cpp). Single-model only here.
-//   - Built-in tool plugins (`--server-tools`). EXPERIMENTAL upstream.
+//   - Built-in tool plugins (`--tools`). EXPERIMENTAL upstream.
 //   - MCP CORS proxy (`--webui-mcp-proxy`). EXPERIMENTAL upstream.
+//     Both paths answer 403, matching upstream with the flags unset.
 //   - GCP / Vertex AI compat (`ctx_http.register_gcp_compat()`).
 //   - Web chat UI (the upstream SvelteKit/PWA dist tree). Experimental:
 //     opt in at configure time with `-DCHIMERA_WEBUI_EMBED=ON` to bake
@@ -469,6 +471,13 @@ common_params build_common_params(const ServeOptions & opts) {
     params.endpoint_metrics     = true;
     if (!opts.api_key.empty()) {
         params.api_keys.push_back(opts.api_key);
+    }
+    // Same parsing as upstream's -a/--alias (common/arg.cpp).
+    for (auto & alias : string_split<std::string>(opts.alias, ',')) {
+        alias = string_strip(alias);
+        if (!alias.empty()) {
+            params.model_alias.insert(alias);
+        }
     }
 
     // Embedded webui. Only meaningful when the build was configured
@@ -921,6 +930,7 @@ int command_serve(const ServeOptions & opts) {
     // routes we are deliberately NOT exposing.
     ctx_http.get ("/health",              ex_wrapper(routes.get_health));
     ctx_http.get ("/v1/health",           ex_wrapper(routes.get_health));
+    ctx_http.get ("/models",              ex_wrapper(routes.get_models));
     ctx_http.get ("/v1/models",           ex_wrapper(routes.get_models));
     ctx_http.get ("/metrics",             ex_wrapper(routes.get_metrics));
     ctx_http.get ("/props",               ex_wrapper(routes.get_props));
@@ -984,6 +994,9 @@ int command_serve(const ServeOptions & opts) {
     ctx_http.post("/v1/streams/lookup", ex_wrapper(server_stream_make_lookup_handler()));
     ctx_http.del ("/v1/stream",         ex_wrapper(server_stream_make_delete_handler()));
     ctx_http.post("/v1/completions",      ex_wrapper(routes.post_completions_oai));
+    // Legacy llama.cpp completion shape, not the OpenAI one above.
+    ctx_http.post("/completion",          ex_wrapper(routes.post_completions));
+    ctx_http.post("/completions",         ex_wrapper(routes.post_completions));
     // When --enable-embeddings was passed, route /v1/embeddings to the
     // dedicated embedding context's handler instead of the primary LLM.
     // The primary's handler stays usable when --embeddings was set on
@@ -993,16 +1006,24 @@ int command_serve(const ServeOptions & opts) {
     ctx_http.post("/v1/embeddings",
                   ex_wrapper(emb_ctx ? emb_ctx->routes->post_embeddings_oai
                                      : routes.post_embeddings_oai));
+    // Legacy llama.cpp embeddings shape; same model selection as above.
+    const auto & emb_legacy = emb_ctx ? emb_ctx->routes->post_embeddings
+                                      : routes.post_embeddings;
+    ctx_http.post("/embedding",           ex_wrapper(emb_legacy));
+    ctx_http.post("/embeddings",          ex_wrapper(emb_legacy));
     // /v1/responses (OpenAI Responses API). The upstream handler holds
     // conversation state in-process — it's *stateful within one chimera
     // serve invocation* but does not persist across restarts. With
     // --persist-chats on, the underlying chat-completions path will still
     // write to the chats table; the Responses API itself is layered on
     // top of that and inherits the same persistence.
+    ctx_http.post("/responses",           ex_wrapper(routes.post_responses_oai));
     ctx_http.post("/v1/responses",        ex_wrapper(routes.post_responses_oai));
 
     // Token counting for the OpenAI shapes, matching the Anthropic route below.
+    ctx_http.post("/chat/completions/input_tokens",    ex_wrapper(routes.post_chat_completions_tok));
     ctx_http.post("/v1/chat/completions/input_tokens", ex_wrapper(routes.post_chat_completions_tok));
+    ctx_http.post("/responses/input_tokens",           ex_wrapper(routes.post_responses_tok_oai));
     ctx_http.post("/v1/responses/input_tokens",        ex_wrapper(routes.post_responses_tok_oai));
 
     // Anthropic Messages API compat — lets the Anthropic Python SDK and
@@ -1021,10 +1042,11 @@ int command_serve(const ServeOptions & opts) {
     ctx_http.post("/apply-template",  ex_wrapper(routes.post_apply_template));
 #ifdef CHIMERA_HAS_WHISPER
     if (whisper_ctx) {
-        ctx_http.post("/v1/audio/transcriptions",
-                      ex_wrapper(make_audio_transcribe_handler(
-                          whisper_ctx.get(), whisper_mutex, /*translate=*/false,
-                          opts.audio_vad_model)));
+        auto transcribe = make_audio_transcribe_handler(
+            whisper_ctx.get(), whisper_mutex, /*translate=*/false,
+            opts.audio_vad_model);
+        ctx_http.post("/audio/transcriptions",    ex_wrapper(transcribe));
+        ctx_http.post("/v1/audio/transcriptions", ex_wrapper(transcribe));
         ctx_http.post("/v1/audio/translations",
                       ex_wrapper(make_audio_transcribe_handler(
                           whisper_ctx.get(), whisper_mutex, /*translate=*/true,
@@ -1089,9 +1111,29 @@ int command_serve(const ServeOptions & opts) {
     // upstream server_routes; we just bind it. Also bound on the legacy
     // /rerank for symmetry with other modalities.
     if (rrk_ctx) {
-        ctx_http.post("/v1/rerank", ex_wrapper(rrk_ctx->routes->post_rerank));
-        ctx_http.post("/rerank",    ex_wrapper(rrk_ctx->routes->post_rerank));
+        ctx_http.post("/v1/rerank",    ex_wrapper(rrk_ctx->routes->post_rerank));
+        ctx_http.post("/rerank",       ex_wrapper(rrk_ctx->routes->post_rerank));
+        ctx_http.post("/v1/reranking", ex_wrapper(rrk_ctx->routes->post_rerank));
+        ctx_http.post("/reranking",    ex_wrapper(rrk_ctx->routes->post_rerank));
     }
+
+    // Upstream answers these with 403 unless --tools / MCP or
+    // --webui-mcp-proxy is set; chimera has neither flag.
+    server_http_context::handler_t res_403 = [](const server_http_req &) {
+        auto res = std::make_unique<server_http_res>();
+        res->status = 403;
+        res->data = safe_json_to_str({
+            {"error", {
+                {"message", "this feature is disabled"},
+                {"type", "feature_disabled"},
+            }}
+        });
+        return res;
+    };
+    ctx_http.get ("/tools",      ex_wrapper(res_403));
+    ctx_http.post("/tools",      ex_wrapper(res_403));
+    ctx_http.get ("/cors-proxy", ex_wrapper(res_403));
+    ctx_http.post("/cors-proxy", ex_wrapper(res_403));
 
     if (rag_ctx.embedder) {
         ctx_http.get ("/v1/vector_stores",              ex_wrapper(make_vs_list_handler(&rag_ctx)));

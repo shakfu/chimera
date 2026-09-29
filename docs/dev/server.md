@@ -131,17 +131,19 @@ The whisper and SD modules grew dedicated headers as part of phases 2 and 3 spec
 | Route | Source | Notes |
 |-------|--------|-------|
 | `GET /health`, `GET /v1/health` | `routes.get_health` | Liveness probe; pre-built lambda from server_routes. |
-| `GET /v1/models` | `routes.get_models` | Returns `{ "data": [...], "object": "list" }` plus ollama-compat fields. |
+| `GET /models`, `GET /v1/models` | `routes.get_models` | Returns `{ "data": [...], "object": "list" }` plus ollama-compat fields. |
 | `GET /metrics` | `routes.get_metrics` | Prometheus-style telemetry. `params.endpoint_metrics` is forced to `true` in `build_common_params`, so this works regardless of CLI flags. |
 | `GET /props` | `routes.get_props` | Read-only introspection — current chat template, mmproj capabilities, generation defaults. |
 | `POST /chat/completions`, `POST /v1/chat/completions` | `routes.post_chat_completions` | Streaming + non-streaming SSE. Tool calls, mtmd inputs, reasoning_content all work. The unprefixed legacy path is bound for older OpenAI clients. |
 | `POST /v1/completions` | `routes.post_completions_oai` | Legacy text completion. |
+| `POST /completion`, `POST /completions` | `routes.post_completions` | llama.cpp native completion format, distinct from `/v1/completions`. |
+| `POST /embedding`, `POST /embeddings` | `routes.post_embeddings` (or `emb_ctx`'s) | llama.cpp native embeddings format; same model selection as `/v1/embeddings`. |
 | `POST /v1/embeddings` | `routes.post_embeddings_oai` | Only returns success when the model was loaded with `--embeddings`. Without it, upstream's handler returns HTTP 501 with the right message. |
 | `POST /v1/messages`, `POST /v1/messages/count_tokens` | `routes.post_anthropic_messages` + `post_anthropic_count_tokens` | Anthropic Messages API compat — lets Anthropic SDK / claude-code-shaped clients point at chimera serve. |
 | `POST /infill` | `routes.post_infill` | Fill-in-the-middle for code models. Returns 501 on models without FIM tokens, which is the right behavior. |
 | `POST /tokenize`, `POST /detokenize` | `routes.post_tokenize` + `post_detokenize` | Vocab helpers; useful for clients that don't bundle a tokenizer (e.g. token counting before sending). |
 | `POST /apply-template` | `routes.post_apply_template` | Renders the chat template against a `messages[]` array without generating. Pure debugging value. |
-| `POST /v1/responses` | `routes.post_responses_oai` | OpenAI Responses API. **Stateful within a single chimera serve invocation** — server-context holds the conversation thread state in-process; lost on restart. With `--persist-chats` the underlying chat-completions traffic is still saved to the chats table. |
+| `POST /responses`, `POST /v1/responses` | `routes.post_responses_oai` | OpenAI Responses API. **Stateful within a single chimera serve invocation** — server-context holds the conversation thread state in-process; lost on restart. With `--persist-chats` the underlying chat-completions traffic is still saved to the chats table. |
 | `GET /slots`, `POST /slots/:id_slot` | `routes.get_slots` + `routes.post_slots` | Per-slot status (always works); save/restore/erase actions on POST. Save/restore additionally require `--slot-save-path`; without it the upstream handler returns HTTP 501. |
 | `GET /lora-adapters`, `POST /lora-adapters` | `routes.get_lora_adapters` + `routes.post_lora_adapters` | Lists adapters loaded via `--lora` and lets the client re-weight by index. Empty list when no `--lora` was supplied. |
 | `GET /v1/chimera/info` | `make_chimera_info_handler` (chimera-owned, in `chimera_serve_meta.cpp`) | JSON form of `chimera info`. Versions, built/loaded backends, devices, GPU/mmap/mlock/RPC flags, whisper/sd linkage + CPU features, SQLite versions, build flags. Devices via `ggml_backend_dev_get(i)`; CPU-feature strings parsed inline (independent of the CLI's `parse_sys_info` to keep this TU CLI-free). |
@@ -228,11 +230,9 @@ There is no server-context handler for image generation upstream; this pipeline 
 
 ### 4.4 Deliberately NOT bound
 
-Every one of these is a one-line `ctx_http.post(...)` away. The omission is a scope choice, not a capability gap:
+`serve` binds every route `llama-server` binds in single-model mode, except the ones below. They are listed in `scripts/server_routes.py:UNBOUND`; `make bump-check` and `make test` fail on any other upstream route chimera does not bind.
 
-- `POST /completion`, `POST /completions` — legacy (non-/v1) llama.cpp completion shape, *different* from `/v1/completions`. Practically nobody calls it in 2025.
-
-- `POST /embedding`, `POST /embeddings` — non-/v1 embeddings variants; redundant with `/v1/embeddings`.
+- Router-mode `/models*` management routes. See `docs/dev/server-router-mode.md`.
 
 - `POST /props` — mutating server props at runtime conflicts with chimera serve's "CLI is the config" stance. Read (`GET /props`) is bound; write is not.
 

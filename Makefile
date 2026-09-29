@@ -176,6 +176,8 @@ release-notes:
 # pinned). server-context.h / server-http.h aren't part of upstream's
 # stable API and shift with internal refactors, so a chimera bump that
 # bypasses this check can silently break the build or the runtime.
+# It also fails when upstream's server.cpp registers a route chimera
+# neither binds nor lists in scripts/server_routes.py:UNBOUND.
 # Run before changing LLAMACPP_VERSION; the script exits non-zero when
 # any of the headers changed.
 LLAMA_VERSION ?=

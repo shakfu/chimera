@@ -270,6 +270,7 @@ NB_MODULE(chimera, m) {
         .def_rw("gpu_layers",       &ServeOptions::gpu_layers)
         .def_rw("parallel",         &ServeOptions::parallel)
         .def_rw("api_key",          &ServeOptions::api_key)
+        .def_rw("alias",            &ServeOptions::alias)
         .def_rw("embedding",        &ServeOptions::embedding)
         // http timeouts (0 = upstream default)
         .def_rw("http_timeout",      &ServeOptions::http_timeout)

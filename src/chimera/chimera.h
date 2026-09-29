@@ -539,6 +539,7 @@ struct ServeOptions {
     int         gpu_layers = -1;    // --gpu-layers; -1 = auto
     int         parallel = 1;       // --parallel; number of concurrent slots
     std::string api_key;            // --api-key; empty disables auth
+    std::string alias;              // --alias; comma-separated model names for the API; empty = -m path
     bool        embedding = false;  // --embeddings; switches model to embed mode
 
     // HTTP server timeouts. 0 leaves the upstream common_params default in

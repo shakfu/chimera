@@ -112,6 +112,7 @@ def test_serve_options_roundtrip(chimera_mod):
     o.n_ctx = 2048
     o.embedding = True
     o.api_key = "secret"
+    o.alias = "qwen3, q3"
     o.http_timeout = 120
     o.sse_ping_interval = 15
     assert o.sd_auto_fit is True  # upstream default
@@ -125,6 +126,7 @@ def test_serve_options_roundtrip(chimera_mod):
         "127.0.0.1", 8123, 2048, True, "secret",
     )
     assert (o.http_timeout, o.sse_ping_interval) == (120, 15)
+    assert o.alias == "qwen3, q3"
     assert (o.sd_disable_prefetch, o.sd_auto_fit, o.sd_vae_format) == (True, False, "flux2")
     assert (o.sd_backend, o.sd_params_backend, o.sd_eager_load) == (
         "diffusion=cuda0,te=cpu", "te=cpu", True,

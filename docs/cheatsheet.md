@@ -391,6 +391,7 @@ chimera serve -m model.gguf --enable-rag embed.gguf --rag-db /path/to.db
 chimera serve -m model.gguf --persist-chats     --chat-db /path/to.db
 chimera serve -m model.gguf --host 0.0.0.0 --port 8080
 chimera serve -m model.gguf --api-key sk-local
+chimera serve -m model.gguf --alias qwen3                      # /v1/models id (default: the -m path)
 chimera serve -m model.gguf --parallel 4                       # 4 concurrent slots
 ```
 

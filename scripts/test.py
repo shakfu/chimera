@@ -750,6 +750,20 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
             if rc != 0:
                 t.fail(f"exit code {rc}")
 
+    # Every llama-server route is bound or listed in server_routes.UNBOUND.
+    # Reads the pinned clone, so it catches drift right after a bump.
+    upstream = REPO_ROOT / "build" / "llama.cpp" / "tools" / "server" / "server.cpp"
+    label = "serve binds every llama-server route (or lists it in UNBOUND)"
+    if upstream.is_file():
+        import server_routes
+
+        with maybe(rec, label) as t:
+            unbound = server_routes.missing(upstream.read_text(), REPO_ROOT)
+            if unbound:
+                t.fail(f"unbound: {unbound}")
+    else:
+        rec.skip(label, f"missing {upstream}")
+
     # `gen` without -m must fail at CLI parse. The bash version asserted
     # "non-zero exit" without pinning the exact code; the same loose check
     # here protects against the CLI11 wiring silently accepting the call.
@@ -1901,6 +1915,138 @@ def e2e_chats_endpoints_tests(rec: Recorder, chimera: Path) -> None:
 
 
 # ============================================================================
+# End-to-end: --alias replaces the -m path as the /v1/models id.
+# ============================================================================
+
+
+def e2e_model_alias_tests(rec: Recorder, chimera: Path) -> None:
+    name = "--alias ' qwen3 , q3,' -> /v1/models id + aliases, no model path"
+    if not rec.matches(name):
+        return
+    if not GEN_MODEL.is_file():
+        rec.skip(name, f"missing {GEN_MODEL}")
+        return
+    try:
+        with chimera_serve(
+            chimera, ["-m", str(GEN_MODEL), "--alias", " qwen3 , q3,"]
+        ) as srv:
+            with maybe(rec, name) as t:
+                r = http_get(f"{srv.base_url}/v1/models")
+                d = r.json()["data"][0]
+                # Upstream stores aliases in a std::set and uses its first
+                # (lexicographically smallest) element as the id.
+                if sorted(d["aliases"]) != ["q3", "qwen3"] or d["id"] != "q3":
+                    t.fail(f"got id={d['id']!r} aliases={d['aliases']!r}")
+                if str(GEN_MODEL) in r.body:
+                    t.fail(f"model path leaked: {r.body[:200]!r}")
+    except RuntimeError as e:
+        rec.fail(name, 0.0, str(e))
+
+
+# ============================================================================
+# End-to-end: llama-server route aliases (non-/v1 spellings + 403 stubs).
+# ============================================================================
+
+
+def e2e_upstream_route_aliases(rec: Recorder, chimera: Path) -> None:
+    msgs = {"messages": [{"role": "user", "content": "Hi"}]}
+    # (label, method, path, body, check(resp, base_url) -> error or None)
+
+    def same_as(twin: str, body: object = None, drop: tuple = ()):
+        def check(r: HttpResponse, base: str) -> Optional[str]:
+            t = http_get(base + twin) if body is None else http_post_json(base + twin, body)
+            a, b = r.json(), t.json()
+            for k in drop:
+                for d in (a, b):
+                    for item in d.get("data", []):
+                        item.pop(k, None)
+            return None if a == b else f"differs from {twin}: {r.body[:200]!r}"
+        return check
+
+    def has_key(key: str):
+        def check(r: HttpResponse, base: str) -> Optional[str]:
+            d = r.json()
+            first = d[0] if isinstance(d, list) else d
+            return None if key in first else f"no {key!r}: {r.body[:200]!r}"
+        return check
+
+    def embed_dim_as_v1():
+        # Legacy shape nests one pooled vector: [{"embedding": [[...]]}].
+        # Matching /v1's dimension shows both hit the dedicated model.
+        def check(r: HttpResponse, base: str) -> Optional[str]:
+            got = len(r.json()[0]["embedding"][0])
+            t = http_post_json(base + "/v1/embeddings", {"input": "fixed input"})
+            want = len(t.json()["data"][0]["embedding"])
+            return None if got == want else f"dim {got} != /v1/embeddings dim {want}"
+        return check
+
+    def status(code: int):
+        return lambda r, base: None if r.status == code else f"got HTTP {r.status}"
+
+    cases = [
+        ("GET /models == GET /v1/models", "GET", "/models", None,
+         same_as("/v1/models", drop=("created",))),
+        ("POST /completion (legacy shape)", "POST", "/completion",
+         {"prompt": "Hello", "n_predict": 1}, has_key("content")),
+        ("POST /completions (legacy shape)", "POST", "/completions",
+         {"prompt": "Hello", "n_predict": 1}, has_key("content")),
+        ("POST /embedding (legacy shape, dedicated model)", "POST", "/embedding",
+         {"content": "fixed input"}, embed_dim_as_v1()),
+        ("POST /embeddings (legacy shape, dedicated model)", "POST", "/embeddings",
+         {"content": "fixed input"}, embed_dim_as_v1()),
+        ("POST /responses", "POST", "/responses",
+         {"input": "Hi", "max_output_tokens": 16}, has_key("output")),
+        ("POST /chat/completions/input_tokens == /v1 twin", "POST",
+         "/chat/completions/input_tokens", msgs,
+         same_as("/v1/chat/completions/input_tokens", msgs)),
+        ("POST /responses/input_tokens == /v1 twin", "POST",
+         "/responses/input_tokens", {"input": "Hi"},
+         same_as("/v1/responses/input_tokens", {"input": "Hi"})),
+        ("GET /tools -> 403", "GET", "/tools", None, status(403)),
+        ("POST /tools -> 403", "POST", "/tools", {}, status(403)),
+        ("GET /cors-proxy -> 403", "GET", "/cors-proxy", None, status(403)),
+        ("POST /cors-proxy -> 403", "POST", "/cors-proxy", {}, status(403)),
+    ]
+    audio_label = "POST /audio/transcriptions routes to whisper (400 on bad response_format)"
+    labels = [c[0] for c in cases] + [audio_label]
+    if not any(rec.matches(n) for n in labels):
+        return
+    if not (GEN_MODEL.is_file() and EMBED_MODEL and WHISPER_MODEL.is_file()
+            and WHISPER_WAV.is_file()):
+        for n in labels:
+            rec.skip(n, "needs GEN_MODEL + an embed model + whisper model + jfk.wav")
+        return
+    try:
+        with chimera_serve(chimera, [
+            "-m", str(GEN_MODEL),
+            "--enable-embeddings", str(EMBED_MODEL),
+            "--enable-audio", str(WHISPER_MODEL),
+        ]) as srv:
+            base = srv.base_url
+            for label, method, path, body, check in cases:
+                with maybe(rec, label) as t:
+                    r = (http_get(base + path) if method == "GET"
+                         else http_post_json(base + path, body, timeout=60))
+                    if r.status not in (200, 403):
+                        t.fail(f"got HTTP {r.status}: {r.body[:200]!r}")
+                    else:
+                        err = check(r, base)
+                        if err:
+                            t.fail(err)
+            with maybe(rec, audio_label) as t:
+                r = http_post_multipart(
+                    base + "/audio/transcriptions",
+                    fields={"response_format": "yaml"},
+                    files={"file": WHISPER_WAV},
+                )
+                if r.status != 400:
+                    t.fail(f"expected HTTP 400, got {r.status}: {r.body[:200]!r}")
+    except RuntimeError as e:
+        for n in labels:
+            rec.fail(n, 0.0, str(e))
+
+
+# ============================================================================
 # End-to-end: /slots + /lora-adapters (two server passes — one without
 # --slot-save-path and one with it, mirroring the bash structure).
 # ============================================================================
@@ -2664,6 +2810,8 @@ _SECTIONS = [
     ("chat_id_header", e2e_chat_id_header_tests),
     ("chats_endpoints", e2e_chats_endpoints_tests),
     ("slots_lora", e2e_slots_lora_tests),
+    ("model_alias", e2e_model_alias_tests),
+    ("upstream_route_aliases", e2e_upstream_route_aliases),
     ("stream_session", e2e_stream_session_tests),
     ("detect_language", e2e_detect_language_test),
     ("audio_input_validation", e2e_audio_input_validation),

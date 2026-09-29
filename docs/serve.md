@@ -8,6 +8,7 @@ chimera serve -m model.gguf [--port 8080] [--host 127.0.0.1]
               [--enable-audio whisper.gguf]
               [--enable-image sd.gguf]
               [--api-key TOKEN]
+              [--alias NAME[,NAME...]]
 ```
 
 ---
@@ -275,18 +276,21 @@ Always bound:
 | Method | Path | Body | Notes |
 |--------|------|------|-------|
 | GET | `/health`, `/v1/health` | — | Returns 200 once the model finishes loading. |
-| GET | `/v1/models` | — | Lists the loaded model. |
+| GET | `/models`, `/v1/models` | — | Lists the loaded model. The id is the `-m` argument as typed, or the first `--alias` in sort order. |
 | GET | `/metrics` | — | Prometheus-style server metrics. |
 | GET | `/props` | — | Read-only: which chat template, mmproj caps, default sampling params. |
 | POST | `/chat/completions`, `/v1/chat/completions` | JSON | Streaming + non-streaming. Pass `"stream": true` for SSE. |
 | POST | `/v1/completions` | JSON | Legacy OpenAI text-completion. |
-| POST | `/v1/embeddings` | JSON | Requires `--embeddings`. |
+| POST | `/completion`, `/completions` | JSON | llama.cpp's native completion format (`prompt`, `n_predict`; returns `content`). Not the OpenAI format. |
+| POST | `/v1/embeddings` | JSON | Requires `--embeddings` or `--enable-embeddings`. |
+| POST | `/embedding`, `/embeddings` | JSON | llama.cpp's native embeddings format (`content`). Same model selection as `/v1/embeddings`. |
 | POST | `/v1/messages` | JSON | Anthropic Messages API compat. |
 | POST | `/v1/messages/count_tokens` | JSON | Anthropic token counting. |
+| POST | `/chat/completions/input_tokens`, `/v1/chat/completions/input_tokens`, `/responses/input_tokens`, `/v1/responses/input_tokens` | JSON | OpenAI-format token counting. |
 | POST | `/infill` | JSON | Fill-in-the-middle for code models. 501 on models without FIM tokens. |
 | POST | `/tokenize`, `/detokenize` | JSON | Vocab helpers — token-id ↔ text. |
 | POST | `/apply-template` | JSON | Render the chat template against a `messages[]` array without generating. |
-| POST | `/v1/responses` | JSON | OpenAI Responses API. Stateful within a single chimera serve invocation; state is lost on restart. |
+| POST | `/responses`, `/v1/responses` | JSON | OpenAI Responses API. Stateful within a single chimera serve invocation; state is lost on restart. |
 | GET  | `/slots` | — | Per-slot status (id, state, prompt, n_past, ...). |
 | POST | `/slots/:id_slot` | JSON | `?action=save` / `?action=restore` / `?action=erase` for KV-cache snapshots. Save/restore require `--slot-save-path`; erase works without it. |
 | GET  | `/lora-adapters` | — | List LoRAs loaded via `--lora` and their current scales. |
@@ -294,18 +298,19 @@ Always bound:
 | GET  | `/v1/chimera/info` | — | JSON form of `chimera info`. Versions, built / loaded backends, devices, GPU/mmap/mlock/RPC capability flags, whisper/sd link state + CPU features, SQLite versions, build flags. Always bound. |
 | GET  | `/v1/chimera/db` | — | JSON form of `chimera db status`. Path, file size, schema version + target, table list, per-table row counts. Always bound. |
 | POST | `/v1/chimera/shutdown` | — | Graceful exit. Returns 202 then triggers the same teardown SIGINT does, on a detached thread 150 ms later. No body required. |
+| GET, POST | `/tools`, `/cors-proxy` | — | Always 403 `feature_disabled`, as in `llama-server` without `--tools` / `--webui-mcp-proxy`. |
 
 Bound when `--reranking <model>` is set:
 
 | Method | Path | Body | Notes |
 |--------|------|------|-------|
-| POST | `/v1/rerank` | JSON | Cross-encoder reranking. Body: `{"query": "...", "documents": [...], "top_n": N}`. |
+| POST | `/rerank`, `/reranking`, `/v1/rerank`, `/v1/reranking` | JSON | Cross-encoder reranking. Body: `{"query": "...", "documents": [...], "top_n": N}`. |
 
 Bound when `--enable-audio` is set:
 
 | Method | Path | Body | Notes |
 |--------|------|------|-------|
-| POST | `/v1/audio/transcriptions` | multipart | `file` field required. Supports WAV; other formats return 415. |
+| POST | `/audio/transcriptions`, `/v1/audio/transcriptions` | multipart | `file` field required. Supports WAV; other formats return 415. |
 | POST | `/v1/audio/translations` | multipart | `file` field required. Translates to English regardless of source language. |
 | POST | `/v1/audio/detect-language` | multipart | `file` field required. Chimera-specific exit-after-detect probe — runs whisper's language-id pass without decoding. Returns `{"language": "<code>", "duration": <seconds>}`. |
 
@@ -437,7 +442,7 @@ chimera serve -m model.gguf --parallel 4
 
 Audio and image requests are serialized per modality (one whisper transcription at a time, one SD generation at a time), because the underlying contexts are not thread-safe.
 
-**Production deployments.** chimera serve does not terminate TLS itself. Run it behind nginx, caddy, or a cloud load balancer for HTTPS. The `--host 0.0.0.0` flag lets it listen on all interfaces; combine with `--api-key` for the minimum reasonable exposure on a private network.
+**Production deployments.** chimera serve does not terminate TLS itself. Run it behind nginx, caddy, or a cloud load balancer for HTTPS. The `--host 0.0.0.0` flag lets it listen on all interfaces; combine with `--api-key` for the minimum reasonable exposure on a private network, and `--alias` to keep the model path out of `/v1/models`.
 
 **Stopping the server.** `Ctrl-C` (SIGINT) shuts down cleanly. The second `Ctrl-C` force-exits — useful if a request is hung.
 

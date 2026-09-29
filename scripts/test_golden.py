@@ -33,6 +33,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -121,6 +122,14 @@ def redact(obj: Any, keys: set[str]) -> Any:
     return obj
 
 
+def map_str(obj: Any, fn: Callable[[str], str]) -> Any:
+    if isinstance(obj, dict):
+        return {k: map_str(v, fn) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [map_str(x, fn) for x in obj]
+    return fn(obj) if isinstance(obj, str) else obj
+
+
 def type_of(v: Any) -> str:
     if isinstance(v, bool):
         return "bool"
@@ -167,8 +176,10 @@ def case_health(port: int) -> Any:
 
 def case_models(port: int) -> Any:
     r = http_json("GET", port, "/v1/models")
-    # `created` is the model file's mtime — varies per checkout.
-    return redact(r, {"created"})
+    # `created` is the model file's mtime; the id is the model path. Both
+    # vary per checkout.
+    r = redact(r, {"created"})
+    return map_str(r, lambda s: s.replace(str(MODELS), "<models>"))
 
 
 def case_props(port: int) -> Any:
@@ -188,12 +199,29 @@ def case_detokenize(port: int) -> Any:
 
 
 def case_apply_template(port: int) -> Any:
-    return http_json(
+    r = http_json(
         "POST",
         port,
         "/apply-template",
         {"messages": [{"role": "user", "content": PROMPT}]},
     )
+    # The Llama-3.2 template embeds the current date.
+    return map_str(r, lambda s: re.sub(r"Today Date: [^\n]*", "Today Date: <redacted>", s))
+
+
+def case_completion_legacy(port: int) -> Any:
+    # llama.cpp's native /completion format; text and timings vary.
+    r = http_json("POST", port, "/completion", {"prompt": PROMPT, "n_predict": 4})
+    return shape(r)
+
+
+def case_embedding_legacy(port: int) -> Any:
+    # llama.cpp's native /embedding format: [{"index", "embedding": [[...]]}].
+    r = http_json("POST", port, "/embedding", {"content": "fixed input"})
+    return {
+        "shape": shape(r),
+        "embedding_dim": len(r[0]["embedding"][0]),
+    }
 
 
 def case_embeddings(port: int) -> Any:
@@ -265,6 +293,8 @@ CASES: list[tuple[str, Callable[[int], Any]]] = [
     ("detokenize", case_detokenize),
     ("apply_template", case_apply_template),
     ("embeddings", case_embeddings),
+    ("completion_legacy", case_completion_legacy),
+    ("embedding_legacy", case_embedding_legacy),
     ("chat_completions", case_chat_completions),
     ("completions", case_completions),
 ]

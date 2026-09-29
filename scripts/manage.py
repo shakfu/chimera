@@ -2278,6 +2278,31 @@ class Application(ShellCmd, metaclass=MetaCommander):
 
             total_changes += comp_changes
 
+            # Route parity: a route llama-server gains at this ref must be
+            # bound by chimera serve or listed in server_routes.UNBOUND.
+            if comp["name"] == "llama.cpp":
+                import server_routes
+
+                print("=== llama-server routes ===")
+                server_cpp = fetch_upstream(
+                    comp["repo"], comp["ref"], "tools/server/server.cpp"
+                )
+                if server_cpp is None:
+                    print("  (failed to fetch upstream server.cpp; skipped)\n")
+                else:
+                    unbound = server_routes.missing(server_cpp, self.project.cwd)
+                    for method, path in unbound:
+                        print(f"  unbound: {method.upper()} {path}")
+                    if unbound:
+                        total_changes += 1
+                        print(
+                            "  -> bind in chimera_serve.cpp or add to "
+                            "server_routes.UNBOUND with a reason."
+                        )
+                    else:
+                        print("  all bound or listed in server_routes.UNBOUND")
+                    print()
+
             # --------------------------------------------------------------
             # Build-system drift probe (per-comparison). The header diff
             # above catches API drift. But chimera also depends on the
@@ -2392,8 +2417,8 @@ class Application(ShellCmd, metaclass=MetaCommander):
             print("clean: vendored headers match upstream at the requested refs.")
             return
         print(
-            f"{total_changes} header(s) changed across all comparisons. Audit:\n"
-            f"  - chimera_serve.cpp bindings (handler_t fields)\n"
+            f"{total_changes} header or route change(s) across all comparisons. Audit:\n"
+            f"  - chimera_serve.cpp bindings (handler_t fields, unbound routes)\n"
             f"  - chimera_sd.cpp / chimera_pin_check.cpp static_asserts\n"
             f"  - src/chimera/CMakeLists.txt link order / archive groups\n"
             f"  - server-http.cpp source copy under thirdparty/llama.cpp/src-aux/\n"

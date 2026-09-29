@@ -213,7 +213,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="not-used")
 ```
 
-Supported endpoints, by default: `/v1/chat/completions`, `/v1/completions`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic compat), `/v1/responses`, `/v1/models`, `/v1/embeddings`, `/infill`, `/tokenize`, `/detokenize`, `/apply-template`, `/health`, `/metrics`, `/props`. Opt-in endpoints add `/v1/audio/{transcriptions,translations}`, `/v1/images/{generations,edits,variations}`, `/v1/rerank`, and `/v1/vector_stores/*`. See [`docs/serve.md`](docs/serve.md) for the full API and [`docs/dev/server.md`](docs/dev/server.md) for the implementation notes (what's bound, what's deliberately not, why).
+Supported endpoints, by default: `/v1/chat/completions`, `/v1/completions`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic compat), `/v1/responses`, `/v1/models`, `/v1/embeddings`, `/infill`, `/tokenize`, `/detokenize`, `/apply-template`, `/health`, `/metrics`, `/props`. Opt-in endpoints add `/v1/audio/{transcriptions,translations}`, `/v1/images/{generations,edits,variations}`, `/v1/rerank`, and `/v1/vector_stores/*`. `llama-server`'s non-`/v1` spellings (`/completion`, `/embeddings`, `/models`, ...) are bound too. See [`docs/serve.md`](docs/serve.md) for the full API and [`docs/dev/server.md`](docs/dev/server.md) for the implementation notes (what's bound, what's deliberately not, why).
 
 ### Vector store / RAG (`index`, `search`)
 

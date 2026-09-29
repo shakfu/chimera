@@ -1,0 +1,13 @@
+{
+  "embedding_dim": 384,
+  "shape": [
+    {
+      "embedding": [
+        [
+          "float"
+        ]
+      ],
+      "index": "int"
+    }
+  ]
+}

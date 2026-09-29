@@ -4,6 +4,12 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Added
+
+- **`serve -a, --alias NAME[,NAME...]`** sets the model names `/v1/models` reports, matching `llama-server`. Without it the id is the `-m` argument as typed, so `-m /home/...` exposes the absolute path; this became the default with the llama.cpp b9741 update (previously the file name).
+
+- **`serve` binds the rest of `llama-server`'s single-model routes.** New: `GET /models`, `POST /completion`, `/completions`, `/embedding`, `/embeddings` (llama.cpp's native formats, not OpenAI's), `/responses`, `/chat/completions/input_tokens`, `/responses/input_tokens`, `/reranking`, `/v1/reranking` and `/audio/transcriptions`. `/tools` and `/cors-proxy` return 403, as upstream does without `--tools` / `--webui-mcp-proxy`. Clients written against `llama-server` got 404 on these. Still unbound: router-mode `/models*` and `POST /props`. `make bump-check` and `make test` now fail when upstream adds a route that chimera neither binds nor lists in `scripts/server_routes.py:UNBOUND`.
+
 ## [0.4.1]
 
 ### Added
