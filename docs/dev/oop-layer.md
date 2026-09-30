@@ -17,7 +17,7 @@ It is not compiled into `libchimera.a`. It compiles at the consumer's call site 
 | `chimera::SD` | persistent-handle | `chimera_sd::load_model` + `chimera_sd::generate` (structured-API) or `run_sd` (CLI-shaped) | yes - sd_ctx_t loaded once, reused across `generate()` / `run()` |
 | `chimera::Server` | options-in-ctor | `command_serve` | n/a - server owns its own lifecycle internally |
 
-`chimera::Server` uses options-in-ctor because the server owns its own lifecycle internally; `run()` blocks until the server shuts down and there's no per-call work to amortize a persistent handle against.
+`chimera::Server` uses options-in-ctor because the server owns its own lifecycle internally; `run()` blocks until the server shuts down and there's no per-call work to amortize a persistent handle against. `stop()` ends a `run()` in progress from another thread, through the `ServeStopper` that `command_serve` takes as its second argument. `ServeOptions::handle_signals = false` leaves SIGINT / SIGTERM with the caller.
 
 `chimera::Whisper` and `chimera::SD` are persistent-handle: the ctor calls the lower-level `chimera_whisper::load_model` / `chimera_sd::load_model` and caches the handle. Both expose two run flavors: a structured-API path (`transcribe()` / `generate()`) that returns the raw `TranscribeResult` / `vector<PixelImage>` for library consumers, and a CLI-shaped `run()` that calls into the post-load pipeline helpers `run_whisper(ctx, opts)` / `run_sd(ctx, opts)` - the same helpers `command_whisper` / `command_sd` use after loading, so the OOP and CLI paths share one body.
 

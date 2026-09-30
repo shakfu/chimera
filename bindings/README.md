@@ -93,6 +93,23 @@ srv.options.port = 8080
 srv.run()                                # blocks until SIGINT
 ```
 
+To keep SIGINT with Python, set `handle_signals = False`, call `run()` on a
+worker thread and `stop()` from the main thread. Python runs its signal
+handlers on the main thread only, and only while it executes Python code.
+
+```python
+import threading
+
+srv.options.handle_signals = False
+t = threading.Thread(target=srv.run)
+t.start()
+try:
+    t.join()
+except KeyboardInterrupt:
+    srv.stop()                           # no-op unless run() has started
+    t.join()
+```
+
 ## Smoke test
 
 `smoke_test.py` mirrors `tests/external/hpp_smoke.cpp`: an import/construction

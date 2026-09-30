@@ -116,6 +116,9 @@ def test_serve_options_roundtrip(chimera_mod):
     o.http_timeout = 120
     o.sse_ping_interval = 15
     assert o.sd_auto_fit is True  # upstream default
+    assert o.handle_signals is True
+    o.handle_signals = False
+    assert o.handle_signals is False
     o.sd_disable_prefetch = True
     o.sd_auto_fit = False
     o.sd_vae_format = "flux2"

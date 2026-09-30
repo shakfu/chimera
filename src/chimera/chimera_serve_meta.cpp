@@ -36,13 +36,11 @@
 #  include "chimera_sd.h"
 #endif
 
-#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <sqlite3.h>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace chimera_serve {
@@ -343,26 +341,20 @@ server_http_context::handler_t make_chimera_db_handler(const std::string & db_pa
 // POST /v1/chimera/shutdown
 // ----------------------------------------------------------------------------
 //
-// The `trigger` lambda is whatever `command_serve` would have run on
-// SIGINT (same as `g_shutdown_handler`). The handler queues the response
-// first and then runs `trigger` on a detached thread after a short
-// delay so the 202 actually reaches the client before the listener
-// stops accepting connections.
+// `trigger` stops `command_serve`'s task loop. It runs here, on the request's
+// own thread, while `command_serve`'s locals are alive. `command_serve` then
+// waits k_shutdown_delay_ms before closing the listener, so the 202 reaches
+// the client.
 
 server_http_context::handler_t make_chimera_shutdown_handler(std::function<void()> trigger) {
     return [trigger](const server_http_req &) -> server_http_res_ptr {
-        if (trigger) {
-            std::thread([trigger] {
-                std::this_thread::sleep_for(std::chrono::milliseconds(150));
-                trigger();
-            }).detach();
-        }
+        if (trigger) trigger();
         auto res = std::make_unique<server_http_res>();
         res->status = 202;
         res->data = json{
             { "object",  "chimera.shutdown" },
             { "status",  "shutting_down" },
-            { "delay_ms", 150 }
+            { "delay_ms", k_shutdown_delay_ms }
         }.dump();
         return res;
     };

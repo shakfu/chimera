@@ -36,6 +36,7 @@ int main() {
         (void) lopts; (void) eopts; (void) topts;
         chimera::Server srv(sopts);  // ctor is a no-op; run() blocks.
         (void) srv.options();
+        srv.stop();  // no run() in progress: no-op.
 #ifdef CHIMERA_HAS_WHISPER
         // Just take the address of the type to prove the template
         // instantiation compiles; don't construct it (would load a model).

@@ -90,7 +90,7 @@ The remainder of this document expands each decision.
 
 - `GET /v1/chimera/db` — JSON form of `chimera db status`. Path, size, schema version, table list, per-table row counts. Consumed by chimera-desktop's chats-page footer.
 
-- `POST /v1/chimera/shutdown` — graceful exit endpoint. Returns 202 then triggers SIGINT-equivalent teardown on a detached thread 150 ms later. Consumed by chimera-desktop's `sidecar::kill()`, which prefers it to SIGKILL when terminating the bundled child.
+- `POST /v1/chimera/shutdown` — graceful exit endpoint. Returns 202 then triggers SIGINT-equivalent teardown 150 ms later. Consumed by chimera-desktop's `sidecar::kill()`, which prefers it to SIGKILL when terminating the bundled child.
 
 All three live in `src/chimera/chimera_serve_meta.cpp`; bound unconditionally (no opt-in flag) since the data they expose is read-only and useful to any downstream client. See chimera's CHANGELOG `[Unreleased]` for the full design rationale.
 

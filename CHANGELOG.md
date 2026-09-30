@@ -6,9 +6,21 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Added
 
+- **`Server::stop()` and `ServeOptions::handle_signals`** let a library caller own the process's signals. `stop()` ends a `run()` in progress from another thread; `handle_signals = false` stops `command_serve` installing SIGINT / SIGTERM handlers. Procedural callers pass a `ServeStopper` as `command_serve`'s new second argument. A stop requested while the model loads takes effect when the load finishes; the same request through `POST /v1/chimera/shutdown` was previously lost, because the task loop resets its running flag when it starts. No CLI flag: the CLI always handles signals.
+
+- **`rat.py clean --keep-images` / `rat.py run --keep-images`** keep the PNGs the `test-sd-*` cases wrote to `build/rat/out/` and remove the rest of that directory. `--keep-output` kept them only along with the scratch DBs and transcripts.
+
 - **`serve -a, --alias NAME[,NAME...]`** sets the model names `/v1/models` reports, matching `llama-server`. Without it the id is the `-m` argument as typed, so `-m /home/...` exposes the absolute path; this became the default with the llama.cpp b9741 update (previously the file name).
 
 - **`serve` binds the rest of `llama-server`'s single-model routes.** New: `GET /models`, `POST /completion`, `/completions`, `/embedding`, `/embeddings` (llama.cpp's native formats, not OpenAI's), `/responses`, `/chat/completions/input_tokens`, `/responses/input_tokens`, `/reranking`, `/v1/reranking` and `/audio/transcriptions`. `/tools` and `/cors-proxy` return 403, as upstream does without `--tools` / `--webui-mcp-proxy`. Clients written against `llama-server` got 404 on these. Still unbound: router-mode `/models*` and `POST /props`. `make bump-check` and `make test` now fail when upstream adds a route that chimera neither binds nor lists in `scripts/server_routes.py:UNBOUND`.
+
+### Fixed
+
+- **`command_serve` / `Server::run()` remove their SIGINT and SIGTERM handlers on return.** They stayed installed, pointing at a closure over the returned call's locals, so a later signal in a library caller ran it on a dead stack frame. The second-interrupt flag also stayed set: a second `run()` in the same process exited with status 1 on its first Ctrl-C. The caller's previous handlers are now restored and the flag is reset per call. The CLI was unaffected, since it exits when `serve` returns.
+
+- **`POST /v1/chimera/shutdown` no longer crashes a library caller when the server stops inside its 150 ms delay.** The delay ran on a detached thread that then used `command_serve`'s locals; a SIGINT in that window let `command_serve` return first, and the thread segfaulted. The route now stops the task loop on the request thread, and `command_serve` waits the 150 ms itself.
+
+- **`serve`'s SIGINT / SIGTERM handler no longer takes a mutex.** It stopped the task queue directly, which locks the queue's mutex; a signal delivered to the thread holding that mutex would deadlock. The handler now writes one byte to a pipe and a watcher thread stops the queue. The forced exit on a second interrupt uses `_exit(1)` in place of `std::exit(1)`, so it no longer runs static destructors.
 
 ## [0.4.1]
 

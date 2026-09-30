@@ -576,21 +576,26 @@ private:
 
 // -------------------------------------------------------------------------
 // Server -- OpenAI-compatible HTTP server. `run()` blocks until the server
-// shuts down (Ctrl-C or programmatic stop). Options-in-ctor; the server's
-// internal lifecycle (model load + httplib listen + shutdown) is owned by
-// command_serve, which makes the persistent-handle distinction moot here.
+// shuts down: Ctrl-C, POST /v1/chimera/shutdown, or `stop()` from another
+// thread. Options-in-ctor; the server's internal lifecycle (model load +
+// httplib listen + shutdown) is owned by command_serve, which makes the
+// persistent-handle distinction moot here.
 // -------------------------------------------------------------------------
 class Server {
 public:
     explicit Server(ServeOptions opts) : opts_(std::move(opts)) {}
 
-    int run() { return command_serve(opts_); }
+    int run() { return command_serve(opts_, &stopper_); }
+
+    // See ServeStopper::stop. No-op unless run() is in progress.
+    void stop() { stopper_.stop(); }
 
     ServeOptions &       options()       { return opts_; }
     const ServeOptions & options() const { return opts_; }
 
 private:
     ServeOptions opts_;
+    ServeStopper stopper_;
 };
 
 // -------------------------------------------------------------------------

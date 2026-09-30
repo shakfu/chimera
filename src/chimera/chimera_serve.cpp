@@ -270,6 +270,8 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <ctime>
@@ -277,6 +279,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -296,6 +299,9 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
+#else
+#  include <fcntl.h>
+#  include <unistd.h>
 #endif
 
 namespace chimera_serve {
@@ -394,41 +400,120 @@ bool is_loopback_host(const std::string & host) {
     return host.rfind("127.", 0) == 0;
 }
 
-// Signal handling. The shutdown_handler closes the task queue, which causes
-// ctx_server.start_loop() to return on the main thread. Hitting Ctrl-C twice
-// force-exits in case the loop is wedged. Same pattern as llama-server.
-std::function<void(int)> g_shutdown_handler;
+// Signal handling. The first SIGINT / SIGTERM stops the task queue, which makes
+// ctx_server.start_loop() return on the main thread. A second one force-exits
+// in case the loop is wedged. SignalScope installs the handlers for one
+// command_serve call and removes them when it returns, so a library caller
+// gets its own handlers back.
 std::atomic_flag g_terminating = ATOMIC_FLAG_INIT;
 
-void chimera_serve_signal_handler(int signal) {
+#if defined(_WIN32)
+
+// Console control handlers run on their own thread, so a mutex is allowed.
+std::mutex g_ctrl_mutex;
+std::function<void()> g_ctrl_stop;
+
+BOOL WINAPI chimera_serve_ctrl_handler(DWORD ctrl_type) {
+    if (ctrl_type != CTRL_C_EVENT) return FALSE;
     if (g_terminating.test_and_set()) {
         std::fprintf(stderr, "\nreceived second interrupt, exiting immediately.\n");
         std::exit(1);
     }
-    if (g_shutdown_handler) {
-        g_shutdown_handler(signal);
-    }
+    std::lock_guard<std::mutex> lock(g_ctrl_mutex);
+    if (g_ctrl_stop) g_ctrl_stop();
+    return TRUE;
 }
 
-void install_signal_handlers() {
-#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-    struct sigaction sa{};
-    sa.sa_handler = chimera_serve_signal_handler;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGINT,  &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
-#elif defined(_WIN32)
-    // Lambda-to-PHANDLER_ROUTINE trampoline; mirrors llama-server.
-    auto win_handler = +[](unsigned long ctrl_type) -> int {
-        if (ctrl_type == 0 /*CTRL_C_EVENT*/) {
-            chimera_serve_signal_handler(SIGINT);
-            return 1;
+class SignalScope {
+public:
+    explicit SignalScope(std::function<void()> stop) {
+        g_terminating.clear();  // an earlier call in this process may have set it
+        {
+            std::lock_guard<std::mutex> lock(g_ctrl_mutex);
+            g_ctrl_stop = std::move(stop);
         }
-        return 0;
-    };
-    SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(win_handler), TRUE);
-#endif
+        SetConsoleCtrlHandler(chimera_serve_ctrl_handler, TRUE);
+    }
+
+    ~SignalScope() {
+        SetConsoleCtrlHandler(chimera_serve_ctrl_handler, FALSE);
+        // Waits for a handler that is still running `stop`.
+        std::lock_guard<std::mutex> lock(g_ctrl_mutex);
+        g_ctrl_stop = nullptr;
+    }
+
+    SignalScope(const SignalScope &) = delete;
+    SignalScope & operator=(const SignalScope &) = delete;
+};
+
+#else
+
+// Write end of the live SignalScope's pipe, or -1.
+std::atomic<int> g_signal_wfd{-1};
+
+// Async-signal-safe: only write() and _exit(). `stop` locks the task queue's
+// mutex, so it runs on SignalScope's watcher thread instead of here.
+void chimera_serve_signal_handler(int) {
+    const int saved_errno = errno;
+    if (g_terminating.test_and_set()) {
+        static const char msg[] = "\nreceived second interrupt, exiting immediately.\n";
+        (void)!write(STDERR_FILENO, msg, sizeof(msg) - 1);
+        _exit(1);
+    }
+    const int fd = g_signal_wfd.load();
+    if (fd >= 0) (void)!write(fd, "s", 1);
+    errno = saved_errno;
 }
+
+class SignalScope {
+public:
+    explicit SignalScope(std::function<void()> stop) {
+        if (pipe(fds_) != 0) {
+            std::fprintf(stderr, "chimera serve: pipe() failed; SIGINT / SIGTERM will not stop the server\n");
+            return;
+        }
+        for (int fd : fds_) fcntl(fd, F_SETFD, FD_CLOEXEC);
+        fcntl(fds_[1], F_SETFL, O_NONBLOCK);  // the handler must never block
+
+        // Reads one byte: 's' from the handler, or 'q' from the destructor.
+        watcher_ = std::thread([rfd = fds_[0], stop = std::move(stop)] {
+            char c = 0;
+            ssize_t n;
+            while ((n = read(rfd, &c, 1)) < 0 && errno == EINTR) {}
+            if (n == 1 && c == 's') stop();
+        });
+
+        g_terminating.clear();  // an earlier call in this process may have set it
+        g_signal_wfd.store(fds_[1]);
+        struct sigaction sa{};
+        sa.sa_handler = chimera_serve_signal_handler;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGINT,  &sa, &old_int_);
+        sigaction(SIGTERM, &sa, &old_term_);
+    }
+
+    ~SignalScope() {
+        if (!watcher_.joinable()) return;
+        sigaction(SIGINT,  &old_int_,  nullptr);
+        sigaction(SIGTERM, &old_term_, nullptr);
+        g_signal_wfd.store(-1);
+        (void)!write(fds_[1], "q", 1);
+        watcher_.join();  // `stop` cannot run after this
+        close(fds_[0]);
+        close(fds_[1]);
+    }
+
+    SignalScope(const SignalScope &) = delete;
+    SignalScope & operator=(const SignalScope &) = delete;
+
+private:
+    int fds_[2] = {-1, -1};
+    std::thread watcher_;
+    struct sigaction old_int_{};
+    struct sigaction old_term_{};
+};
+
+#endif
 
 // Populate common_params from chimera's ServeOptions. This is the only place
 // where chimera's CLI surface meets llama.cpp's giant param struct; keeping
@@ -576,6 +661,7 @@ struct SecondaryServerCtx {
     std::unique_ptr<server_context> ctx;
     std::unique_ptr<server_routes>  routes;
     std::thread                     loop;
+    std::atomic<bool>               loop_done{false};
 
     SecondaryServerCtx() = default;
     SecondaryServerCtx(const SecondaryServerCtx &)             = delete;
@@ -644,8 +730,31 @@ std::unique_ptr<SecondaryServerCtx> bring_up_secondary(
 }  // namespace
 }  // namespace chimera_serve
 
-int command_serve(const ServeOptions & opts) {
+void ServeStopper::stop() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_) return;
+    requested_ = true;
+    if (stop_) stop_();
+}
+
+int command_serve(const ServeOptions & opts, ServeStopper * stopper) {
     using namespace chimera_serve;
+
+    // Marks this call as the one `stopper` stops, from here to every return.
+    struct StopperRun {
+        ServeStopper * s;
+        explicit StopperRun(ServeStopper * s_) : s(s_) {
+            if (!s) return;
+            std::lock_guard<std::mutex> lock(s->mutex_);
+            s->running_   = true;
+            s->requested_ = false;
+        }
+        ~StopperRun() {
+            if (!s) return;
+            std::lock_guard<std::mutex> lock(s->mutex_);
+            s->running_ = false;
+        }
+    } stopper_run(stopper);
 
     if (opts.model.empty()) {
         fail(ExitCode::BadInput, "--model is required for `chimera serve`");
@@ -1157,9 +1266,7 @@ int command_serve(const ServeOptions & opts) {
 
     // Meta endpoints — JSON introspection + graceful shutdown.
     // /v1/chimera/info and /v1/chimera/db are always available (no
-    // gating flag). /v1/chimera/shutdown captures the same teardown
-    // SIGINT triggers; binds after `clean_up` is declared so the
-    // capture closure has it available. See chimera_serve_meta.cpp.
+    // gating flag). See chimera_serve_meta.cpp.
     ctx_http.get ("/v1/chimera/info",
                   ex_wrapper(make_chimera_info_handler()));
     // For the DB path we prefer the chat-persistence override (since
@@ -1183,15 +1290,43 @@ int command_serve(const ServeOptions & opts) {
         ctx_server.terminate();
     };
 
-    // /v1/chimera/shutdown — triggers the same termination the SIGINT
-    // handler would, on a detached thread 150 ms after the 202
-    // response is queued so the client actually sees it before the
-    // socket goes away.
+    // The one way to stop: SIGINT / SIGTERM, /v1/chimera/shutdown and
+    // ServeStopper::stop all call this. start_loop() sets the queue running
+    // unconditionally, so a terminate() that lands before it is lost; the
+    // flag covers a request made before the loops start.
+    std::atomic<bool> stop_requested{false};
+    auto request_stop = [&]() {
+        stop_requested.store(true);
+        // Secondary loops first, so they exit before the primary's
+        // start_loop() returns and we begin joining.
+        if (emb_ctx) emb_ctx->ctx->terminate();
+        if (rrk_ctx) rrk_ctx->ctx->terminate();
+        ctx_server.terminate();
+    };
+
+    // Hands request_stop to `stopper` until this scope ends, which is before
+    // the contexts it captures are destroyed. Declared after them for that.
+    struct StopperArm {
+        ServeStopper * s;
+        StopperArm(ServeStopper * s_, std::function<void()> fn) : s(s_) {
+            if (!s) return;
+            std::lock_guard<std::mutex> lock(s->mutex_);
+            s->stop_ = std::move(fn);
+            if (s->requested_) s->stop_();  // stop() arrived during setup
+        }
+        ~StopperArm() {
+            if (!s) return;
+            std::lock_guard<std::mutex> lock(s->mutex_);
+            s->stop_ = nullptr;
+        }
+    } stopper_arm(stopper, request_stop);
+
+    // /v1/chimera/shutdown
+    std::atomic<bool> shutdown_via_http{false};
     ctx_http.post("/v1/chimera/shutdown",
                   ex_wrapper(make_chimera_shutdown_handler([&]() {
-                      if (emb_ctx) emb_ctx->ctx->terminate();
-                      if (rrk_ctx) rrk_ctx->ctx->terminate();
-                      ctx_server.terminate();
+                      shutdown_via_http.store(true);
+                      request_stop();
                   })));
 
     server_stream_session_manager_start();
@@ -1216,17 +1351,16 @@ int command_serve(const ServeOptions & opts) {
     // Secondaries must have their task loop running before the first
     // request lands. Spawning after is_ready=true means ctx_http will
     // start accepting traffic the moment the loops are up.
-    if (emb_ctx) { emb_ctx->loop = std::thread([&]{ emb_ctx->ctx->start_loop(); }); }
-    if (rrk_ctx) { rrk_ctx->loop = std::thread([&]{ rrk_ctx->ctx->start_loop(); }); }
+    for (SecondaryServerCtx * sec : { emb_ctx.get(), rrk_ctx.get() }) {
+        if (!sec || stop_requested.load()) continue;
+        sec->loop = std::thread([sec] {
+            sec->ctx->start_loop();
+            sec->loop_done.store(true);
+        });
+    }
 
-    g_shutdown_handler = [&](int) {
-        // Terminate the secondary loops first so they unblock and exit
-        // before the primary's start_loop() returns and we begin joining.
-        if (emb_ctx) emb_ctx->ctx->terminate();
-        if (rrk_ctx) rrk_ctx->ctx->terminate();
-        ctx_server.terminate();
-    };
-    install_signal_handlers();
+    std::optional<SignalScope> signals;
+    if (opts.handle_signals) signals.emplace(request_stop);
 
     std::cout << "chimera serve: listening on";
     for (const auto & addr : ctx_http.listening_addresses) std::cout << " " << addr;
@@ -1279,17 +1413,27 @@ int command_serve(const ServeOptions & opts) {
                   << ". Pass --api-key, or bind to 127.0.0.1 and put a proxy in front.\n";
     }
 
-    // Blocks on the main thread until the task queue is terminated by the
-    // signal handler. Worker tasks run on threads owned by server_context;
-    // HTTP requests run on threads owned by cpp-httplib inside ctx_http.
-    ctx_server.start_loop();
+    // Blocks on the main thread until request_stop terminates the task
+    // queue. Worker tasks run on threads owned by server_context; HTTP
+    // requests run on threads owned by cpp-httplib inside ctx_http.
+    if (!stop_requested.load()) ctx_server.start_loop();
 
+    // Let the shutdown route's 202 reach the client before the listener closes.
+    if (shutdown_via_http.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(k_shutdown_delay_ms));
+    }
     clean_up();
     ctx_http.join();
-    // Secondary loops were signaled to terminate in the shutdown handler;
-    // wait for them to actually return before tearing down their owning
-    // unique_ptrs.
-    if (emb_ctx && emb_ctx->loop.joinable()) emb_ctx->loop.join();
-    if (rrk_ctx && rrk_ctx->loop.joinable()) rrk_ctx->loop.join();
+    // Wait for the secondary loops to return before tearing down their
+    // owning unique_ptrs. request_stop's terminate() is lost if it landed
+    // before the loop thread reached start_loop(), so repeat it.
+    for (SecondaryServerCtx * sec : { emb_ctx.get(), rrk_ctx.get() }) {
+        if (!sec || !sec->loop.joinable()) continue;
+        while (!sec->loop_done.load()) {
+            sec->ctx->terminate();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        sec->loop.join();
+    }
     return 0;
 }

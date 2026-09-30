@@ -337,7 +337,8 @@ NB_MODULE(chimera, m) {
         .def_rw("slot_save_path", &ServeOptions::slot_save_path)
         .def_rw("lora_adapters",  &ServeOptions::lora_adapters)
         .def_rw("webui",          &ServeOptions::webui)
-        .def_rw("public_path",    &ServeOptions::public_path);
+        .def_rw("public_path",    &ServeOptions::public_path)
+        .def_rw("handle_signals", &ServeOptions::handle_signals);
 
     nb::class_<chimera::Server>(m, "Server")
         .def(nb::init<ServeOptions>(), "options"_a)
@@ -345,7 +346,8 @@ NB_MODULE(chimera, m) {
             [](chimera::Server &self) -> ServeOptions & { return self.options(); },
             nb::rv_policy::reference_internal)
         // run() blocks until SIGINT / programmatic stop -> release the GIL.
-        .def("run", &chimera::Server::run, nb::call_guard<nb::gil_scoped_release>());
+        .def("run", &chimera::Server::run, nb::call_guard<nb::gil_scoped_release>())
+        .def("stop", &chimera::Server::stop, nb::call_guard<nb::gil_scoped_release>());
 
 #ifdef CHIMERA_HAS_SD
     // ====================================================================

@@ -1658,11 +1658,14 @@ class Cli:
             print(f"removing {installed}")
             installed.unlink()
         keep_output = getattr(args, "keep_output", False)
+        keep_images = getattr(args, "keep_images", False)
         for path in (self.paths.out_dir, self.paths.cache_dir):
             if not path.exists():
                 continue
             if path == self.paths.out_dir and keep_output:
                 print(f"keeping {path}")
+            elif path == self.paths.out_dir and keep_images:
+                self._remove_except_images(path)
             else:
                 print(f"removing {path}")
                 shutil.rmtree(path)
@@ -1674,6 +1677,22 @@ class Cli:
             print(f"removing {self.paths.rat_dir}")
             self.paths.rat_dir.rmdir()
         return 0
+
+    @staticmethod
+    def _remove_except_images(out_dir: Path) -> None:
+        """Empty `out_dir` of everything but its PNGs; only the sd cases write those."""
+        for child in sorted(out_dir.iterdir()):
+            if child.suffix == ".png" and child.is_file():
+                print(f"keeping {child}")
+            elif child.is_dir() and not child.is_symlink():
+                print(f"removing {child}")
+                shutil.rmtree(child)
+            else:
+                print(f"removing {child}")
+                child.unlink()
+        if not any(out_dir.iterdir()):
+            print(f"removing {out_dir}")
+            out_dir.rmdir()
 
     # -- install ------------------------------------------------------------
 
@@ -1951,6 +1970,8 @@ class Cli:
                 verb, _, target = name.partition(" ")
                 if verb == "clean" and args.keep_output:
                     target = "--keep-output"
+                elif verb == "clean" and args.keep_images:
+                    target = "--keep-images"
                 print(f"would run: {SCRIPT_NAME} {verb}{where}{' ' + target if target else ''}")
             print()
             for _, step in steps[len(installs) : len(installs) + len(targets)]:
@@ -2077,6 +2098,12 @@ class Cli:
             "--keep-output",
             action="store_true",
             help="leave --out-dir (sd images, transcripts, scratch DBs) in place for inspection",
+        )
+        c.add_argument(
+            "--keep-images",
+            action="store_true",
+            help="leave the sd cases' PNGs in --out-dir and remove the rest of it; "
+            "--keep-output already keeps them",
         )
         return c
 

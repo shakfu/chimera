@@ -110,7 +110,9 @@ Makefile reads, so an out-of-tree build directory is named once and both agree
 on it). `--bin-dir` and `--out-dir` override the binary and the output directory
 individually, and win over `--build-dir` when both are given. `clean` removes
 the installed binary, the downloads and the output directory, then `build/rat/`
-itself once nothing is left in it.
+itself once nothing is left in it. `--keep-output` (on `clean` and `run`) leaves
+the output directory in place; `--keep-images` leaves only the sd cases' PNGs in
+it.
 
 `models/` is the deliberate exception: it stays at the project root, shared with
 `make test`, because re-downloading tens of GiB of weights after every

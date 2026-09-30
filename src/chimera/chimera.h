@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -724,9 +726,30 @@ struct ServeOptions {
     // no UI for. When both are set, --public-path wins (mount_point is
     // registered before the xxd-baked GET / handler).
     std::string public_path;            // --public-path <dir>
+
+    // Install SIGINT / SIGTERM handlers (Ctrl-C on Windows) for the duration
+    // of command_serve. Library callers that own the process's signals set
+    // this to false and stop the server through a ServeStopper. No CLI flag.
+    bool handle_signals = true;
 };
 
-int command_serve(const ServeOptions & opts);
+// Stops a running command_serve from another thread.
+class ServeStopper {
+public:
+    // Asks the command_serve call holding this stopper to return. Honoured
+    // from the moment that call starts, including during model load, which
+    // finishes first. No-op when no call is in progress.
+    void stop();
+
+private:
+    friend int command_serve(const ServeOptions &, ServeStopper *);
+    std::mutex            mutex_;
+    std::function<void()> stop_;       // set while the task loops can be stopped
+    bool                  running_   = false;
+    bool                  requested_ = false;
+};
+
+int command_serve(const ServeOptions & opts, ServeStopper * stopper = nullptr);
 
 // llama.cpp-backed entrypoints (defined in chimera_llama.cpp). These mirror
 // the CLI subcommands of the same name; the chimera_cli/ shell wraps these
