@@ -4,6 +4,8 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+## [0.5.0]
+
 ### Added
 
 - **`Server::stop()` and `ServeOptions::handle_signals`** let a library caller own the process's signals. `stop()` ends a `run()` in progress from another thread; `handle_signals = false` stops `command_serve` installing SIGINT / SIGTERM handlers. Procedural callers pass a `ServeStopper` as `command_serve`'s new second argument. A stop requested while the model loads takes effect when the load finishes; the same request through `POST /v1/chimera/shutdown` was previously lost, because the task loop resets its running flag when it starts. No CLI flag: the CLI always handles signals.
