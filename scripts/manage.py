@@ -102,7 +102,7 @@ WHISPERCPP_VERSION = "v1.9.4"
 # leejet's ggml fork. master-883 (leejet/stable-diffusion.cpp#1999) added
 # SD_USE_UPSTREAM_GGML, which compiles those calls out, and SD_GGML_SOURCE_DIR;
 # see StableDiffusionCppBuilder._ggml_options.
-SDCPP_VERSION = "master-898-2bb7294"
+SDCPP_VERSION = "master-929-3f8527a"
 # linenoise: shakfu's fork.
 LINENOISE_VERSION = "2.1"
 # SQLite amalgamation; upstream files live at sqlite.org/<year>/

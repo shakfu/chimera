@@ -419,7 +419,7 @@ struct SdOptions {
     // VAE tiling: reduces peak VRAM for large outputs at a small quality cost.
     // Negative-one sentinels mean "leave the upstream default in place".
     bool  vae_tiling             = false;
-    int   vae_tile_size          = -1;    // absolute tile size (px); applied to both x and y
+    int   vae_tile_size          = -1;    // absolute tile size (px); applied to both axes
     float vae_relative_tile_size = -1.0f; // tile size as a fraction of the canvas; applied to both axes
     float vae_tile_overlap       = -1.0f; // fraction overlap between tiles
 

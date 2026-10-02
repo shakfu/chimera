@@ -212,10 +212,10 @@ static_assert(std::is_same_v<decltype(sd_hires_params_t::upscale_tile_size),  in
 
 // ---- sd_tiling_params_t fields (gp.vae_tiling_params) -----------------
 static_assert(std::is_same_v<decltype(sd_tiling_params_t::enabled),        bool>,  "sd_tiling_params_t::enabled retyped.");
-static_assert(std::is_same_v<decltype(sd_tiling_params_t::tile_size_x),    int>,   "sd_tiling_params_t::tile_size_x retyped.");
-static_assert(std::is_same_v<decltype(sd_tiling_params_t::tile_size_y),    int>,   "sd_tiling_params_t::tile_size_y retyped.");
-static_assert(std::is_same_v<decltype(sd_tiling_params_t::rel_size_x),     float>, "sd_tiling_params_t::rel_size_x retyped.");
-static_assert(std::is_same_v<decltype(sd_tiling_params_t::rel_size_y),     float>, "sd_tiling_params_t::rel_size_y retyped.");
+static_assert(std::is_same_v<decltype(sd_tiling_params_t::tile_size_w),    int>,   "sd_tiling_params_t::tile_size_w retyped.");
+static_assert(std::is_same_v<decltype(sd_tiling_params_t::tile_size_h),    int>,   "sd_tiling_params_t::tile_size_h retyped.");
+static_assert(std::is_same_v<decltype(sd_tiling_params_t::rel_size_w),     float>, "sd_tiling_params_t::rel_size_w retyped.");
+static_assert(std::is_same_v<decltype(sd_tiling_params_t::rel_size_h),     float>, "sd_tiling_params_t::rel_size_h retyped.");
 static_assert(std::is_same_v<decltype(sd_tiling_params_t::target_overlap), float>, "sd_tiling_params_t::target_overlap retyped.");
 
 // Enum values chimera names by string and reaches via str_to_*. A
@@ -985,12 +985,12 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
     if (req.vae_tiling) {
         gp.vae_tiling_params.enabled = true;
         if (req.vae_tile_size > 0) {
-            gp.vae_tiling_params.tile_size_x = req.vae_tile_size;
-            gp.vae_tiling_params.tile_size_y = req.vae_tile_size;
+            gp.vae_tiling_params.tile_size_w = req.vae_tile_size;
+            gp.vae_tiling_params.tile_size_h = req.vae_tile_size;
         }
         if (req.vae_relative_tile_size >= 0.0f) {
-            gp.vae_tiling_params.rel_size_x = req.vae_relative_tile_size;
-            gp.vae_tiling_params.rel_size_y = req.vae_relative_tile_size;
+            gp.vae_tiling_params.rel_size_w = req.vae_relative_tile_size;
+            gp.vae_tiling_params.rel_size_h = req.vae_relative_tile_size;
         }
         if (req.vae_tile_overlap >= 0.0f) {
             gp.vae_tiling_params.target_overlap = req.vae_tile_overlap;

@@ -14,6 +14,10 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 - **`serve` binds the rest of `llama-server`'s single-model routes.** New: `GET /models`, `POST /completion`, `/completions`, `/embedding`, `/embeddings` (llama.cpp's native formats, not OpenAI's), `/responses`, `/chat/completions/input_tokens`, `/responses/input_tokens`, `/reranking`, `/v1/reranking` and `/audio/transcriptions`. `/tools` and `/cors-proxy` return 403, as upstream does without `--tools` / `--webui-mcp-proxy`. Clients written against `llama-server` got 404 on these. Still unbound: router-mode `/models*` and `POST /props`. `make bump-check` and `make test` now fail when upstream adds a route that chimera neither binds nor lists in `scripts/server_routes.py:UNBOUND`.
 
+### Changed
+
+- **Update stable-diffusion.cpp to master-929-3f8527a** (from master-898-2bb7294). `sd_tiling_params_t` renamed `tile_size_x/y` and `rel_size_x/y` to `_w/_h`. `tile_size` is now in image pixels (default 256); it was latent cells (default 32). `--vae-tile-size` and the `vae_tile_size` request field were documented as pixels but sent latent cells, so `--vae-tile-size 32` meant 256 px. They now mean pixels. Sizes below 4 latent cells (32 px for an 8x VAE) now fail the generation; upstream used to clamp them.
+
 ### Fixed
 
 - **`command_serve` / `Server::run()` remove their SIGINT and SIGTERM handlers on return.** They stayed installed, pointing at a closure over the returned call's locals, so a later signal in a library caller ran it on a dead stack frame. The second-interrupt flag also stayed set: a second `run()` in the same process exited with status 1 on its first Ctrl-C. The caller's previous handlers are now restored and the flag is reset per call. The CLI was unaffected, since it exits when `serve` returns.
