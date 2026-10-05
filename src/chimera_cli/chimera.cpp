@@ -2193,6 +2193,8 @@ void bind_gen_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--top-p", p.prompt_opts.top_p, "Top-p");
     cmd->add_option("--min-p", p.prompt_opts.min_p, "Min-p");
     cmd->add_option("--repeat-penalty", p.prompt_opts.repeat_penalty, "Repeat penalty");
+    cmd->add_flag("--stats", p.prompt_opts.stats,
+        "Print token counts, prompt and generation times and tokens/s to stderr");
     cmd->add_option("--mmproj", p.prompt_opts.mmproj,
         "Multimodal projector (mmproj GGUF) for vision/audio input");
     cmd->add_option("--image", p.prompt_opts.images,

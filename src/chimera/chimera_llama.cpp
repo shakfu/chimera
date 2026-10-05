@@ -25,6 +25,7 @@
 #include "sampling.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -778,7 +779,8 @@ std::string run_generation_mtmd(
     llama_model * model,
     const LlamaCommonOptions & opts,
     const std::string & user_prompt,
-    const TokenCallback & on_token) {
+    const TokenCallback & on_token,
+    GenStats * stats) {
 
     if (opts.mmproj.empty() || (opts.images.empty() && opts.videos.empty())) {
         fail(ExitCode::Runtime, "run_generation_mtmd called without mmproj/media");
@@ -898,6 +900,8 @@ std::string run_generation_mtmd(
     auto loras = load_loras(model, ctx.get(), opts.lora_adapters);
     auto sampler = make_sampler(model, opts);
 
+    using clock = std::chrono::steady_clock;
+    const auto t_prompt = clock::now();
     llama_pos new_n_past = 0;
     const int32_t eval_rc = mtmd_helper_eval_chunks(
         mctx.get(), ctx.get(), chunks.get(),
@@ -909,9 +913,18 @@ std::string run_generation_mtmd(
              "mtmd_helper_eval_chunks failed (rc=" + std::to_string(eval_rc) + ")");
     }
 
-    return sample_loop(ctx.get(), sampler.get(),
-                       llama_model_get_vocab(model),
-                       opts.n_predict, on_token);
+    const auto t_gen = clock::now();
+    std::vector<llama_token> generated;
+    std::string text = sample_loop(ctx.get(), sampler.get(),
+                                   llama_model_get_vocab(model),
+                                   opts.n_predict, on_token, stats ? &generated : nullptr);
+    if (stats) {
+        stats->prompt_tokens      = mm_tokens;
+        stats->generated_tokens   = generated.size();
+        stats->prompt_seconds     = std::chrono::duration<double>(t_gen - t_prompt).count();
+        stats->generation_seconds = std::chrono::duration<double>(clock::now() - t_gen).count();
+    }
+    return text;
 }
 
 std::string run_generation(
@@ -919,7 +932,8 @@ std::string run_generation(
     const LlamaCommonOptions & opts,
     const std::string & prompt,
     bool add_special,
-    const TokenCallback & on_token) {
+    const TokenCallback & on_token,
+    GenStats * stats) {
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const auto prompt_tokens = tokenize(vocab, prompt, add_special, true);
@@ -927,11 +941,57 @@ std::string run_generation(
     auto loras = load_loras(model, ctx.get(), opts.lora_adapters);
     auto sampler = make_sampler(model, opts);
 
+    using clock = std::chrono::steady_clock;
+    const auto t_prompt = clock::now();
     decode_tokens(ctx.get(), prompt_tokens, static_cast<int32_t>(opts.n_batch));
     for (llama_token token : prompt_tokens) {
         common_sampler_accept(sampler.get(), token, false);
     }
-    return sample_loop(ctx.get(), sampler.get(), vocab, opts.n_predict, on_token);
+    const auto t_gen = clock::now();
+    std::vector<llama_token> generated;
+    std::string text = sample_loop(ctx.get(), sampler.get(), vocab, opts.n_predict, on_token,
+                                   stats ? &generated : nullptr);
+    if (stats) {
+        stats->prompt_tokens      = prompt_tokens.size();
+        stats->generated_tokens   = generated.size();
+        stats->prompt_seconds     = std::chrono::duration<double>(t_gen - t_prompt).count();
+        stats->generation_seconds = std::chrono::duration<double>(clock::now() - t_gen).count();
+    }
+    return text;
+}
+
+// The `gen --stats` table: one "  <label> | <value>" row each, on stderr.
+// Same layout as cyllama's and inferna's `gen --stats`. Rates are per
+// phase, so the generation rate is a decode rate that excludes prompt time.
+static void print_gen_stats(const GenStats & s) {
+    const auto rate = [](size_t n, double secs) {
+        return secs > 0.0 ? static_cast<double>(n) / secs : 0.0;
+    };
+    char buf[32];
+    std::vector<std::pair<std::string, std::string>> rows;
+    rows.emplace_back("Prompt tokens", std::to_string(s.prompt_tokens));
+    rows.emplace_back("Generated tokens", std::to_string(s.generated_tokens));
+    std::snprintf(buf, sizeof(buf), "%.2f s", s.prompt_seconds);
+    rows.emplace_back("Prompt eval time", buf);
+    std::snprintf(buf, sizeof(buf), "%.2f s", s.generation_seconds);
+    rows.emplace_back("Generation time", buf);
+    std::snprintf(buf, sizeof(buf), "%.2f", rate(s.prompt_tokens, s.prompt_seconds));
+    rows.emplace_back("Prompt tokens/second", buf);
+    std::snprintf(buf, sizeof(buf), "%.2f", rate(s.generated_tokens, s.generation_seconds));
+    rows.emplace_back("Generation tokens/second", buf);
+
+    size_t key_w = 0, val_w = 0;
+    for (const auto & [k, v] : rows) {
+        key_w = std::max(key_w, k.size());
+        val_w = std::max(val_w, v.size());
+    }
+    const std::string line(key_w + val_w + 5, '-');
+    std::cerr << line << '\n';
+    for (const auto & [k, v] : rows) {
+        std::cerr << "  " << std::left << std::setw(static_cast<int>(key_w)) << k << " | "
+                  << std::right << std::setw(static_cast<int>(val_w)) << v << '\n';
+    }
+    std::cerr << line << std::endl;
 }
 
 // ---- command entrypoints --------------------------------------------------
@@ -949,12 +1009,17 @@ int command_prompt(const LlamaCommonOptions & opts, const std::string & prompt) 
     };
     auto model = load_llama_model(opts);
     std::string text;
+    GenStats stats;
+    GenStats * want = opts.stats ? &stats : nullptr;
     if (!opts.images.empty() || !opts.videos.empty()) {
-        text = run_generation_mtmd(model.get(), opts, prompt, stream_to_cout);
+        text = run_generation_mtmd(model.get(), opts, prompt, stream_to_cout, want);
     } else {
-        text = run_generation(model.get(), opts, prompt, /*add_special=*/true, stream_to_cout);
+        text = run_generation(model.get(), opts, prompt, /*add_special=*/true, stream_to_cout, want);
     }
-    std::cout << '\n';
+    std::cout << '\n' << std::flush;
+    if (want) {
+        print_gen_stats(stats);
+    }
     return text.empty() ? static_cast<int>(ExitCode::Generate) : 0;
 }
 

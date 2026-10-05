@@ -154,6 +154,16 @@ common_chat_msg make_chat_msg(const std::string & role, const std::string & cont
 // Trailing newlines / flushing / buffering are the caller's choice.
 using TokenCallback = std::function<void(std::string_view)>;
 
+// Token counts and wall-clock seconds of one generation (`gen --stats`).
+// Prompt time covers the prompt decode, plus media encoding on the mtmd path;
+// generation time covers the sample loop, sampling included.
+struct GenStats {
+    size_t prompt_tokens      = 0;
+    size_t generated_tokens   = 0;
+    double prompt_seconds     = 0.0;
+    double generation_seconds = 0.0;
+};
+
 // Sample up to n_predict tokens from a context that already has the prompt
 // decoded into its KV cache. Invokes `on_token` per sampled token when set.
 // Optional out_tokens receives the generated token ids in order. Exposed
@@ -171,9 +181,11 @@ std::string run_generation(llama_model *              model,
                            const LlamaCommonOptions & opts,
                            const std::string &        prompt,
                            bool                       add_special,
-                           const TokenCallback &      on_token = {});
+                           const TokenCallback &      on_token = {},
+                           GenStats *                 stats = nullptr);
 
 std::string run_generation_mtmd(llama_model *              model,
                                 const LlamaCommonOptions & opts,
                                 const std::string &        user_prompt,
-                                const TokenCallback &      on_token = {});
+                                const TokenCallback &      on_token = {},
+                                GenStats *                 stats = nullptr);

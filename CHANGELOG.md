@@ -4,6 +4,18 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Added
+
+- **`chimera gen --stats`** prints prompt and generated token counts, the wall-clock time of each phase, and the tokens/s of each to stderr after generating. The table layout matches cyllama's `gen --stats`, so `rat.py` and `rwt.py` parse one format. The generation rate excludes prompt time, as in `chat`'s per-turn line; cyllama's single `Tokens/second` row is generated tokens over total time, so the two are not comparable and `chimera` names its rows `Prompt tokens/second` and `Generation tokens/second` instead. Timing uses `std::chrono` around the prompt decode and the sample loop rather than llama.cpp's perf counters, which `new_llama_context` turns off.
+
+- **`rat.py` records every `test` run in a SQLite database shared with cyllama's and inferna's `rwt.py`.** The default path is `~/config/runs/db.sqlite`; `$RUNS_DB` overrides it and `--no-record` turns it off. Each run stores target, backend, version, the sha256 of the binary, git commit, host, wall time and exit code. Each case stores its status (pass, fail, timeout or skip) and seconds. A gen case also stores the numbers from `gen --stats`, when the binary has it (tokens/s per phase among them). Each image an sd case writes stores its size and sha256; the seed is fixed, so an unchanged hash means an identical image. Rows are written as each case ends, so an interrupted run keeps its finished cases. `runs diff` compares two runs case by case; `rat.py report` writes an HTML report and opens it in the browser. It opens with a version comparison: per backend and target, the newest version against the next one below it, with a regression verdict per case. `rat.py run --version X` records a baseline from an older release. See [`docs/dev/rat.md`](docs/dev/rat.md#run-history).
+
+  ```sh
+  rat.py runs                # recent runs of this project
+  rat.py runs diff           # latest run vs the previous one with the same backend and target
+  rat.py runs diff 12 15     # any two runs, across projects too
+  ```
+
 ## [0.5.0]
 
 ### Added

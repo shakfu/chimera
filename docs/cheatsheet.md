@@ -45,6 +45,7 @@ chimera gen -m model.gguf -p "Extract:" --json-schema-file schema.json
 chimera gen -m model.gguf -p "..." --flash-attn \
     --cache-type-k q8_0 --cache-type-v q8_0 --ubatch-size 256
 chimera gen -m model.gguf -p "..." --lora adapter.gguf:0.7    # repeatable
+chimera gen -m model.gguf -p "..." --stats    # token counts, timings, tokens/s on stderr
 
 # Repetition + presence/frequency penalties + Mirostat / DRY
 chimera gen -m model.gguf -p "..." \

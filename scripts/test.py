@@ -931,6 +931,7 @@ def e2e_gen_tests(rec: Recorder, chimera: Path) -> None:
         rec.skip("gen Llama-3.2-1B", f"missing {GEN_MODEL}")
         rec.skip("tokenize Llama-3.2-1B", f"missing {GEN_MODEL}")
         rec.skip("gen --prompt-file - (stdin)", f"missing {GEN_MODEL}")
+        rec.skip("gen --stats prints its table to stderr", f"missing {GEN_MODEL}")
         return
 
     with maybe(rec, "gen Llama-3.2-1B") as t:
@@ -957,6 +958,27 @@ def e2e_gen_tests(rec: Recorder, chimera: Path) -> None:
         )
         if rc != 0:
             t.fail(f"exit code {rc}")
+
+    # rat.py and cyllama's rwt.py parse this table into their run history, so
+    # pin the rows, the stream (stderr) and the token count.
+    with maybe(rec, "gen --stats prints its table to stderr") as t:
+        rc, out, err = run_capture(
+            [str(chimera), "gen", "-m", str(GEN_MODEL), "-p", "Hello", "-n", "8", "--stats"],
+            timeout=120,
+        )
+        rows = dict(re.findall(r"^\s+([A-Za-z/ ]+?)\s+\|\s+([0-9.]+)", err, re.MULTILINE))
+        want = {"Prompt tokens", "Generated tokens", "Prompt eval time", "Generation time",
+                "Prompt tokens/second", "Generation tokens/second"}
+        if rc != 0:
+            t.fail(f"exit code {rc}")
+        elif set(rows) != want:
+            t.fail(f"stats rows {sorted(rows)}, expected {sorted(want)}")
+        elif not 0 < int(rows["Generated tokens"]) <= 8:
+            t.fail(f"Generated tokens = {rows['Generated tokens']}, expected 1..8")
+        elif float(rows["Generation tokens/second"]) <= 0:
+            t.fail("Generation tokens/second is not positive")
+        elif "tokens/second" in out:
+            t.fail("stats table leaked into stdout")
 
     # --load-mode against a REAL model. The parse-level checks in
     # smoke_tests() only prove the validator accepts each name and the run

@@ -87,7 +87,8 @@ Two things the suite knows that the bare CLI does not:
 
 ## Where things go
 
-The script's entire footprint is one directory, `build/rat/`:
+Apart from the [run history](#run-history), the script's entire footprint is one
+directory, `build/rat/`:
 
 ```
 build/rat/chimera      the installed binary
@@ -117,6 +118,33 @@ it.
 `models/` is the deliberate exception: it stays at the project root, shared with
 `make test`, because re-downloading tens of GiB of weights after every
 `make clean` is not a sensible default.
+
+## Run history
+
+Every `test` run is recorded in `~/config/runs/db.sqlite` (override with
+`$RUNS_DB`; skip with `--no-record`). It is not under `~/.config` because
+snap-packaged browsers cannot read hidden directories. cyllama's and inferna's `rwt.py` write to
+the same file, so runs compare across versions, backends and projects. The
+`RunLog` class is kept identical in all three scripts.
+
+```
+python3 scripts/rat.py runs                  # recent chimera runs (--all-projects for every project)
+python3 scripts/rat.py runs diff             # latest run vs the previous one with the same backend and target
+python3 scripts/rat.py runs diff 12 15       # any two runs
+python3 scripts/rat.py report               # HTML report beside the database, opened in the browser
+```
+
+| Table | One row per | Columns |
+|-|-|-|
+| `runs` | `test` invocation | target, backend, version, binary path and sha256, git commit and dirty flag, host, argv, `built`/`loaded`/`gpu_layers`, start, finish, seconds, rc |
+| `cases` | case | family, number, status (`pass`, `fail`, `timeout`, `skip`), rc, seconds, skip reason |
+| `outputs` | image an sd case wrote | file name, bytes, sha256 |
+| `metrics` | measured value of a case | name, value. Parsed from the gen cases' `--stats` table. `rat.py` writes `generation_tokens_per_second` and `prompt_tokens_per_second` (per phase); `rwt.py` writes `tokens_per_second` (end to end). The names differ so `runs diff` never compares the two. `rat.py` passes `--stats` only when the binary's `gen --help` lists it, so older releases still run. |
+
+Rows are written as each case ends. A run with no `finished_at` was
+interrupted. The steps of one `run` share a `session` id. A database error
+prints a warning and stops recording; it never fails the test run. A database
+whose `PRAGMA user_version` is newer than the script's schema is left alone.
 
 ## Models
 
