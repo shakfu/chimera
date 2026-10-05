@@ -18,6 +18,10 @@ BINDINGS = REPO_ROOT / "bindings" / "chimera_ext.cpp"
 # Intentionally unbound: the Tokenizer class takes a path + use_mmap directly.
 UNBOUND_STRUCTS = {"TokenizeOptions"}
 
+# Intentionally unbound fields. stats: only command_prompt reads it, to print
+# to stderr; chimera::Llama ignores it, so a Python knob would do nothing.
+UNBOUND_FIELDS = {("LlamaCommonOptions", "stats")}
+
 # One declaration per line: `type name;`, `type name = value;` or `type name{...};`.
 # A method never matches: `(` follows its name.
 FIELD_RE = re.compile(r"^\s*(?!return\b|using\b|typedef\b)[\w:<>,\s*&]+?\s(\w+)\s*(?:=[^;]*|\{[^;]*\})?;", re.M)
@@ -48,5 +52,8 @@ def test_every_field_is_bound(struct):
     bindings = BINDINGS.read_text()
     assert f"nb::class_<{struct}>" in bindings, f"{struct} is not bound; add it or list it in UNBOUND_STRUCTS"
     bound = set(re.findall(rf"&{struct}::(\w+)", bindings))
-    missing = [f for f in struct_fields(HEADER.read_text(), struct) if f not in bound]
+    fields = struct_fields(HEADER.read_text(), struct)
+    stale = [f for s, f in UNBOUND_FIELDS if s == struct and f not in fields]
+    assert stale == [], f"UNBOUND_FIELDS lists {struct} fields that no longer exist: {stale}"
+    missing = [f for f in fields if f not in bound and (struct, f) not in UNBOUND_FIELDS]
     assert missing == [], f"{struct} fields with no def_rw in chimera_ext.cpp: {missing}"
