@@ -16,6 +16,10 @@ All notable changes to chimera will be documented in this file. Format is loosel
   rat.py runs diff 12 15     # any two runs, across projects too
   ```
 
+### Fixed
+
+- **`make deps` re-clones a source tree left at a ref other than its pin.** An existing `build/<project>` clone was reused as-is, so pulling a pin bump into a checkout that had already built the old one kept building the old ref; the pin-check `static_assert`s then failed on fields the old headers lack. A clone with edits outside `scripts/patches/` is left in place and the build stops, naming the edited files.
+
 ## [0.5.0]
 
 ### Added

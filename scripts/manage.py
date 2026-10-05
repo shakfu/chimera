@@ -485,6 +485,45 @@ class AbstractBuilder(ShellCmd):
         self.log.warning(f"Optional library not found: {lib_path}")
         return False
 
+    def source_patches(self) -> list[Path]:
+        """``scripts/patches/*.patch`` files applied to this tree; none by default."""
+        return []
+
+    def _git(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args], cwd=str(self.src_dir), capture_output=True, text=True
+        )
+
+    def _at_pinned_ref(self) -> bool:
+        """True when the clone's HEAD is the commit ``self.version`` names."""
+        head = self._git("rev-parse", "HEAD")
+        pinned = self._git("rev-parse", "--verify", "-q", f"{self.version}^{{commit}}")
+        return head.returncode == 0 and pinned.returncode == 0 and head.stdout == pinned.stdout
+
+    def ensure_source(self) -> None:
+        """Clone at ``self.version``; re-clone a checkout at any other ref.
+
+        An existing clone was reused as-is, so a pin bump pulled into a
+        checkout that already had ``build/<project>`` built the old ref.
+        """
+        if self.src_dir.exists() and self.version and not self._at_pinned_ref():
+            patched: set[str] = set()
+            for patch in self.source_patches():
+                numstat = self._git("apply", "--numstat", str(patch)).stdout
+                patched.update(line.split("\t")[-1] for line in numstat.splitlines())
+            changed = self._git("diff", "--name-only", "HEAD").stdout.split()
+            edits = [path for path in changed if path not in patched]
+            if edits:
+                self.fail(
+                    f"{self.src_dir} is not at {self.version} and has local edits "
+                    f"outside scripts/patches/: {edits}. Save or discard them, "
+                    f"delete {self.src_dir}, and re-run."
+                )
+            self.log.info(f"{self.src_dir} is not at {self.version}: re-cloning")
+            self.remove(self.src_dir)
+        if not self.src_dir.exists():
+            self.setup()
+
 
 class Builder(AbstractBuilder):
     """Concrete builder: clones source from repo_url at self.version."""
@@ -609,13 +648,13 @@ class GgmlBuilder(Builder):
         source of truth and double as the upstream PR payload; see
         ``scripts/patches/README.md``.
         """
-        patch_dir = Path(__file__).resolve().parent / "patches"
-        if not patch_dir.exists():
-            return
-        ggml_patches = sorted(patch_dir.glob("ggml-*.patch")) if self.takes_ggml_patches() else []
-        patches = ggml_patches + sorted(patch_dir.glob(f"{self.name}-*.patch"))
-        for patch in patches:
+        for patch in self.source_patches():
             self._apply_patch(patch)
+
+    def source_patches(self) -> list[Path]:
+        patch_dir = Path(__file__).resolve().parent / "patches"
+        ggml_patches = sorted(patch_dir.glob("ggml-*.patch")) if self.takes_ggml_patches() else []
+        return ggml_patches + sorted(patch_dir.glob(f"{self.name}-*.patch"))
 
     def _apply_patch(self, patch: Path) -> None:
         """Apply a single unified diff to ``self.src_dir`` if it isn't already.
@@ -1016,8 +1055,7 @@ class LlamaCppBuilder(GgmlBuilder):
             )
 
     def build(self) -> None:
-        if not self.src_dir.exists():
-            self.setup()
+        self.ensure_source()
         self.log.info(f"building {self.name}")
 
         # Before _copy_headers(): a patch may touch a header that gets staged.
@@ -1165,8 +1203,7 @@ class WhisperCppBuilder(GgmlBuilder):
         self.log.info("whisper.cpp's ggml enums match llama.cpp's")
 
     def build(self) -> None:
-        if not self.src_dir.exists():
-            self.setup()
+        self.ensure_source()
         self.log.info(f"building {self.name}")
 
         self._apply_source_patches()
@@ -1247,12 +1284,10 @@ class StableDiffusionCppBuilder(GgmlBuilder):
         cmakelists = proj.src / cls.name / "CMakeLists.txt"
         log = logging.getLogger(cls.__name__)
 
-        if not cmakelists.exists():
-            log.info(f"fetching {cls.name} early to resolve GGML_MAX_NAME")
-            try:
-                cls(project=proj).setup()
-            except Exception as exc:  # noqa: BLE001 - fall back, but loudly
-                log.warning(f"could not fetch {cls.name} to read GGML_MAX_NAME: {exc}")
+        try:
+            cls(project=proj).ensure_source()
+        except Exception as exc:  # noqa: BLE001 - fall back, but loudly
+            log.warning(f"could not fetch {cls.name} to read GGML_MAX_NAME: {exc}")
 
         try:
             text = cmakelists.read_text(encoding="utf-8", errors="replace")
@@ -1358,8 +1393,7 @@ class StableDiffusionCppBuilder(GgmlBuilder):
         stamp.write_text(wanted)
 
     def build(self, examples: bool = True) -> None:
-        if not self.src_dir.exists():
-            self.setup()
+        self.ensure_source()
         self.log.info(f"building {self.name}")
 
         ggml_options = self._ggml_options()
@@ -1423,8 +1457,7 @@ class LinenoiseBuilder(Builder):
     libs: list[str] = ["linenoise"]
 
     def build(self) -> None:
-        if not self.src_dir.exists():
-            self.setup()
+        self.ensure_source()
         self.log.info(f"building {self.name}")
         self.prefix.mkdir(exist_ok=True)
         self.include.mkdir(exist_ok=True)
@@ -1536,8 +1569,7 @@ class SqliteVecBuilder(AbstractBuilder):
 
     def build(self) -> None:
         self.log.info(f"fetching {self.name} {self.version}")
-        if not self.src_dir.exists():
-            self.setup()
+        self.ensure_source()
         self.prefix.mkdir(parents=True, exist_ok=True)
         self.include.mkdir(exist_ok=True)
         src_aux = self.prefix / "src-aux"
