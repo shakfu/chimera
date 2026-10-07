@@ -2151,6 +2151,17 @@ class TestSuite:
         # decode wants a ~3.3 GiB compute buffer while the diffusion weights are
         # still resident, and no --params-backend spelling helps because that is
         # a compute buffer, not weights.
+        #
+        # On an 8 GiB RTX 4060 (Windows) this passes with CUDA and is EXPECTED TO
+        # FAIL with Vulkan; cyllama and inferna behave the same way. The run stops
+        # at sd.cpp's model-manager capacity check, not in an allocation: the
+        # check wants the segment's need plus a fixed 512 MB margin (1298 MB at
+        # z_image.prelude, as measured in cyllama) against the backend's reported
+        # free memory, and Vulkan reports ~1.1 GiB less free than the resident
+        # weights explain (1168 MB), so it is ~130 MB short. Not a regression; do
+        # not "fix" it by changing these args -- `--diffusion-fa` passes but tests
+        # something else, and `--max-vram` only moves the failure to a later
+        # segment.
         return self.sd_case("1", ["--params-backend", "te=cpu", "--vae-tiling"], timeout)
 
     def sd_2(self, _backend: str, timeout: float | None) -> int:
