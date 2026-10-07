@@ -2,9 +2,13 @@
 
 All notable changes to chimera will be documented in this file. Format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.6.0]
 
 ### Added
+
+- **`serve` binds `POST /v1/systemone`**, upstream's TypeSafe System One API for native decision models (laya, clef, openjev, lev, kev, nimble). It answers typed `choice` / `score` / `noul` questions with probabilities. Other models get 501, as upstream. `make test` covers Laya, Kev and lev when their GGUFs are in `models/`.
+
+- **`serve --embeddings-mmproj` and `--embeddings-pooling`** configure the `--enable-embeddings` model. The mmproj enables upstream's new `{"content": [...]}` input on `/v1/embeddings`, with image, audio and video parts. The pooling flag lets a generative VLM serve as the embedder: it has no pooling metadata, and `/v1/embeddings` rejects pooling `none`. Both flags require `--enable-embeddings`.
 
 - **`chimera gen --stats`** prints prompt and generated token counts, the wall-clock time of each phase, and the tokens/s of each to stderr after generating. The table layout matches cyllama's `gen --stats`, so `rat.py` and `rwt.py` parse one format. The generation rate excludes prompt time, as in `chat`'s per-turn line; cyllama's single `Tokens/second` row is generated tokens over total time, so the two are not comparable and `chimera` names its rows `Prompt tokens/second` and `Generation tokens/second` instead. Timing uses `std::chrono` around the prompt decode and the sample loop rather than llama.cpp's perf counters, which `new_llama_context` turns off.
 
@@ -16,7 +20,15 @@ All notable changes to chimera will be documented in this file. Format is loosel
   rat.py runs diff 12 15     # any two runs, across projects too
   ```
 
+### Changed
+
+- **Update llama.cpp to b11429** (v0.6.0, from b11146). `GET /v1/models` entries gain an `architecture` object with `input_modalities` / `output_modalities`. `LLAMA_STATE_SEQ_VERSION` went from 3 to 4, so restoring a slot file saved with `--slot-save-path` before this update returns 400. Save it again.
+
 ### Fixed
+
+- **Malformed or mistyped request JSON returns 400, not 500.** `json::parse` throws `common_json_error`, a `std::runtime_error`, which the route wrapper mapped to 500. Upstream maps it to 400 as of b11429.
+
+- **`scripts/test_fixtures.py` forwards options such as `--no-color` to `test.py`.** It rejected them as unrecognized arguments, contrary to `docs/dev/maintenance.md`.
 
 - **`make deps` re-clones a source tree left at a ref other than its pin.** An existing `build/<project>` clone was reused as-is, so pulling a pin bump into a checkout that had already built the old one kept building the old ref; the pin-check `static_assert`s then failed on fields the old headers lack. A clone with edits outside `scripts/patches/` is left in place and the build stops, naming the edited files.
 

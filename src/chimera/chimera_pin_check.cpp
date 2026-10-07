@@ -56,6 +56,7 @@ CHIMERA_ASSERT_HANDLER(post_control);
 CHIMERA_ASSERT_HANDLER(post_chat_completions_tok);
 CHIMERA_ASSERT_HANDLER(post_responses_tok_oai);
 CHIMERA_ASSERT_HANDLER(post_rerank);
+CHIMERA_ASSERT_HANDLER(post_systemone);
 CHIMERA_ASSERT_HANDLER(post_responses_oai);
 CHIMERA_ASSERT_HANDLER(post_infill);
 CHIMERA_ASSERT_HANDLER(post_tokenize);

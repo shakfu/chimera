@@ -69,6 +69,24 @@ curl -s http://127.0.0.1:8080/v1/embeddings \
   -d '{"model": "any", "input": "hello world"}'
 ```
 
+`--enable-embeddings <model.gguf>` loads a second model for `/v1/embeddings` and keeps `-m` generative. `--embeddings-mmproj <mmproj.gguf>` adds image or audio input to that model. Each `input` element can then be `{"content": [...]}` with the same parts as chat completions (`text`, `image_url`, `input_audio`, `input_video`). `--embeddings-pooling mean|cls|last|none|rank` overrides the model's pooling. A generative VLM used as an embedder has no pooling metadata and needs it; `/v1/embeddings` rejects pooling `none`.
+
+```text
+chimera serve -m chat.gguf --enable-embeddings vlm.gguf \
+  --embeddings-mmproj mmproj-vlm.gguf --embeddings-pooling mean
+```
+
+### Decision models
+
+A native decision model (laya, kev, lev, openjev, nimble, clef) answers typed questions on `POST /v1/systemone`. No flag is needed: `-m` with such a model enables it, and `/v1/models` reports `"output_modalities": ["decisions"]`. Laya and clef serve only this endpoint. See upstream's [server README](https://github.com/ggml-org/llama.cpp/blob/b11429/tools/server/README.md) for the request shape.
+
+```text
+curl -s http://127.0.0.1:8080/v1/systemone -H 'Content-Type: application/json' -d '{
+  "state": "I was charged twice and nobody has replied.",
+  "questions": {"route": {"type": "choice", "instructions": "Which team?",
+                          "criteria": {"billing": null, "shipping": null}}}}'
+```
+
 ### Audio transcription
 
 ```text
@@ -257,6 +275,8 @@ When `--slot-save-path` is set, `POST /slots/:id?action=save&filename=foo.bin` s
 
 `GET /slots` (slot status — which slot holds which conversation, how many tokens are cached, ...) is always available and not gated by this flag. `?action=erase` works without `--slot-save-path` too; only save/restore need the directory.
 
+A snapshot is only valid for the model and llama.cpp state format that wrote it. Restoring a file from an older chimera returns 400; save it again.
+
 ### LoRA hot-swap
 
 ```text
@@ -290,6 +310,7 @@ Always bound:
 | POST | `/infill` | JSON | Fill-in-the-middle for code models. 501 on models without FIM tokens. |
 | POST | `/tokenize`, `/detokenize` | JSON | Vocab helpers — token-id ↔ text. |
 | POST | `/apply-template` | JSON | Render the chat template against a `messages[]` array without generating. |
+| POST | `/v1/systemone` | JSON | TypeSafe System One API: typed `choice` / `score` / `noul` questions about a `state`, answered with probabilities. Needs a native decision model (laya, clef, openjev, lev, kev, nimble); 501 otherwise. See upstream's [server README](https://github.com/ggml-org/llama.cpp/blob/b11429/tools/server/README.md). |
 | POST | `/responses`, `/v1/responses` | JSON | OpenAI Responses API. Stateful within a single chimera serve invocation; state is lost on restart. |
 | GET  | `/slots` | — | Per-slot status (id, state, prompt, n_past, ...). |
 | POST | `/slots/:id_slot` | JSON | `?action=save` / `?action=restore` / `?action=erase` for KV-cache snapshots. Save/restore require `--slot-save-path`; erase works without it. |

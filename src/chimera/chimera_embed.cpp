@@ -173,6 +173,8 @@ Embedder::Embedder(Embedder &&) noexcept = default;
 Embedder & Embedder::operator=(Embedder &&) noexcept = default;
 Embedder::~Embedder() = default;
 
+int pooling_from_name(const std::string & name) { return parse_pooling(name); }
+
 int Embedder::n_embd() const { return impl_->n_embd_; }
 int Embedder::n_ctx () const { return impl_->n_ctx_;  }
 

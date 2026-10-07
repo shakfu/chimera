@@ -668,6 +668,8 @@ struct ServeOptions {
     // when the main LLM is a generative model and you also want OpenAI-
     // compatible embeddings without launching a second process.
     std::string embed_model;          // --enable-embeddings <embedding.gguf>
+    std::string embed_mmproj;         // --embeddings-mmproj; image/audio input to embed_model
+    std::string embed_pooling;        // --embeddings-pooling; empty = the model's GGUF metadata
 
     // Opt-in cross-encoder reranker. When non-empty a third server_context
     // is spun up with embedding=true + pooling=rank and /v1/rerank is

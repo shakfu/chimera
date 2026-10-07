@@ -329,6 +329,8 @@ NB_MODULE(chimera, m) {
         .def_rw("rag_embedding_model", &ServeOptions::rag_embedding_model)
         .def_rw("rag_db_path",         &ServeOptions::rag_db_path)
         .def_rw("embed_model",         &ServeOptions::embed_model)
+        .def_rw("embed_mmproj",        &ServeOptions::embed_mmproj)
+        .def_rw("embed_pooling",       &ServeOptions::embed_pooling)
         .def_rw("rerank_model",        &ServeOptions::rerank_model)
         .def_rw("cache_embeddings",    &ServeOptions::cache_embeddings)
         // persistence / slots / lora / webui

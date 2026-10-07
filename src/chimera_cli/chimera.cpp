@@ -2876,6 +2876,13 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "Embedding GGUF to load alongside the LLM (enables /v1/vector_stores/*)");
     cmd->add_option("--enable-embeddings", p.serve_opts.embed_model,
         "Embedding GGUF to load alongside the LLM (routes /v1/embeddings to it)");
+    cmd->add_option("--embeddings-mmproj", p.serve_opts.embed_mmproj,
+        "Multimodal projector for the --enable-embeddings model "
+        "(image/audio content parts in /v1/embeddings)");
+    cmd->add_option("--embeddings-pooling", p.serve_opts.embed_pooling,
+        "Pooling for the --enable-embeddings model: mean | cls | last | none | rank "
+        "(default: the model's GGUF metadata)")
+        ->check(CLI::IsMember({"mean", "cls", "last", "none", "rank"}));
     cmd->add_option("--reranking", p.serve_opts.rerank_model,
         "Cross-encoder reranker GGUF to load alongside the LLM (enables /v1/rerank)");
     cmd->add_flag("--cache-embeddings", p.serve_opts.cache_embeddings,

@@ -374,6 +374,8 @@ chimera sd --diffusion-model flux1-dev.gguf -p "..." -o out.png \
 chimera serve -m model.gguf                                    # text-only
 chimera serve -m embed.gguf --embeddings                       # /v1/embeddings (single-model embed mode)
 chimera serve -m model.gguf --enable-embeddings embed.gguf     # +/v1/embeddings (dedicated model, LLM stays generative)
+chimera serve -m model.gguf --enable-embeddings vlm.gguf --embeddings-mmproj mmproj.gguf --embeddings-pooling mean  # +image/audio parts
+chimera serve -m Laya-Q8_0.gguf                                # decision model: POST /v1/systemone
 chimera serve -m model.gguf --reranking rerank.gguf            # +/v1/rerank (cross-encoder)
 chimera serve -m model.gguf --enable-audio whisper.gguf        # +/v1/audio/{transcriptions,translations}
 chimera serve -m model.gguf --enable-image sd.gguf             # +/v1/images/*

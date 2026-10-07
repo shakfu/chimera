@@ -45,6 +45,7 @@ scripts/test_diff.py. Schema is intentionally simple: an array of
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import http.client
 import io
@@ -62,6 +63,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
@@ -87,6 +89,8 @@ SD_CANDIDATES = [
 ]
 MTMD_TEXT_MODEL = MODELS / "gemma-4-E4B-it-Q4_K_M.gguf"
 MTMD_MMPROJ = MODELS / "mmproj-gemma-4-E4B-it-BF16.gguf"
+# Native decision models served by POST /v1/systemone; each is tested if present.
+DECISION_MODELS = ["Laya-Q8_0.gguf", "Kev-4B-Q8_0.gguf", "lev-Q8_0.gguf"]
 
 
 def first_existing(model_dir: Path, names: list[str]) -> Optional[Path]:
@@ -414,7 +418,8 @@ def http_get(url: str, *, timeout: float = 10) -> HttpResponse:
 def http_post_json(
     url: str, body: object, *, headers: Optional[dict] = None, timeout: float = 30
 ) -> HttpResponse:
-    data = json.dumps(body).encode("utf-8")
+    # bytes are sent as-is, for malformed-body tests.
+    data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
     for k, v in (headers or {}).items():
@@ -2003,7 +2008,10 @@ def e2e_upstream_route_aliases(rec: Recorder, chimera: Path) -> None:
         return check
 
     def status(code: int):
-        return lambda r, base: None if r.status == code else f"got HTTP {r.status}"
+        def check(r: HttpResponse, base: str) -> Optional[str]:
+            return None if r.status == code else f"got HTTP {r.status}"
+        check.code = code
+        return check
 
     cases = [
         ("GET /models == GET /v1/models", "GET", "/models", None,
@@ -2028,6 +2036,11 @@ def e2e_upstream_route_aliases(rec: Recorder, chimera: Path) -> None:
         ("POST /tools -> 403", "POST", "/tools", {}, status(403)),
         ("GET /cors-proxy -> 403", "GET", "/cors-proxy", None, status(403)),
         ("POST /cors-proxy -> 403", "POST", "/cors-proxy", {}, status(403)),
+        ("POST /v1/systemone (not a decision model) -> 501", "POST", "/v1/systemone",
+         {"state": "x", "questions": {"q": {"type": "noul", "instructions": "?"}}},
+         status(501)),
+        ("POST /tokenize malformed JSON -> 400", "POST", "/tokenize",
+         b'{"content": ', status(400)),
     ]
     audio_label = "POST /audio/transcriptions routes to whisper (400 on bad response_format)"
     labels = [c[0] for c in cases] + [audio_label]
@@ -2049,7 +2062,7 @@ def e2e_upstream_route_aliases(rec: Recorder, chimera: Path) -> None:
                 with maybe(rec, label) as t:
                     r = (http_get(base + path) if method == "GET"
                          else http_post_json(base + path, body, timeout=60))
-                    if r.status not in (200, 403):
+                    if r.status != getattr(check, "code", 200):
                         t.fail(f"got HTTP {r.status}: {r.body[:200]!r}")
                     else:
                         err = check(r, base)
@@ -2084,6 +2097,7 @@ def e2e_slots_lora_tests(rec: Recorder, chimera: Path) -> None:
     pass2_names = [
         "POST /slots/0?action=save with --slot-save-path -> 200 + file written",
         "POST /slots/0?action=restore -> 200",
+        "POST /slots/0?action=restore of an older-format file -> 400, slot still usable",
     ]
     if not GEN_MODEL.is_file():
         for n in pass1_names + pass2_names:
@@ -2179,6 +2193,28 @@ def e2e_slots_lora_tests(rec: Recorder, chimera: Path) -> None:
                     )
                     if r.status != 200:
                         t.fail(f"got HTTP {r.status}")
+
+                with maybe(rec, pass2_names[2]) as t:
+                    # Header is (magic u32, version u32); a file from before a
+                    # LLAMA_STATE_SEQ_VERSION bump differs only in the version.
+                    data = bytearray((slot_dir / "snap.bin").read_bytes())
+                    version = int.from_bytes(data[4:8], "little")
+                    data[4:8] = (version - 1).to_bytes(4, "little")
+                    (slot_dir / "old.bin").write_bytes(bytes(data))
+                    r = http_post_json(
+                        f"{srv.base_url}/slots/0?action=restore",
+                        {"filename": "old.bin"},
+                        timeout=60,
+                    )
+                    if r.status != 400:
+                        t.fail(f"restore: got HTTP {r.status}: {r.body[:200]!r}")
+                    r = http_post_json(
+                        f"{srv.base_url}/v1/chat/completions",
+                        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4},
+                        timeout=120,
+                    )
+                    if r.status != 200:
+                        t.fail(f"chat after failed restore: HTTP {r.status}")
 
         except RuntimeError as e:
             for n in pass2_names:
@@ -2821,6 +2857,167 @@ def e2e_audio_input_validation(rec: Recorder, chimera: Path) -> None:
 # order deterministic matters because some tests share state (e.g. all
 # the GEN_MODEL-driven blocks share the gen model's warmup cost on disk
 # cache).
+# ============================================================================
+# End-to-end: native decision models on POST /v1/systemone.
+# ============================================================================
+
+SYSTEMONE_REQUEST = {
+    "state": "Customer message: I was charged twice for my order last week "
+             "and nobody has replied.",
+    "questions": {
+        "route": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "criteria": {"billing": None, "shipping": None, "technical": None},
+        },
+        "angry": {"type": "noul", "instructions": "Is the customer angry?"},
+        "urgency": {
+            "type": "score",
+            "instructions": "How urgent is this?",
+            "criteria": ["can wait", "this week", "today", "right now"],
+        },
+    },
+}
+
+
+def check_systemone_answers(d: dict) -> Optional[str]:
+    """Return an error string if `d` is not a well-formed answer to SYSTEMONE_REQUEST."""
+    a = d.get("answers", {})
+    if set(a) != {"route", "angry", "urgency"}:
+        return f"answer ids: {sorted(a)}"
+    route, angry, urg = a["route"], a["angry"], a["urgency"]
+    p = route["probabilities"]
+    if set(p) != {"billing", "shipping", "technical"} or abs(sum(p.values()) - 1) > 1e-3:
+        return f"route probabilities: {p}"
+    if route["choice"] != max(p, key=p.get):
+        return f"route choice {route['choice']!r} is not the argmax of {p}"
+    # The state is unambiguous; a wrong answer means mis-wired label tokens.
+    if route["choice"] != "billing":
+        return f"route choice {route['choice']!r}, expected 'billing'"
+    if not 0 <= angry["noul"] <= 1:
+        return f"noul out of [0, 1]: {angry['noul']}"
+    if not 0 <= urg["score"] <= 3 or len(urg["legend"]) != 4:
+        return f"score: {urg}"
+    if abs(sum(urg["probabilities"].values()) - 1) > 1e-3:
+        return f"score probabilities: {urg['probabilities']}"
+    if d.get("usage", {}).get("input_tokens", 0) <= 0:
+        return f"usage: {d.get('usage')}"
+    return None
+
+
+def e2e_decision_model_tests(rec: Recorder, chimera: Path) -> None:
+    for fname in DECISION_MODELS:
+        model = MODELS / fname
+        names = [
+            f"{fname}: /v1/models output_modalities == ['decisions']",
+            f"{fname}: POST /v1/systemone choice/noul/score answers",
+            f"{fname}: POST /v1/systemone unknown question type -> 400",
+        ]
+        if not any(rec.matches(n) for n in names):
+            continue
+        if not model.is_file():
+            for n in names:
+                rec.skip(n, f"missing {model}")
+            continue
+        try:
+            with chimera_serve(chimera, ["-m", str(model)]) as srv:
+                with maybe(rec, names[0]) as t:
+                    d = http_get(f"{srv.base_url}/v1/models").json()["data"][0]
+                    out = d.get("architecture", {}).get("output_modalities")
+                    if out != ["decisions"]:
+                        t.fail(f"got {out!r}")
+                with maybe(rec, names[1]) as t:
+                    r = http_post_json(f"{srv.base_url}/v1/systemone",
+                                       SYSTEMONE_REQUEST, timeout=300)
+                    err = (f"HTTP {r.status}: {r.body[:200]!r}" if r.status != 200
+                           else check_systemone_answers(r.json()))
+                    if err:
+                        t.fail(err)
+                with maybe(rec, names[2]) as t:
+                    r = http_post_json(f"{srv.base_url}/v1/systemone", {
+                        "state": "x",
+                        "questions": {"q": {"type": "bogus", "instructions": "?"}},
+                    })
+                    if r.status != 400:
+                        t.fail(f"got HTTP {r.status}: {r.body[:200]!r}")
+        except RuntimeError as e:
+            for n in names:
+                rec.fail(n, 0.0, str(e))
+
+
+# ============================================================================
+# End-to-end: --embeddings-mmproj / --embeddings-pooling on the dedicated
+# embedding context.
+# ============================================================================
+
+
+def solid_png(w: int, h: int, rgb: tuple) -> bytes:
+    """Return a solid-color RGB PNG."""
+    row = b"\x00" + bytes(rgb) * w
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (len(data).to_bytes(4, "big") + tag + data
+                + zlib.crc32(tag + data).to_bytes(4, "big"))
+    ihdr = w.to_bytes(4, "big") + h.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(row * h)) + chunk(b"IEND", b""))
+
+
+def e2e_embed_mmproj_tests(rec: Recorder, chimera: Path) -> None:
+    flag_cases = [
+        ("serve --embeddings-mmproj without --enable-embeddings exits 2 (BadInput)",
+         ["--embeddings-mmproj", "x.gguf"], 2),
+        ("serve --embeddings-pooling bogus exits non-zero (CLI11 enum)",
+         ["--enable-embeddings", "x.gguf", "--embeddings-pooling", "bogus"], None),
+    ]
+    for label, extra, want in flag_cases:
+        with maybe(rec, label) as t:
+            rc = run_silent([str(chimera), "serve", "-m", "missing.gguf", *extra,
+                             "--host", "127.0.0.1", "--port", str(free_port())],
+                            timeout=10)
+            if (rc != want) if want is not None else rc == 0:
+                t.fail(f"exit {rc}")
+
+    name = "serve --embeddings-mmproj: image content part changes the embedding"
+    if not rec.matches(name):
+        return
+    vlm = os.environ.get("CHIMERA_TEST_EMBED_VLM")
+    proj = os.environ.get("CHIMERA_TEST_EMBED_VLM_MMPROJ")
+    if not (vlm or proj):
+        rec.skip(name, "set CHIMERA_TEST_EMBED_VLM=<vlm.gguf> + "
+                       "CHIMERA_TEST_EMBED_VLM_MMPROJ=<mmproj.gguf>")
+        return
+    if not (vlm and proj and Path(vlm).is_file() and Path(proj).is_file()):
+        rec.fail(name, 0.0, "CHIMERA_TEST_EMBED_VLM / _MMPROJ partially set or missing")
+        return
+    if not GEN_MODEL.is_file():
+        rec.skip(name, f"missing {GEN_MODEL}")
+        return
+    img = "data:image/png;base64," + base64.b64encode(
+        solid_png(32, 32, (200, 30, 30))).decode()
+    text = {"type": "text", "text": "What is this: "}
+    try:
+        with chimera_serve(chimera, [
+            "-m", str(GEN_MODEL), "--enable-embeddings", vlm,
+            "--embeddings-mmproj", proj, "--embeddings-pooling", "mean",
+        ]) as srv:
+            with maybe(rec, name) as t:
+                r = http_post_json(f"{srv.base_url}/v1/embeddings", {"input": [
+                    {"content": [text, {"type": "image_url", "image_url": {"url": img}}]},
+                    {"content": [text]},
+                    "What is this: ",
+                ]}, timeout=120)
+                if r.status != 200:
+                    t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+                else:
+                    e = [x["embedding"] for x in r.json()["data"]]
+                    if e[0] == e[1]:
+                        t.fail("image part did not change the embedding")
+                    if e[1] != e[2]:
+                        t.fail("text content part differs from the plain string")
+    except RuntimeError as e:
+        rec.fail(name, 0.0, str(e))
+
+
 _SECTIONS = [
     ("smoke", smoke_tests),
     ("gen", e2e_gen_tests),
@@ -2834,6 +3031,8 @@ _SECTIONS = [
     ("slots_lora", e2e_slots_lora_tests),
     ("model_alias", e2e_model_alias_tests),
     ("upstream_route_aliases", e2e_upstream_route_aliases),
+    ("decision_models", e2e_decision_model_tests),
+    ("embed_mmproj", e2e_embed_mmproj_tests),
     ("stream_session", e2e_stream_session_tests),
     ("detect_language", e2e_detect_language_test),
     ("audio_input_validation", e2e_audio_input_validation),

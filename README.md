@@ -199,6 +199,9 @@ Use `--help` on any subcommand to see its options.
 chimera serve -m model.gguf                                  # text-only
 chimera serve -m model.gguf --embeddings                     # +/v1/embeddings (single-model embed mode)
 chimera serve -m model.gguf --enable-embeddings embed.gguf   # +/v1/embeddings (dedicated model)
+chimera serve -m model.gguf --enable-embeddings vlm.gguf \
+  --embeddings-mmproj mmproj.gguf --embeddings-pooling mean  # +image/audio input to /v1/embeddings
+chimera serve -m decision-model.gguf                         # +/v1/systemone (laya, kev, lev, ...)
 chimera serve -m model.gguf --reranking rerank.gguf          # +/v1/rerank
 chimera serve -m model.gguf --enable-audio whisper.gguf      # +/v1/audio/{transcriptions,translations}
 chimera serve -m model.gguf --enable-image sd.gguf           # +/v1/images/*
@@ -213,7 +216,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="not-used")
 ```
 
-Supported endpoints, by default: `/v1/chat/completions`, `/v1/completions`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic compat), `/v1/responses`, `/v1/models`, `/v1/embeddings`, `/infill`, `/tokenize`, `/detokenize`, `/apply-template`, `/health`, `/metrics`, `/props`. Opt-in endpoints add `/v1/audio/{transcriptions,translations}`, `/v1/images/{generations,edits,variations}`, `/v1/rerank`, and `/v1/vector_stores/*`. `llama-server`'s non-`/v1` spellings (`/completion`, `/embeddings`, `/models`, ...) are bound too. See [`docs/serve.md`](docs/serve.md) for the full API and [`docs/dev/server.md`](docs/dev/server.md) for the implementation notes (what's bound, what's deliberately not, why).
+Supported endpoints, by default: `/v1/chat/completions`, `/v1/completions`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic compat), `/v1/responses`, `/v1/models`, `/v1/embeddings`, `/infill`, `/tokenize`, `/detokenize`, `/apply-template`, `/health`, `/metrics`, `/props`, and `/v1/systemone` (decision models only). Opt-in endpoints add `/v1/audio/{transcriptions,translations}`, `/v1/images/{generations,edits,variations}`, `/v1/rerank`, and `/v1/vector_stores/*`. `llama-server`'s non-`/v1` spellings (`/completion`, `/embeddings`, `/models`, ...) are bound too. See [`docs/serve.md`](docs/serve.md) for the full API and [`docs/dev/server.md`](docs/dev/server.md) for the implementation notes (what's bound, what's deliberately not, why).
 
 ### Vector store / RAG (`index`, `search`)
 

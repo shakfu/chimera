@@ -94,6 +94,8 @@ Five categories, in roughly decreasing order of how much they hurt:
 | `CHIMERA_TEST_CONTROLNET` | `sd --control-net`, serve `control_image` | Path to a `.safetensors` ControlNet model. |
 | `CHIMERA_TEST_CONTROL_IMAGE` | `sd --control-net`, serve `control_image` | Path to a PNG/JPG conditioning image. Required together with `CHIMERA_TEST_CONTROLNET`. |
 | `CHIMERA_TEST_PHOTOMAKER` | `sd --photo-maker`, serve `pm_id_image_set` | Path to a `.safetensors` PhotoMaker model. |
+| `CHIMERA_TEST_EMBED_VLM` | serve `--embeddings-mmproj` | Path to a VLM GGUF used as the `--enable-embeddings` model. [`ggml-org/tinygemma3-GGUF`](https://huggingface.co/ggml-org/tinygemma3-GGUF) (`tinygemma3-Q8_0.gguf`, 47 MB) works. |
+| `CHIMERA_TEST_EMBED_VLM_MMPROJ` | serve `--embeddings-mmproj` | Its mmproj (`mmproj-tinygemma3.gguf`). Required together with `CHIMERA_TEST_EMBED_VLM`. |
 | `CHIMERA_TEST_PM_ID_DIR` | `sd --photo-maker`, serve `pm_id_image_set` | Directory of identity-set subdirectories (each subdir contains reference identity images). Required together with `CHIMERA_TEST_PHOTOMAKER`. The serve-side test picks the first subdirectory alphabetically as the `pm_id_image_set` value. |
 
 The bar for each success-path test is: exit 0 + non-empty output (CLI) or HTTP 200 + non-empty `b64_json` image (serve). No perceptual diff — the value is catching wiring regressions in the engine integration, not validating LoRA/CN/PM math. Step counts are minimal (`-s 2`) to keep tests fast; LoRA tensors are applied once at the start of generate(), so even 2 steps exercises the load + apply path.

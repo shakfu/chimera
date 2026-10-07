@@ -174,4 +174,8 @@ std::vector<TokenChunk> chunk_by_sentences(const std::string & text,
                                            int                 chunk_tokens,
                                            int                 overlap_tokens);
 
+// Maps mean|cls|last|none|rank to a llama_pooling_type value; int keeps
+// llama.h out of this header. Fails with BadInput on other names.
+int pooling_from_name(const std::string & name);
+
 }  // namespace chimera_embed

@@ -58,6 +58,13 @@ FIXTURES = [
             ("CHIMERA_TEST_PM_ID_DIR", "dir"),
         ],
     ),
+    (
+        "Embedding VLM",
+        [
+            ("CHIMERA_TEST_EMBED_VLM", "file"),
+            ("CHIMERA_TEST_EMBED_VLM_MMPROJ", "file"),
+        ],
+    ),
 ]
 
 # The same regex the deleted CI workflow used. Matches both SKIP placeholders
@@ -67,7 +74,8 @@ FIXTURES = [
 FILTER = (
     "(sd --lora|sd --control-net|sd --photo-maker"
     "|serve loras success|serve control_image success"
-    "|serve pm_id_image_set success)"
+    "|serve pm_id_image_set success"
+    "|serve --embeddings-mmproj: image)"
 )
 
 
@@ -100,10 +108,12 @@ def main(argv: list[str]) -> int:
     )
     p.add_argument(
         "passthrough",
-        nargs=argparse.REMAINDER,
+        nargs="*",
         help="Extra arguments forwarded to scripts/test.py (e.g. --no-color, --verbose).",
     )
-    args = p.parse_args(argv)
+    # REMAINDER does not capture leading options, so forward unknown ones.
+    args, unknown = p.parse_known_args(argv)
+    args.passthrough = unknown + args.passthrough
 
     print("Fixture probe:")
     any_present = False

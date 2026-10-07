@@ -4,6 +4,14 @@
       "aliases": [
         "<models>/Llama-3.2-1B-Instruct-Q8_0.gguf"
       ],
+      "architecture": {
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ]
+      },
       "created": "<redacted>",
       "id": "<models>/Llama-3.2-1B-Instruct-Q8_0.gguf",
       "meta": {

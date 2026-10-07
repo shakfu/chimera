@@ -95,8 +95,8 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.5.0"
-LLAMACPP_VERSION = "b11146"  # equivalent to v0.5.0
+CHIMERA_VERSION = "0.6.0"
+LLAMACPP_VERSION = "b11429"  # equivalent to v0.6.0
 WHISPERCPP_VERSION = "v1.9.4"
 # Floor: master-883. From master-817 sd.cpp calls ops that exist only in
 # leejet's ggml fork. master-883 (leejet/stable-diffusion.cpp#1999) added

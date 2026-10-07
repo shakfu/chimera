@@ -129,6 +129,7 @@
 //       POST /infill                             server_routes.post_infill
 //       POST /tokenize, /detokenize              server_routes.post_{tokenize,detokenize}
 //       POST /apply-template                     server_routes.post_apply_template
+//       POST /v1/systemone                       server_routes.post_systemone
 //       POST [/v1]/rerank, [/v1]/reranking       rrk_ctx->routes->post_rerank
 //       GET  /slots                              server_routes.get_slots
 //       POST /slots/:id_slot                     server_routes.post_slots
@@ -307,7 +308,8 @@
 namespace chimera_serve {
 
 // Mirrors llama-server's ex_wrapper (server.cpp:40). Ensures handlers never
-// throw out of the HTTP layer; converts std::invalid_argument to 400 and
+// throw out of the HTTP layer; converts std::invalid_argument and
+// common_json_error (malformed or mistyped request JSON) to 400 and
 // every other exception to 500. Declared in chimera_serve_internal.h so the
 // per-modality TUs can wrap their own handlers identically — we want
 // 400/500 conversion at every boundary, not just on llama-server's routes.
@@ -318,6 +320,9 @@ server_http_context::handler_t ex_wrapper(server_http_context::handler_t func) {
         try {
             return func(req);
         } catch (const std::invalid_argument & e) {
+            status = 400;
+            message = e.what();
+        } catch (const common_json_error & e) {
             status = 400;
             message = e.what();
         } catch (const std::exception & e) {
@@ -685,12 +690,15 @@ struct SecondaryServerCtx {
 std::unique_ptr<SecondaryServerCtx> bring_up_secondary(
         const ServeOptions & opts,
         const std::string &  model_path,
-        bool                 rank) {
+        bool                 rank,
+        const std::string &  mmproj_path = {},
+        const std::string &  pooling     = {}) {
     auto sec = std::make_unique<SecondaryServerCtx>();
     common_init();
 
     common_params & p = sec->params;
     p.model.path           = model_path;
+    p.mmproj.path          = mmproj_path;
     p.n_ctx                = 0;       // model's training default
     p.n_batch              = opts.n_batch;
     p.n_ubatch             = opts.n_ubatch;
@@ -702,6 +710,10 @@ std::unique_ptr<SecondaryServerCtx> bring_up_secondary(
     p.n_parallel           = 1;
     p.embedding            = true;
     p.endpoint_metrics     = false;   // metrics route is bound off primary
+    if (!pooling.empty()) {
+        p.pooling_type = static_cast<enum llama_pooling_type>(
+            chimera_embed::pooling_from_name(pooling));
+    }
 
     if (rank) {
         // Same toggle llama-server uses for --reranking: embedding mode
@@ -758,6 +770,14 @@ int command_serve(const ServeOptions & opts, ServeStopper * stopper) {
 
     if (opts.model.empty()) {
         fail(ExitCode::BadInput, "--model is required for `chimera serve`");
+    }
+    if (opts.embed_model.empty() &&
+        (!opts.embed_mmproj.empty() || !opts.embed_pooling.empty())) {
+        fail(ExitCode::BadInput,
+             "--embeddings-mmproj and --embeddings-pooling require --enable-embeddings");
+    }
+    if (!opts.embed_pooling.empty()) {
+        chimera_embed::pooling_from_name(opts.embed_pooling);  // BadInput before any load
     }
 
     common_params params = build_common_params(opts);
@@ -968,7 +988,8 @@ int command_serve(const ServeOptions & opts, ServeStopper * stopper) {
     if (!opts.embed_model.empty()) {
         std::cout << "chimera serve: loading dedicated embedding model "
                   << opts.embed_model << "...\n";
-        emb_ctx = bring_up_secondary(opts, opts.embed_model, /*rank=*/false);
+        emb_ctx = bring_up_secondary(opts, opts.embed_model, /*rank=*/false,
+                                     opts.embed_mmproj, opts.embed_pooling);
         if (!emb_ctx) {
             std::cerr << "chimera serve: failed to load embedding model: "
                       << opts.embed_model << "\n";
@@ -1149,6 +1170,8 @@ int command_serve(const ServeOptions & opts, ServeStopper * stopper) {
     ctx_http.post("/tokenize",        ex_wrapper(routes.post_tokenize));
     ctx_http.post("/detokenize",      ex_wrapper(routes.post_detokenize));
     ctx_http.post("/apply-template",  ex_wrapper(routes.post_apply_template));
+    // Decision models only; upstream returns 501 for any other model.
+    ctx_http.post("/v1/systemone",    ex_wrapper(routes.post_systemone));
 #ifdef CHIMERA_HAS_WHISPER
     if (whisper_ctx) {
         auto transcribe = make_audio_transcribe_handler(
