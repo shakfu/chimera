@@ -201,9 +201,9 @@ struct ChatSigintGuard {
 };
 
 // Sample a chat reply, routing reasoning content (e.g. text inside
-// <think>...</think>) through Sem::Think. Each new token is appended to
-// the raw accumulator and the running text is re-parsed with
-// common_chat_parse (is_partial=true); the resulting message is diffed
+// <think>...</think>) through Sem::Think. Each new token is fed to the
+// turn's common_chat_session, which re-parses the reply so far as
+// partial input; the resulting message is diffed
 // against the previous parse to produce streaming content / reasoning
 // deltas. Returns the *content* portion of the reply (without reasoning),
 // which is what we want to store in chat history — the next turn's
@@ -218,21 +218,20 @@ std::string chat_sample_loop(
     common_sampler * sampler,
     const llama_vocab * vocab,
     int n_predict,
-    const common_chat_parser_params & parser_params,
+    common_chat_session & session,
     std::vector<llama_token> * out_tokens,
     std::string * out_reasoning = nullptr,
     bool * out_interrupted = nullptr,
     bool reasoning_control = false) {
 
-    std::string raw;
     std::string content;
-    // Seed `prev` from a parse of the empty string. For chat formats that
+    // Seed `prev` from a parse of the empty input. For chat formats that
     // carry a fixed assistant-turn preamble (Llama-3 stamps
     // "<|start_header_id|>assistant<|end_header_id|>\n\n" into the parsed
     // content even when raw is empty), this anchors the diff at the
     // preamble so the first real delta is only the model's actual output
     // — without it, the preamble leaks into the displayed stream.
-    common_chat_msg prev = common_chat_parse("", /*is_partial=*/true, parser_params);
+    common_chat_msg prev = session.feed({});
 
     for (int i = 0; i < n_predict; ++i) {
         if (g_chat_interrupt_requested.load(std::memory_order_relaxed)) {
@@ -262,9 +261,9 @@ std::string chat_sample_loop(
             out_tokens->push_back(token);
         }
 
-        raw += token_to_piece(vocab, token);
-
-        common_chat_msg cur = common_chat_parse(raw, /*is_partial=*/true, parser_params);
+        common_chat_input piece;
+        piece.append(token_to_piece(vocab, token), token);
+        common_chat_msg cur = session.feed(piece);
         for (const auto & d : common_chat_msg_diff::compute_diffs(prev, cur)) {
             if (!d.reasoning_content_delta.empty()) {
                 std::cout << Sem::Think << d.reasoning_content_delta
@@ -1045,25 +1044,16 @@ int command_chat(const LlamaCommonOptions & opts,
         inputs.add_generation_prompt = true;
         inputs.use_jinja = opts.use_jinja;
         inputs.chat_template_kwargs = opts.chat_template_kwargs;
-        // Resolve reasoning format: --reasoning-format wins; falls back
-        // to --reasoning; default keeps current behavior (DEEPSEEK in the
-        // parser, NONE in template inputs).
-        common_reasoning_format rf_inputs = COMMON_REASONING_FORMAT_NONE;
+        // --reasoning-format wins, then --reasoning, then DEEPSEEK
+        // (llama-server's default), which splits <think> spans out of content.
         const std::string & rf_name =
             !opts.reasoning_format.empty() ? opts.reasoning_format : opts.reasoning;
-        if (!rf_name.empty()) {
-            rf_inputs = common_reasoning_format_from_name(rf_name);
-            inputs.reasoning_format = rf_inputs;
-        }
-        common_chat_params params = common_chat_templates_apply(templates.get(), inputs);
-
-        // Parser config for streaming chat output. DEEPSEEK reasoning
-        // format covers <think>...</think> spans (the de-facto standard
-        // across DeepSeek, Qwen3-thinking, and most open reasoning models).
-        common_chat_parser_params parser_params(params);
-        parser_params.reasoning_format = rf_name.empty()
+        inputs.reasoning_format = rf_name.empty()
             ? COMMON_REASONING_FORMAT_DEEPSEEK
-            : rf_inputs;
+            : common_reasoning_format_from_name(rf_name);
+        // No apply_sampling(): the sampler outlives the turn and chat sends
+        // no tools, so the session has no grammar to contribute.
+        common_chat_session session(templates.get(), vocab, inputs);
 
         std::vector<llama_token> generated;
         std::string reply;
@@ -1107,26 +1097,19 @@ int command_chat(const LlamaCommonOptions & opts,
             bitmaps_c.reserve(conv_media.size());
             for (const auto & m : conv_media) bitmaps_c.push_back(m.bitmap.get());
 
-            // text_len is structural: newer mtmd bounds its media-marker
-            // scan by this length rather than strlen(text). Leaving it unset
-            // makes mtmd_tokenize see zero markers and fail rc=2.
-            mtmd_input_text input_text{};
-            input_text.text = params.prompt.c_str();
-            input_text.text_len = params.prompt.size();
-            // See the text-only branch below for the rationale: the chat
-            // template already includes BOS, so add_special=true would
-            // double-BOS the prompt and the model emits a stray
-            // <|start_header_id|>assistant<|end_header_id|> at reply start.
-            input_text.add_special  = false;
-            input_text.parse_special = true;
             MtmdInputChunksPtr chunks(mtmd_input_chunks_init());
             if (!chunks) {
                 std::cerr << Sem::Err << "failed to init mtmd input chunks"
                           << Sem::Reset << "\n";
                 continue;
             }
-            const int32_t tok_rc = mtmd_tokenize(mctx.get(), chunks.get(), &input_text,
-                                                 bitmaps_c.data(), bitmaps_c.size());
+            // add_special=false: see the text-only branch below. The chat
+            // template already includes BOS, so a second one would double-BOS
+            // the prompt and the model emits a stray
+            // <|start_header_id|>assistant<|end_header_id|> at reply start.
+            const int32_t tok_rc = mtmd_tokenize_chat_prompt(
+                mctx.get(), vocab, chunks.get(), session.prompt(),
+                bitmaps_c.data(), bitmaps_c.size(), /*add_special=*/false);
             if (tok_rc != 0) {
                 std::cerr << Sem::Err << "mtmd_tokenize failed (rc=" << tok_rc << ")"
                           << Sem::Reset << "\n";
@@ -1150,7 +1133,7 @@ int command_chat(const LlamaCommonOptions & opts,
             {
                 ChatSigintGuard sigint_guard;
                 reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
-                                         opts.n_predict, parser_params, &generated,
+                                         opts.n_predict, session, &generated,
                                          &reply_reasoning, &reply_interrupted,
                                          opts.reasoning_control);
             }
@@ -1162,11 +1145,9 @@ int command_chat(const LlamaCommonOptions & opts,
             // prepend a second BOS. Llama-3 reacts to the double-BOS by
             // emitting a stray "<|start_header_id|>assistant<|end_header_id|>"
             // at the start of its reply and losing track of the user
-            // message. parse_special=true is enough — it maps the
-            // template's BOS literal back to the right token.
-            const auto full_tokens = tokenize(vocab, params.prompt,
-                                              /*add_special=*/false,
-                                              /*parse_special=*/true);
+            // message. Parsing specials in the template parts is enough — it
+            // maps the template's BOS literal back to the right token.
+            const auto full_tokens = tokenize_chat_prompt(vocab, session.prompt());
 
             const size_t shared = common_prefix(kv_tokens, full_tokens);
             if (shared < kv_tokens.size()) {
@@ -1191,7 +1172,7 @@ int command_chat(const LlamaCommonOptions & opts,
             {
                 ChatSigintGuard sigint_guard;
                 reply = chat_sample_loop(ctx.get(), sampler.get(), vocab,
-                                         opts.n_predict, parser_params, &generated,
+                                         opts.n_predict, session, &generated,
                                          &reply_reasoning, &reply_interrupted,
                                          opts.reasoning_control);
             }
@@ -2155,6 +2136,10 @@ void bind_llama_common_opts(CLI::App * cmd, LlamaCommonOptions & o) {
         "Keep ALL Mixture-of-Experts weights on CPU");
     cmd->add_option("--n-cpu-moe", o.n_cpu_moe,
         "Keep MoE weights of the first N layers on CPU (0 = unused)");
+    cmd->add_option("--moe-cache-mib", o.moe_cache_mib,
+        "GPU cache in MiB for the MoE experts kept on CPU by --cpu-moe / "
+        "--n-cpu-moe (0 = off; experimental upstream)")
+        ->check(CLI::NonNegativeNumber);
 
     // Manual tensor / KV overrides.
     cmd->add_option("--override-tensor", o.override_tensor,
@@ -2897,7 +2882,17 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "(default: $CHIMERA_DB or platform default)");
     cmd->add_option("--slot-save-path", p.serve_opts.slot_save_path,
         "Directory for KV-cache snapshots written/read by "
-        "POST /slots/:id?action={save,restore} (GET /slots works regardless)");
+        "POST /slots/:id?action={save,restore} (GET /slots works regardless)")
+        ->envname("LLAMA_ARG_SLOT_SAVE_PATH");
+    cmd->add_flag("--cpu-moe", p.serve_opts.cpu_moe,
+        "Keep ALL Mixture-of-Experts weights on CPU");
+    cmd->add_option("--n-cpu-moe", p.serve_opts.n_cpu_moe,
+        "Keep MoE weights of the first N layers on CPU (0 = unused)")
+        ->check(CLI::NonNegativeNumber);
+    cmd->add_option("--moe-cache-mib", p.serve_opts.moe_cache_mib,
+        "GPU cache in MiB for the MoE experts kept on CPU by --cpu-moe / "
+        "--n-cpu-moe (0 = off; experimental upstream)")
+        ->check(CLI::NonNegativeNumber);
     cmd->add_option("--lora", p.serve_opts.lora_adapters,
         "LoRA adapter to load alongside the base model as path[:scale] "
         "(scale defaults to 1.0; repeatable). Enables POST /lora-adapters "

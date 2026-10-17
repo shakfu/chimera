@@ -112,6 +112,7 @@ chimera gen -m model.gguf --mmproj mmproj.gguf --image cat.png -p "describe" \
 # MoE expert offload (keep experts on CPU to fit a big MoE on a smaller GPU)
 chimera chat -m mixtral.gguf --cpu-moe                # all MoE on CPU
 chimera chat -m mixtral.gguf --n-cpu-moe 8            # MoE of first 8 layers on CPU
+chimera chat -m mixtral.gguf --cpu-moe --moe-cache-mib 2048   # GPU cache for hot experts (GPU builds)
 
 # Manual tensor / KV-meta overrides (power-user)
 chimera chat -m model.gguf \
@@ -392,115 +393,115 @@ chimera serve -m model.gguf --persist-chats                    # log every chat 
 chimera serve -m model.gguf --enable-rag embed.gguf --cache-embeddings  # memoize embed(text)
 chimera serve -m model.gguf --enable-rag embed.gguf --rag-db /path/to.db
 chimera serve -m model.gguf --persist-chats     --chat-db /path/to.db
-chimera serve -m model.gguf --host 0.0.0.0 --port 8080
+chimera serve -m model.gguf --host 0.0.0.0 --port 9931
 chimera serve -m model.gguf --api-key sk-local
 chimera serve -m model.gguf --alias qwen3                      # /v1/models id (default: the -m path)
 chimera serve -m model.gguf --parallel 4                       # 4 concurrent slots
 ```
 
-Default bind: `127.0.0.1:8080`. Stop with Ctrl-C.
+Default bind: `127.0.0.1:9931`. Stop with Ctrl-C.
 
 ### Hitting it with curl
 
 ```sh
 # Chat (non-streaming)
-curl -s http://127.0.0.1:8080/v1/chat/completions \
+curl -s http://127.0.0.1:9931/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","messages":[{"role":"user","content":"Hi"}]}'
 
 # Chat (streaming SSE)
-curl -sN http://127.0.0.1:8080/v1/chat/completions \
+curl -sN http://127.0.0.1:9931/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","stream":true,"messages":[{"role":"user","content":"Hi"}]}'
 
 # Legacy text completion
-curl -s http://127.0.0.1:8080/v1/completions \
+curl -s http://127.0.0.1:9931/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","prompt":"The capital of France is","max_tokens":4}'
 
 # Embeddings (server must be started with --embeddings or --enable-embeddings)
-curl -s http://127.0.0.1:8080/v1/embeddings \
+curl -s http://127.0.0.1:9931/v1/embeddings \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","input":"hello world"}'
 # Array input is also accepted: "input":["a","b","c"] -> one vector per item
 
 # Rerank (requires --reranking <model.gguf>)
-curl -s http://127.0.0.1:8080/v1/rerank \
+curl -s http://127.0.0.1:9931/v1/rerank \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","query":"capital of France","documents":["Paris is the capital.","Berlin is in Germany.","Bananas are yellow."],"top_n":3}'
 
 # Models / health / metrics / props
-curl -s http://127.0.0.1:8080/v1/models
-curl -s http://127.0.0.1:8080/health
-curl -s http://127.0.0.1:8080/metrics             # Prometheus format
-curl -s http://127.0.0.1:8080/props               # template + defaults
+curl -s http://127.0.0.1:9931/v1/models
+curl -s http://127.0.0.1:9931/health
+curl -s http://127.0.0.1:9931/metrics             # Prometheus format
+curl -s http://127.0.0.1:9931/props               # template + defaults
 
 # Anthropic Messages (point Anthropic SDK at chimera)
-curl -s http://127.0.0.1:8080/v1/messages \
+curl -s http://127.0.0.1:9931/v1/messages \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","max_tokens":64,"messages":[{"role":"user","content":"Hi"}]}'
-curl -s http://127.0.0.1:8080/v1/messages/count_tokens \
+curl -s http://127.0.0.1:9931/v1/messages/count_tokens \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","messages":[{"role":"user","content":"Hi"}]}'
 
 # Fill-in-the-middle (code models only; 501 on chat models)
-curl -s http://127.0.0.1:8080/infill \
+curl -s http://127.0.0.1:9931/infill \
   -H 'Content-Type: application/json' \
   -d '{"input_prefix":"def add(a, b):\n    return ","input_suffix":"\n","n_predict":4}'
 
 # Vocab helpers
-curl -s http://127.0.0.1:8080/tokenize \
+curl -s http://127.0.0.1:9931/tokenize \
   -H 'Content-Type: application/json' \
   -d '{"content":"hello world"}'
-curl -s http://127.0.0.1:8080/detokenize \
+curl -s http://127.0.0.1:9931/detokenize \
   -H 'Content-Type: application/json' \
   -d '{"tokens":[15339,1917]}'
 
 # Render the chat template against messages without generating
-curl -s http://127.0.0.1:8080/apply-template \
+curl -s http://127.0.0.1:9931/apply-template \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"hi"}]}'
 
 # OpenAI Responses API (stateful within one chimera serve invocation)
-curl -s http://127.0.0.1:8080/v1/responses \
+curl -s http://127.0.0.1:9931/v1/responses \
   -H 'Content-Type: application/json' \
   -d '{"model":"any","input":"Say hi"}'
 
 # Audio transcription (WAV / RIFF only — transcode other formats with
 #   ffmpeg -i in.<ext> -ar 16000 -ac 1 out.wav)
-curl -s http://127.0.0.1:8080/v1/audio/transcriptions \
+curl -s http://127.0.0.1:9931/v1/audio/transcriptions \
   -F file=@speech.wav -F response_format=json
 # response_format: json | text | verbose_json | srt | vtt
 
 # Word-level timestamps in verbose_json (adds a top-level `words[]` array)
-curl -s http://127.0.0.1:8080/v1/audio/transcriptions \
+curl -s http://127.0.0.1:9931/v1/audio/transcriptions \
   -F file=@speech.wav -F response_format=verbose_json \
   -F 'timestamp_granularities[]=word'
 
 # Audio translation (any source language -> English)
-curl -s http://127.0.0.1:8080/v1/audio/translations \
+curl -s http://127.0.0.1:9931/v1/audio/translations \
   -F file=@speech.wav -F response_format=json
 
 # Audio language detection (exit-after-detect probe; chimera-specific)
 # Returns {"language": "<2-letter code>", "duration": <seconds>}
-curl -s http://127.0.0.1:8080/v1/audio/detect-language \
+curl -s http://127.0.0.1:9931/v1/audio/detect-language \
   -F file=@speech.wav
 
 # Image generation
-curl -s http://127.0.0.1:8080/v1/images/generations \
+curl -s http://127.0.0.1:9931/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"a watercolor cat","n":1,"size":"512x512"}'
 
 # Image edit (img2img / inpaint; optional `mask` field)
-curl -s http://127.0.0.1:8080/v1/images/edits \
+curl -s http://127.0.0.1:9931/v1/images/edits \
   -F image=@in.png -F prompt="now at sunset" -F strength=0.6
 
 # Image variation (img2img, no prompt)
-curl -s http://127.0.0.1:8080/v1/images/variations \
+curl -s http://127.0.0.1:9931/v1/images/variations \
   -F image=@in.png
 
 # Image with per-request ControlNet (server started with --sd-control-net)
-curl -s http://127.0.0.1:8080/v1/images/edits \
+curl -s http://127.0.0.1:9931/v1/images/edits \
   -F image=@in.png \
   -F control_image=@canny.png \
   -F control_strength=0.7 \
@@ -509,37 +510,37 @@ curl -s http://127.0.0.1:8080/v1/images/edits \
 # Image with per-request PhotoMaker (server started with --sd-photo-maker)
 # Two shapes — explicit base64 (`pm_id_images`) or named set from --sd-pm-id-dir
 # (`pm_id_image_set`). `pm_id_images` wins if both are supplied.
-curl -s http://127.0.0.1:8080/v1/images/generations \
+curl -s http://127.0.0.1:9931/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"a portrait of <person>","pm_id_image_set":"alice","pm_style_strength":25}'
 
 # Image with per-request SD LoRA selection (server started with --sd-lora foo=...)
-curl -s http://127.0.0.1:8080/v1/images/generations \
+curl -s http://127.0.0.1:9931/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"a moonlit forest","loras":[{"name":"pixelart","scale":0.7}]}'
 
 # List registered SD LoRA aliases (names only; paths are server-side)
-curl -s http://127.0.0.1:8080/v1/images/lora-adapters
+curl -s http://127.0.0.1:9931/v1/images/lora-adapters
 
 # Vector store (requires --enable-rag)
-curl -s -X POST http://127.0.0.1:8080/v1/vector_stores \
+curl -s -X POST http://127.0.0.1:9931/v1/vector_stores \
   -H 'Content-Type: application/json' -d '{"name":"notes"}'
-curl -s -X POST http://127.0.0.1:8080/v1/vector_stores/notes/files \
+curl -s -X POST http://127.0.0.1:9931/v1/vector_stores/notes/files \
   -H 'Content-Type: application/json' -d '{"text":"..."}'
-curl -s -X POST http://127.0.0.1:8080/v1/vector_stores/notes/files \
+curl -s -X POST http://127.0.0.1:9931/v1/vector_stores/notes/files \
   -F file=@doc.md
-curl -s -X POST http://127.0.0.1:8080/v1/vector_stores/notes/search \
+curl -s -X POST http://127.0.0.1:9931/v1/vector_stores/notes/search \
   -H 'Content-Type: application/json' -d '{"query":"...","k":5}'
-curl -s http://127.0.0.1:8080/v1/vector_stores
-curl -s http://127.0.0.1:8080/v1/vector_stores/notes
-curl -s -X POST http://127.0.0.1:8080/v1/vector_stores/notes/delete
+curl -s http://127.0.0.1:9931/v1/vector_stores
+curl -s http://127.0.0.1:9931/v1/vector_stores/notes
+curl -s -X POST http://127.0.0.1:9931/v1/vector_stores/notes/delete
 ```
 
 ### Pointing the OpenAI SDK at chimera
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="not-used")
+client = OpenAI(base_url="http://127.0.0.1:9931/v1", api_key="not-used")
 ```
 
 ---

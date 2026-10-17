@@ -115,6 +115,88 @@ std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string &
     return tokens;
 }
 
+namespace {
+
+// True when an input part holds text that tokenizes to a special token.
+bool has_special_in_input(const llama_vocab * vocab, const common_chat_prompt & prompt) {
+    for (const auto & part : prompt.parts) {
+        if (part.is_input &&
+            tokenize(vocab, part.text, false, true) != tokenize(vocab, part.text, false, false)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+// Splitting at every part boundary would change tokens there (an SPM vocab
+// with add_space_prefix re-adds the prefix space), so split only when needed.
+std::vector<llama_token> tokenize_chat_prompt(const llama_vocab * vocab, const common_chat_prompt & prompt) {
+    if (!has_special_in_input(vocab, prompt)) {
+        return tokenize(vocab, prompt.str(), /*add_special=*/false, /*parse_special=*/true);
+    }
+    std::vector<llama_token> out;
+    for (const auto & part : prompt.parts) {
+        const auto toks = tokenize(vocab, part.text, false, !part.is_input);
+        out.insert(out.end(), toks.begin(), toks.end());
+    }
+    return out;
+}
+
+int32_t mtmd_tokenize_chat_prompt(mtmd_context *              mctx,
+                                  const llama_vocab *         vocab,
+                                  mtmd_input_chunks *         output,
+                                  const common_chat_prompt &  prompt,
+                                  const mtmd_bitmap * const * bitmaps,
+                                  size_t                      n_bitmaps,
+                                  bool                        add_special) {
+    if (!has_special_in_input(vocab, prompt)) {
+        // text_len is structural: newer mtmd bounds its media-marker scan by
+        // this length rather than strlen(text).
+        const std::string text = prompt.str();
+        mtmd_input_text input_text{};
+        input_text.text          = text.c_str();
+        input_text.text_len      = text.size();
+        input_text.add_special   = add_special;
+        input_text.parse_special = true;
+        return mtmd_tokenize(mctx, output, &input_text, bitmaps, n_bitmaps);
+    }
+
+    // mtmd_tokenize_from_parts() does not scan for markers, so split here.
+    struct Piece { std::string text; bool parse_special; const mtmd_bitmap * bitmap; };
+    std::vector<Piece> pieces;
+    const std::string marker = mtmd_default_marker();
+    size_t i_bm = 0;
+    for (const auto & part : prompt.parts) {
+        size_t pos = 0;
+        while (true) {
+            const size_t m = part.text.find(marker, pos);
+            const std::string seg = part.text.substr(pos, m == std::string::npos ? std::string::npos : m - pos);
+            if (!seg.empty()) pieces.push_back({seg, !part.is_input, nullptr});
+            if (m == std::string::npos) break;
+            if (i_bm >= n_bitmaps) return 1;
+            pieces.push_back({"", false, bitmaps[i_bm++]});
+            pos = m + marker.size();
+        }
+    }
+    if (i_bm != n_bitmaps) return 1;
+
+    std::vector<mtmd_input_text> texts(pieces.size());
+    std::vector<mtmd_input_part> parts(pieces.size());
+    std::vector<const mtmd_input_part *> part_ptrs(pieces.size());
+    for (size_t i = 0; i < pieces.size(); ++i) {
+        if (pieces[i].bitmap) {
+            parts[i] = {nullptr, pieces[i].bitmap};
+        } else {
+            texts[i] = {pieces[i].text.c_str(), pieces[i].text.size(), false, pieces[i].parse_special};
+            parts[i] = {&texts[i], nullptr};
+        }
+        part_ptrs[i] = &parts[i];
+    }
+    return mtmd_tokenize_from_parts(mctx, output, part_ptrs.data(), part_ptrs.size(), add_special);
+}
+
 std::string token_to_piece(const llama_vocab * vocab, llama_token token) {
     std::vector<char> buf(32);
     int32_t n = llama_token_to_piece(vocab, token, buf.data(), static_cast<int32_t>(buf.size()), 0, true);
@@ -482,6 +564,7 @@ LlamaContextPtr new_llama_context(llama_model * model, const LlamaCommonOptions 
     params.n_threads = opts.threads;
     params.n_threads_batch = opts.threads_batch > 0 ? opts.threads_batch : opts.threads;
     params.no_perf = true;
+    params.moe_cache_size = static_cast<size_t>(opts.moe_cache_mib) * 1024 * 1024;
     if (opts.swa_full) {
         params.swa_full = true;
     }
@@ -516,7 +599,9 @@ LlamaContextPtr new_llama_context(llama_model * model, const LlamaCommonOptions 
 
     LlamaContextPtr ctx(llama_init_from_model(model, params));
     if (!ctx) {
-        fail(ExitCode::Load, "failed to create llama context");
+        fail(ExitCode::Load, opts.moe_cache_mib > 0
+            ? "failed to create llama context (--moe-cache-mib needs a GPU backend)"
+            : "failed to create llama context");
     }
 
     // Activation steering. --control-vector takes plain paths (scale=1.0);
@@ -857,7 +942,8 @@ std::string run_generation_mtmd(
     }
     augmented_prompt += user_prompt;
 
-    std::string final_prompt = augmented_prompt;
+    // Without a template the prompt is raw text, so its specials parse.
+    common_chat_prompt final_prompt(augmented_prompt);
     bool prompt_is_templated = false;
     common_chat_templates_ptr templates = common_chat_templates_init(model, "", "", "");
     if (templates) {
@@ -869,27 +955,19 @@ std::string run_generation_mtmd(
         inputs.add_generation_prompt = true;
         inputs.use_jinja = true;
         common_chat_params cp = common_chat_templates_apply(templates.get(), inputs);
-        if (!cp.prompt.empty()) {
-            final_prompt = cp.prompt;
+        if (!cp.prompt.str().empty()) {
+            final_prompt = std::move(cp.prompt);
             prompt_is_templated = true;
         }
     }
-
-    // text_len is structural: newer mtmd bounds its media-marker scan by
-    // this length rather than strlen(text). Leaving it unset makes
-    // mtmd_tokenize see zero markers and fail rc=2 ("markers != bitmaps").
-    mtmd_input_text input_text{};
-    input_text.text = final_prompt.c_str();
-    input_text.text_len = final_prompt.size();
-    input_text.add_special = !prompt_is_templated;
-    input_text.parse_special = true;
 
     MtmdInputChunksPtr chunks(mtmd_input_chunks_init());
     if (!chunks) {
         fail(ExitCode::Runtime, "failed to init mtmd input chunks");
     }
-    const int32_t tok_rc = mtmd_tokenize(mctx.get(), chunks.get(), &input_text,
-                                         bitmaps_c.data(), bitmaps_c.size());
+    const int32_t tok_rc = mtmd_tokenize_chat_prompt(
+        mctx.get(), llama_model_get_vocab(model), chunks.get(), final_prompt,
+        bitmaps_c.data(), bitmaps_c.size(), /*add_special=*/!prompt_is_templated);
     if (tok_rc != 0) {
         fail(ExitCode::BadInput,
              "mtmd_tokenize failed (rc=" + std::to_string(tok_rc) + ")");

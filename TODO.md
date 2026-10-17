@@ -4,7 +4,31 @@
 
 ## High
 
+### llama.cpp b11669 bump
+
+- [x] (0.7.0) Special-token injection in `chat` and `gen --mmproj`: user-input parts holding special-token text now tokenize with `parse_special=false` (`tokenize_chat_prompt`, `mtmd_tokenize_chat_prompt`).
+
+- [x] (0.7.0) Chat reasoning parse was dead (`common_chat_parser_params` does not copy `.parser`). Fixed by the session port; default format is now `deepseek`.
+
+- [x] (0.7.0) Port `command_chat` to `common_chat_session`. `apply_sampling()` is not called: the sampler outlives the turn and chat sends no tools.
+
 ## Medium
+
+### llama.cpp b11669 bump
+
+- [x] (0.7.0) `serve --port` default 8080 -> 9931 (upstream #30159).
+
+- [x] (0.7.0) `--moe-cache-mib` on gen/chat/serve; `serve` also gained `--cpu-moe` / `--n-cpu-moe`.
+
+- [x] (0.7.0) `LLAMA_ARG_SLOT_SAVE_PATH` for `serve --slot-save-path`. `--spec-draft-n-ubatch` not applicable: chimera has no speculative decoding.
+
+- [x] (0.7.0) Slot files: the new checkpoint / draft blocks are optional appendices and `LLAMA_STATE_SEQ_VERSION` is still 4, so 0.6.0 files restore. Covered by a `make test` case.
+
+- [x] (0.7.0) Temp-0 greedy selection: `make test-golden` passes unchanged (goldens pin shapes, not text).
+
+- [ ] (0.7.0) Smoke-test new models. Done: d1-omni-600M on `/v1/systemone`, embeddinggemma-2 with `--embeddings-mmproj`. Not run (not in `models/`): d1-3B (listed in `DECISION_MODELS`, runs when present), vllm d2/d3, pplx-decider, cohere2 and MiniCPM-V 4.7 vision.
+
+- [x] (0.7.0) `CHIMERA_VERSION` 0.7.0 and CHANGELOG entry.
 
 ### Validation
 

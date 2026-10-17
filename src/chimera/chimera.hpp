@@ -27,7 +27,7 @@
 //   chimera::Embedder emb({.model = "bge-small.gguf"});
 //   auto vec = emb.embed("hello world");
 //
-//   chimera::Server srv({.model = "Qwen3-1.7B-Q4_0.gguf", .port = 8080});
+//   chimera::Server srv({.model = "Qwen3-1.7B-Q4_0.gguf", .port = 9931});
 //   return srv.run();
 //
 // What this header does NOT yet wrap:

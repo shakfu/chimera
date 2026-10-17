@@ -3,7 +3,7 @@
 An OpenAI-compatible HTTP server backed by llama.cpp, with optional audio transcription via whisper.cpp and image generation via stable-diffusion.cpp running in the same process.
 
 ```text
-chimera serve -m model.gguf [--port 8080] [--host 127.0.0.1]
+chimera serve -m model.gguf [--port 9931] [--host 127.0.0.1]
               [--embeddings]
               [--enable-audio whisper.gguf]
               [--enable-image sd.gguf]
@@ -21,12 +21,12 @@ Start a server with a small instruct model:
 chimera serve -m models/Llama-3.2-1B-Instruct-Q8_0.gguf
 ```
 
-Default bind: `127.0.0.1:8080`. The startup line tells you what is listening and which endpoints are bound.
+Default bind: `127.0.0.1:9931`. The startup line tells you what is listening and which endpoints are bound.
 
 Talk to it the way you would talk to OpenAI:
 
 ```text
-curl -s http://127.0.0.1:8080/v1/chat/completions \
+curl -s http://127.0.0.1:9931/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
         "model": "any",
@@ -39,7 +39,7 @@ Or with the OpenAI Python SDK pointed at chimera:
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="not-used")
+client = OpenAI(base_url="http://127.0.0.1:9931/v1", api_key="not-used")
 r = client.chat.completions.create(
     model="any",
     messages=[{"role": "user", "content": "Say hello in one word."}],
@@ -64,7 +64,7 @@ chimera serve -m models/bge-small-en-v1.5-q8_0.gguf --embeddings
 `--embeddings` switches the model to embedding mode (a model can only serve one of `chat completions` *or* `embeddings` per load — that is a constraint of how the weights are used, not of chimera). Without this flag, `POST /v1/embeddings` returns HTTP 501 with a hint to set it.
 
 ```text
-curl -s http://127.0.0.1:8080/v1/embeddings \
+curl -s http://127.0.0.1:9931/v1/embeddings \
   -H 'Content-Type: application/json' \
   -d '{"model": "any", "input": "hello world"}'
 ```
@@ -81,7 +81,7 @@ chimera serve -m chat.gguf --enable-embeddings vlm.gguf \
 A native decision model (laya, kev, lev, openjev, nimble, clef) answers typed questions on `POST /v1/systemone`. No flag is needed: `-m` with such a model enables it, and `/v1/models` reports `"output_modalities": ["decisions"]`. Laya and clef serve only this endpoint. See upstream's [server README](https://github.com/ggml-org/llama.cpp/blob/b11429/tools/server/README.md) for the request shape.
 
 ```text
-curl -s http://127.0.0.1:8080/v1/systemone -H 'Content-Type: application/json' -d '{
+curl -s http://127.0.0.1:9931/v1/systemone -H 'Content-Type: application/json' -d '{
   "state": "I was charged twice and nobody has replied.",
   "questions": {"route": {"type": "choice", "instructions": "Which team?",
                           "criteria": {"billing": null, "shipping": null}}}}'
@@ -97,7 +97,7 @@ chimera serve -m models/Llama-3.2-1B-Instruct-Q8_0.gguf \
 This loads a whisper.cpp model alongside the LLM and binds `POST /v1/audio/transcriptions`. Upload a WAV file as multipart form data:
 
 ```text
-curl -s http://127.0.0.1:8080/v1/audio/transcriptions \
+curl -s http://127.0.0.1:9931/v1/audio/transcriptions \
   -F file=@speech.wav \
   -F model=any \
   -F response_format=json
@@ -115,7 +115,7 @@ chimera serve -m models/Llama-3.2-1B-Instruct-Q8_0.gguf \
 This loads a stable-diffusion.cpp model alongside the LLM and binds `POST /v1/images/{generations,edits,variations}`. Generated images come back as base64-encoded PNGs in OpenAI's standard envelope:
 
 ```text
-curl -s http://127.0.0.1:8080/v1/images/generations \
+curl -s http://127.0.0.1:9931/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"prompt": "a watercolor of a sleeping cat",
        "n": 1,
@@ -125,7 +125,7 @@ curl -s http://127.0.0.1:8080/v1/images/generations \
 For `/v1/images/edits` and `/v1/images/variations`, send the source image as multipart form data:
 
 ```text
-curl -s http://127.0.0.1:8080/v1/images/edits \
+curl -s http://127.0.0.1:9931/v1/images/edits \
   -F image=@input.png \
   -F prompt="now make it sunset" \
   -F size=512x512 \
@@ -144,14 +144,14 @@ By default, each request without an `X-Chimera-Chat-Id` header creates a new cha
 
 ```text
 $ curl -i -d '{"messages":[{"role":"user","content":"hi"}]}' \
-       http://127.0.0.1:8080/v1/chat/completions
+       http://127.0.0.1:9931/v1/chat/completions
 HTTP/1.1 200 OK
 X-Chimera-Chat-Id: 17
 ...
 
 $ curl -i -H 'X-Chimera-Chat-Id: 17' \
        -d '{"messages":[..., {"role":"user","content":"and another"}]}' \
-       http://127.0.0.1:8080/v1/chat/completions
+       http://127.0.0.1:9931/v1/chat/completions
 HTTP/1.1 200 OK
 X-Chimera-Chat-Id: 17
 ```
@@ -180,30 +180,30 @@ This loads the named embedding model alongside the LLM and binds the OpenAI-shap
 
 ```text
 # Create a collection
-curl -s http://127.0.0.1:8080/v1/vector_stores \
+curl -s http://127.0.0.1:9931/v1/vector_stores \
   -X POST -H 'Content-Type: application/json' \
   -d '{"name": "notes"}'
 
 # Ingest text (JSON body)
-curl -s http://127.0.0.1:8080/v1/vector_stores/notes/files \
+curl -s http://127.0.0.1:9931/v1/vector_stores/notes/files \
   -X POST -H 'Content-Type: application/json' \
   -d '{"text": "...", "source_uri": "label"}'
 
 # Ingest text (multipart upload)
-curl -s http://127.0.0.1:8080/v1/vector_stores/notes/files \
+curl -s http://127.0.0.1:9931/v1/vector_stores/notes/files \
   -F file=@notes.md
 
 # Search (default mode = hybrid; pass "mode" to override)
-curl -s http://127.0.0.1:8080/v1/vector_stores/notes/search \
+curl -s http://127.0.0.1:9931/v1/vector_stores/notes/search \
   -X POST -H 'Content-Type: application/json' \
   -d '{"query": "how does X work?", "k": 5, "mode": "hybrid"}'
 
 # List and inspect
-curl -s http://127.0.0.1:8080/v1/vector_stores
-curl -s http://127.0.0.1:8080/v1/vector_stores/notes
+curl -s http://127.0.0.1:9931/v1/vector_stores
+curl -s http://127.0.0.1:9931/v1/vector_stores/notes
 
 # Drop (POST, not DELETE — see below)
-curl -s -X POST http://127.0.0.1:8080/v1/vector_stores/notes/delete
+curl -s -X POST http://127.0.0.1:9931/v1/vector_stores/notes/delete
 ```
 
 Note the **POST :name/delete** path. server-http only exposes GET/POST, so OpenAI SDK clients that send `DELETE /v1/vector_stores/{id}` will need to be reconfigured. One embedding model per server in this cut.
@@ -218,7 +218,7 @@ chimera serve -m model.gguf --enable-image sd.gguf \
 With `--sd-control-net` set at startup, all three image endpoints accept a `control_image` multipart file plus an optional `control_strength` field. A request that supplies `control_image` against a server with no ControlNet loaded returns HTTP 400 with the missing-flag hint.
 
 ```text
-curl -s http://127.0.0.1:8080/v1/images/edits \
+curl -s http://127.0.0.1:9931/v1/images/edits \
   -F image=@input.png \
   -F control_image=@canny_edges.png \
   -F control_strength=0.7 \
@@ -236,7 +236,7 @@ chimera serve -m model.gguf --enable-image sd.gguf \
 Identity images travel as a **JSON base64 array** under `pm_id_images` (rather than as multipart files, since OpenAI's body has no precedent for repeatable image uploads). For curated identity sets, `--sd-pm-id-dir <dir>` scans each subdirectory as a named set addressable per-request via `pm_id_image_set: "<subdir-name>"`. Both shapes are accepted; if a request supplies both, `pm_id_images` wins. `pm_style_strength` is optional.
 
 ```text
-curl -s http://127.0.0.1:8080/v1/images/generations \
+curl -s http://127.0.0.1:9931/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"prompt": "a portrait of <person>",
        "pm_id_image_set": "alice",
@@ -256,7 +256,7 @@ chimera serve -m model.gguf --enable-image sd.gguf \
 Each `--sd-lora` registers one alias (`<name>=<path>`, repeatable). Requests reference adapters by **name**, with an optional `scale`:
 
 ```text
-curl -s http://127.0.0.1:8080/v1/images/generations \
+curl -s http://127.0.0.1:9931/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"prompt": "a moonlit forest",
        "loras": [{"name": "pixelart", "scale": 0.7},
@@ -269,13 +269,18 @@ curl -s http://127.0.0.1:8080/v1/images/generations \
 
 ```text
 chimera serve -m model.gguf --slot-save-path /var/cache/chimera/slots
+LLAMA_ARG_SLOT_SAVE_PATH=/var/cache/chimera/slots chimera serve -m model.gguf
 ```
 
 When `--slot-save-path` is set, `POST /slots/:id?action=save&filename=foo.bin` serializes the slot's current KV cache (the model's attention state for every token it has processed) to `<slot-save-path>/foo.bin`, and `?action=restore` reloads it into that slot. The win is skipping prompt prefill on a long system-prompt / RAG-context conversation: prefilling a 30k-token prompt costs seconds to tens of seconds; restoring a snapshot is sub-second.
 
 `GET /slots` (slot status — which slot holds which conversation, how many tokens are cached, ...) is always available and not gated by this flag. `?action=erase` works without `--slot-save-path` too; only save/restore need the directory.
 
-A snapshot is only valid for the model and llama.cpp state format that wrote it. Restoring a file from an older chimera returns 400; save it again.
+A snapshot is only valid for the model and llama.cpp state format that wrote it. Restoring a file written under an older state format returns 400; save it again. Files from 0.6.0 restore in 0.7.0.
+
+### MoE expert offload
+
+`--cpu-moe` keeps all MoE expert weights on CPU; `--n-cpu-moe N` does so for the first N layers. `--moe-cache-mib N` adds a GPU cache of N MiB for those experts. It needs a GPU backend and is experimental upstream.
 
 ### LoRA hot-swap
 
@@ -418,7 +423,7 @@ Without `--api-key`, the server accepts any request — fine for a local session
 For `POST /v1/chat/completions` with `"stream": true`, the response is Server-Sent Events with `data: {...}` lines per token chunk:
 
 ```text
-curl -sN http://127.0.0.1:8080/v1/chat/completions \
+curl -sN http://127.0.0.1:9931/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model": "any",
        "stream": true,
@@ -450,7 +455,7 @@ Other endpoints do not stream. `/v1/audio/transcriptions` and `/v1/images/*` ret
 **Pointing OpenAI clients at chimera.** Set the base URL to your chimera serve URL plus `/v1`, and set any string as the API key (or the one matching `--api-key` if set):
 
 ```python
-client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="not-used")
+client = OpenAI(base_url="http://127.0.0.1:9931/v1", api_key="not-used")
 ```
 
 Same idea for the JS SDK, langchain, llama-index, OpenWebUI, etc.

@@ -152,6 +152,7 @@ struct LlamaCommonOptions {
     // MoE expert offload (mutually-supportive with manual --override-tensor).
     bool cpu_moe   = false;  // keep ALL MoE experts on CPU
     int  n_cpu_moe = 0;      // keep MoE experts of the first N layers on CPU; 0 = unused
+    int  moe_cache_mib = 0;  // GPU cache for CPU-resident experts, MiB; 0 = off
 
     // Manual tensor-buffer / KV-meta overrides. Each --override-tensor
     // entry is `<pattern>=<buft_name>`; each --override-kv entry is
@@ -534,7 +535,7 @@ struct ServeOptions {
     std::string model;             // required (--model)
     std::string mmproj;             // optional (--mmproj), enables vision/audio inputs
     std::string host = "127.0.0.1"; // --host
-    int         port = 8080;        // --port
+    int         port = 9931;        // --port; matches llama-server (upstream #30159)
     int         n_ctx = 0;          // --ctx-size; 0 = the model's training context
     int         n_batch = 2048;     // --batch-size (logical)
     int         n_ubatch = 512;     // --ubatch-size (physical); reduced for embeddings
@@ -544,6 +545,9 @@ struct ServeOptions {
     std::string api_key;            // --api-key; empty disables auth
     std::string alias;              // --alias; comma-separated model names for the API; empty = -m path
     bool        embedding = false;  // --embeddings; switches model to embed mode
+    bool        cpu_moe = false;    // --cpu-moe; keep ALL MoE experts on CPU
+    int         n_cpu_moe = 0;      // --n-cpu-moe; experts of the first N layers on CPU
+    int         moe_cache_mib = 0;  // --moe-cache-mib; GPU cache for CPU-resident experts
 
     // HTTP server timeouts. 0 leaves the upstream common_params default in
     // place (read/write 3600s, SSE ping 30s as of llama.cpp b9528).

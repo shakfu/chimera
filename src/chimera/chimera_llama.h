@@ -98,6 +98,22 @@ std::vector<llama_token> tokenize(const llama_vocab * vocab,
 
 std::string token_to_piece(const llama_vocab * vocab, llama_token token);
 
+// Tokenize a rendered chat prompt with add_special=false. Special-token text
+// in user-input parts stays literal; template parts parse specials. Prompts
+// with no such text tokenize as one string, matching pre-0.7.0 output.
+std::vector<llama_token> tokenize_chat_prompt(const llama_vocab *        vocab,
+                                              const common_chat_prompt & prompt);
+
+// mtmd_tokenize() with the same rule. Media markers map to `bitmaps` in
+// order. Returns mtmd_tokenize()'s codes.
+int32_t mtmd_tokenize_chat_prompt(mtmd_context *              mctx,
+                                  const llama_vocab *         vocab,
+                                  mtmd_input_chunks *         output,
+                                  const common_chat_prompt &  prompt,
+                                  const mtmd_bitmap * const * bitmaps,
+                                  size_t                      n_bitmaps,
+                                  bool                        add_special);
+
 // --- model + context loaders ------------------------------------------------
 
 LlamaModelPtr   load_llama_model(const LlamaCommonOptions & opts);

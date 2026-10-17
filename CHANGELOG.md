@@ -2,6 +2,34 @@
 
 All notable changes to chimera will be documented in this file. Format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0]
+
+### Added
+
+- **`--moe-cache-mib N`** on `gen`, `chat` and `serve` gives the MoE experts kept on CPU a GPU cache of N MiB (upstream #29887, experimental). It needs a GPU backend. `serve` also gains `--cpu-moe` and `--n-cpu-moe`. The Python bindings expose the new fields. Upstream's `--spec-draft-n-ubatch` has no counterpart, since chimera has no speculative decoding.
+
+- **`serve --slot-save-path` reads `LLAMA_ARG_SLOT_SAVE_PATH`** when the flag is absent, as `llama-server` does.
+
+- **`make test` covers the new upstream models when their GGUFs are in `models/`.** d1-omni-600M and d1-3B on `/v1/systemone`; embeddinggemma-2 with its mmproj on `--embeddings-mmproj`, which previously needed `CHIMERA_TEST_EMBED_VLM`.
+
+### Changed
+
+- **Update llama.cpp to b11669** (v0.7.0, from b11429). The chat API now returns the rendered prompt as template and user-input parts, and parses output from text plus tokens. Slot files may carry context-checkpoint and draft-state blocks; files saved by 0.6.0 still restore. At temperature 0 the sampler now selects greedily (#29797). Seeded temp-0 output can differ from 0.6.0.
+
+- **`serve` listens on port 9931 by default**, following `llama-server` (upstream #30159). Pass `--port 8080` for the old port.
+
+- **`chat` splits reasoning out of the reply by default.** It uses `deepseek`, `llama-server`'s default, when neither `--reasoning` nor `--reasoning-format` is given. `<think>` text streams in the think colour, is stored in the `reasoning` column under `--persist`, and stays out of the history sent back to the template. `--reasoning none` restores the 0.6.0 output. `chat` now drives upstream's `common_chat_session` per turn.
+
+### Fixed
+
+- **`chat` and `gen --mmproj` no longer parse special tokens typed by the user.** The rendered prompt was tokenized as one string with `parse_special=true`, so `<|eot_id|>` in a message became the end-of-turn token. When a user-input part contains special-token text, each part is now tokenized separately and only template parts parse specials. Other prompts tokenize as one string, as before: splitting at every part boundary changes tokens there on SPM vocabularies with `add_space_prefix`. `serve` is unchanged: upstream's server still tokenizes the joined prompt.
+
+- **`--reasoning-format` had no effect on how `chat` parsed output.** `common_chat_parser_params(const common_chat_params &)` does not copy `parser`, so the content-only fallback parser ran, and `reasoning_content` was never set.
+
+- **`serve` pads `tensor_buft_overrides` as upstream's arg parser does.** The list was empty, so `llama_params_fit` aborted with "did not provide buffer to set tensor_buft_overrides" and could not reduce `--gpu-layers -1` when the model did not fit. A non-empty list also needs the null terminator, which `--cpu-moe` would otherwise trip in `common_model_params_to_llama`.
+
+- **The `gen --mmproj --image` test skipped when `models/` held only the `Q5_K_M` quant of gemma-4-E4B.** It required `Q4_K_M`; it now accepts either.
+
 ## [0.6.0]
 
 ### Added

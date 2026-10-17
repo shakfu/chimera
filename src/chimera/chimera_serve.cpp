@@ -546,6 +546,16 @@ common_params build_common_params(const ServeOptions & opts) {
     params.hostnames            = {opts.host};
     params.port                 = opts.port;
     params.embedding            = opts.embedding;
+    if (opts.cpu_moe) {
+        params.tensor_buft_overrides.push_back(llm_ffn_exps_cpu_override());
+    }
+    llm_add_n_cpu_ffn_overrides(opts.n_cpu_moe, LLM_FFN_EXPS_REGEX, params.tensor_buft_overrides);
+    params.moe_cache_size = static_cast<size_t>(opts.moe_cache_mib) * 1024 * 1024;
+    // Same padding as upstream's arg parser: it null-terminates the list, and
+    // llama_params_fit aborts without slots to write its own overrides into.
+    while (params.tensor_buft_overrides.size() < llama_max_tensor_buft_overrides()) {
+        params.tensor_buft_overrides.push_back({nullptr, nullptr});
+    }
     // HTTP timeouts. Leave the upstream defaults (read/write 3600s, SSE
     // ping 30s) unless the operator overrides. timeout_write tracks
     // timeout_read upstream, so set both from the single knob.

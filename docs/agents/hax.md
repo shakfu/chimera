@@ -13,8 +13,8 @@ loopback HTTP.
 Three properties of `chimera serve` make the connection work with no adapter:
 
 - It serves the OpenAI Chat Completions API that hax's `llama.cpp` provider
-  expects, and defaults to `127.0.0.1:8080`, which is that provider's own
-  default endpoint.
+  expects. `agent_hax.sh` binds it to `127.0.0.1:8080`, that provider's
+  default endpoint (`chimera serve` itself defaults to 9931).
 - Jinja chat templating is on by default (`--no-jinja` disables it), so tool
   calling works. An agent is unusable without it.
 - hax adopts the single served model from `GET /v1/models` and reads the

@@ -87,10 +87,16 @@ SD_CANDIDATES = [
     "v1-5-pruned-emaonly.q8_0.gguf",
     "z_image_turbo-Q6_K.gguf",
 ]
-MTMD_TEXT_MODEL = MODELS / "gemma-4-E4B-it-Q4_K_M.gguf"
+MTMD_TEXT_CANDIDATES = ["gemma-4-E4B-it-Q4_K_M.gguf", "gemma-4-E4B-it-Q5_K_M.gguf"]
+# Thinking model for the chat reasoning-split test.
+REASONING_MODEL = MODELS / "Qwen3-0.6B-Q8_0.gguf"
 MTMD_MMPROJ = MODELS / "mmproj-gemma-4-E4B-it-BF16.gguf"
 # Native decision models served by POST /v1/systemone; each is tested if present.
-DECISION_MODELS = ["Laya-Q8_0.gguf", "Kev-4B-Q8_0.gguf", "lev-Q8_0.gguf"]
+DECISION_MODELS = ["Laya-Q8_0.gguf", "Kev-4B-Q8_0.gguf", "lev-Q8_0.gguf",
+                   "d1-omni-600M-Q8_0.gguf", "d1-3B-Q8_0.gguf"]
+# Default --embeddings-mmproj fixture; CHIMERA_TEST_EMBED_VLM{,_MMPROJ} override.
+EMBED_VLM = MODELS / "embeddinggemma-2-Q8_0.gguf"
+EMBED_VLM_MMPROJ = MODELS / "mmproj-embeddinggemma-2-Q8_0.gguf"
 
 
 def first_existing(model_dir: Path, names: list[str]) -> Optional[Path]:
@@ -104,6 +110,7 @@ def first_existing(model_dir: Path, names: list[str]) -> Optional[Path]:
 
 EMBED_MODEL: Optional[Path] = first_existing(MODELS, EMBED_CANDIDATES)
 SD_MODEL: Optional[Path] = first_existing(MODELS, SD_CANDIDATES)
+MTMD_TEXT_MODEL: Optional[Path] = first_existing(MODELS, MTMD_TEXT_CANDIDATES)
 
 
 # ----------------------------------------------------------------------------
@@ -504,6 +511,7 @@ def chimera_serve(
     wait_for_sd: bool = False,
     readiness_path: str = "/health",
     startup_timeout: float = 120.0,
+    env: Optional[dict] = None,
 ) -> Iterator[ServeHandle]:
     """Spawn chimera serve, wait until it answers requests, yield the URL.
 
@@ -532,7 +540,8 @@ def chimera_serve(
     ]
 
     with open(log_path, "wb") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                env={**os.environ, **env} if env else None)
     base = f"http://127.0.0.1:{port}"
 
     try:
@@ -1590,7 +1599,7 @@ def e2e_sd_cli_tests(rec: Recorder, chimera: Path) -> None:
 def e2e_mtmd_test(rec: Recorder, chimera: Path) -> None:
     label = "gen --mmproj --image (vision pipeline)"
     if not (
-        MTMD_TEXT_MODEL.is_file() and MTMD_MMPROJ.is_file() and SD_MODEL is not None
+        MTMD_TEXT_MODEL is not None and MTMD_MMPROJ.is_file() and SD_MODEL is not None
     ):
         rec.skip(label, "missing gemma model, mmproj, or sd model")
         return
@@ -1653,6 +1662,7 @@ def e2e_chat_cli_tests(rec: Recorder, chimera: Path) -> None:
         rec.skip(
             "chat --persist + --list + --search round-trip", f"missing {GEN_MODEL}"
         )
+        rec.skip("chat: special-token text in user input stays literal", f"missing {GEN_MODEL}")
         return
 
     with maybe(rec, "chat persistent KV cache (recalls 'zephyrine')") as t:
@@ -1695,6 +1705,41 @@ def e2e_chat_cli_tests(rec: Recorder, chimera: Path) -> None:
             )
             if "#1" not in list_out or "[xyzzy42]" not in search_out:
                 t.fail(f"list={list_out!r} search={search_out!r}")
+
+    with maybe(rec, "chat: special-token text in user input stays literal") as t:
+        # Parsed, "<|eot_id|>" is 1 token; literal, it is several.
+        with_tok = chat_assistant_rows(chimera, GEN_MODEL, "a <|eot_id|> b", 1)
+        without = chat_assistant_rows(chimera, GEN_MODEL, "a b", 1)
+        n_with, n_without = with_tok[0]["tokens_in"], without[0]["tokens_in"]
+        if n_with - n_without < 3:
+            t.fail(f"tokens_in {n_with} vs {n_without}: special token was parsed")
+
+    name = "chat: <think> reasoning stored apart from content"
+    if not REASONING_MODEL.is_file():
+        rec.skip(name, f"missing {REASONING_MODEL}")
+        return
+    with maybe(rec, name) as t:
+        row = chat_assistant_rows(chimera, REASONING_MODEL, "What is 2+2?", 256)[0]
+        if not row["reasoning"] or "<think>" in row["content"]:
+            t.fail(f"content={row['content'][:120]!r} reasoning={row['reasoning'][:80]!r}")
+
+
+def chat_assistant_rows(chimera: Path, model: Path, message: str, n_predict: int) -> list:
+    """Run one persisted `chat` turn and return its assistant message rows."""
+    with scratch_file(suffix=".db") as chat_db:
+        run_capture(
+            [str(chimera), "chat", "-m", str(model), "--db", str(chat_db), "--persist",
+             "-n", str(n_predict), "--temp", "0", "--color", "never"],
+            timeout=180,
+            stdin=message.encode() + b"\n/exit\n",
+        )
+        conn = sqlite3.connect(chat_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(r) for r in conn.execute(
+                "SELECT content, reasoning, tokens_in FROM messages WHERE role = 'assistant'")]
+        finally:
+            conn.close()
 
 
 # ============================================================================
@@ -2098,6 +2143,7 @@ def e2e_slots_lora_tests(rec: Recorder, chimera: Path) -> None:
         "POST /slots/0?action=save with --slot-save-path -> 200 + file written",
         "POST /slots/0?action=restore -> 200",
         "POST /slots/0?action=restore of an older-format file -> 400, slot still usable",
+        "POST /slots/0?action=restore of a file without checkpoint appendix (0.6.0 layout) -> 200",
     ]
     if not GEN_MODEL.is_file():
         for n in pass1_names + pass2_names:
@@ -2215,6 +2261,21 @@ def e2e_slots_lora_tests(rec: Recorder, chimera: Path) -> None:
                     )
                     if r.status != 200:
                         t.fail(f"chat after failed restore: HTTP {r.status}")
+
+                with maybe(rec, pass2_names[3]) as t:
+                    # 0.7.0 appends optional "SCKP" checkpoint / "SDFT" draft
+                    # blocks after the llama state; a dense model without a
+                    # draft writes neither, which is the 0.6.0 layout.
+                    data = (slot_dir / "snap.bin").read_bytes()
+                    if b"SCKP" in data or b"SDFT" in data:
+                        t.fail("snapshot has an appendix; not a 0.6.0 layout")
+                    r = http_post_json(
+                        f"{srv.base_url}/slots/0?action=restore",
+                        {"filename": "snap.bin"},
+                        timeout=60,
+                    )
+                    if r.status != 200:
+                        t.fail(f"got HTTP {r.status}: {r.body[:200]!r}")
 
         except RuntimeError as e:
             for n in pass2_names:
@@ -2857,6 +2918,52 @@ def e2e_audio_input_validation(rec: Recorder, chimera: Path) -> None:
 # order deterministic matters because some tests share state (e.g. all
 # the GEN_MODEL-driven blocks share the gen model's warmup cost on disk
 # cache).
+def e2e_moe_slot_env_tests(rec: Recorder, chimera: Path) -> None:
+    names = [
+        "serve --cpu-moe --n-cpu-moe 2 answers a chat request",
+        "serve LLAMA_ARG_SLOT_SAVE_PATH env enables slot save",
+        "gen --moe-cache-mib -1 rejected",
+    ]
+    if not GEN_MODEL.is_file():
+        for n in names:
+            rec.skip(n, f"missing {GEN_MODEL}")
+        return
+    chat = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}
+
+    if rec.matches(names[0]):
+        try:
+            # Dense model: the patterns match nothing, but the overrides
+            # list must still reach the loader null-terminated.
+            with chimera_serve(chimera, ["-m", str(GEN_MODEL), "--cpu-moe",
+                                         "--n-cpu-moe", "2"]) as srv:
+                with maybe(rec, names[0]) as t:
+                    r = http_post_json(f"{srv.base_url}/v1/chat/completions", chat, timeout=120)
+                    if r.status != 200:
+                        t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+        except RuntimeError as e:
+            rec.fail(names[0], 0.0, str(e))
+
+    if rec.matches(names[1]):
+        with scratch_dir("chimera-slot-env-") as slot_dir:
+            try:
+                with chimera_serve(chimera, ["-m", str(GEN_MODEL)],
+                                   env={"LLAMA_ARG_SLOT_SAVE_PATH": str(slot_dir)}) as srv:
+                    with maybe(rec, names[1]) as t:
+                        http_post_json(f"{srv.base_url}/v1/chat/completions", chat, timeout=120)
+                        r = http_post_json(f"{srv.base_url}/slots/0?action=save",
+                                           {"filename": "snap.bin"}, timeout=60)
+                        if r.status != 200 or not (slot_dir / "snap.bin").is_file():
+                            t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+            except RuntimeError as e:
+                rec.fail(names[1], 0.0, str(e))
+
+    with maybe(rec, names[2]) as t:
+        rc, _, _ = run_capture([str(chimera), "gen", "-m", str(GEN_MODEL), "-p", "x",
+                                "--moe-cache-mib", "-1"], timeout=30)
+        if rc == 0:
+            t.fail("exit 0")
+
+
 # ============================================================================
 # End-to-end: native decision models on POST /v1/systemone.
 # ============================================================================
@@ -2982,8 +3089,11 @@ def e2e_embed_mmproj_tests(rec: Recorder, chimera: Path) -> None:
         return
     vlm = os.environ.get("CHIMERA_TEST_EMBED_VLM")
     proj = os.environ.get("CHIMERA_TEST_EMBED_VLM_MMPROJ")
+    if not (vlm or proj) and EMBED_VLM.is_file() and EMBED_VLM_MMPROJ.is_file():
+        vlm, proj = str(EMBED_VLM), str(EMBED_VLM_MMPROJ)
     if not (vlm or proj):
-        rec.skip(name, "set CHIMERA_TEST_EMBED_VLM=<vlm.gguf> + "
+        rec.skip(name, f"missing {EMBED_VLM.name} + {EMBED_VLM_MMPROJ.name}, or set "
+                       "CHIMERA_TEST_EMBED_VLM=<vlm.gguf> + "
                        "CHIMERA_TEST_EMBED_VLM_MMPROJ=<mmproj.gguf>")
         return
     if not (vlm and proj and Path(vlm).is_file() and Path(proj).is_file()):
@@ -3029,6 +3139,7 @@ _SECTIONS = [
     ("chat_id_header", e2e_chat_id_header_tests),
     ("chats_endpoints", e2e_chats_endpoints_tests),
     ("slots_lora", e2e_slots_lora_tests),
+    ("moe_slot_env", e2e_moe_slot_env_tests),
     ("model_alias", e2e_model_alias_tests),
     ("upstream_route_aliases", e2e_upstream_route_aliases),
     ("decision_models", e2e_decision_model_tests),
