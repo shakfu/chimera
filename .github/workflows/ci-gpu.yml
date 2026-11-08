@@ -604,7 +604,7 @@ jobs:
     # waiting on a chimera_sd.cpp compile that -fsycl had wrongly routed
     # through icpx device-compilation. The CMake LINK_ONLY fix removes that
     # slow path; this timeout is the backstop if anything else wedges.
-    timeout-minutes: 90
+    timeout-minutes: 120
     container: intel/oneapi-basekit:2025.3.2-0-devel-ubuntu22.04
     env:
       GGML_NATIVE: "0"

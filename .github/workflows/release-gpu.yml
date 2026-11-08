@@ -493,7 +493,7 @@ jobs:
     name: build (sycl, linux x86_64)
     needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     container: intel/oneapi-basekit:2025.3.2-0-devel-ubuntu22.04
     env:
       GGML_NATIVE: "0"
