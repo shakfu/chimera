@@ -2,6 +2,22 @@
 
 All notable changes to chimera will be documented in this file. Format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0]
+
+chimera skips 0.8.0 to keep its version equal to llama.cpp's.
+
+### Added
+
+- **`serve` binds `POST /tts`**, upstream's new speech-generation route. Models without audio generation get 501.
+
+### Changed
+
+- **Update llama.cpp to b12110** (v0.9.0, from b11669). `common_control_vector_load` now rejects direction tensors whose layer index exceeds the model's layer count.
+
+- **Pin whisper.cpp to master `f92e1e4`** (from v1.9.4). b11960 inserted `GGML_OP_TOP_K_MASK` into `enum ggml_op`, and v1.9.5, the latest tag, predates it. whisper.cpp compiles against its own ggml headers but links llama.cpp's ggml, so every later op would run as the wrong op. This commit's ggml headers equal b12110's. `manage.py` now accepts a 40-character commit hash as a pin.
+
+- **Update stable-diffusion.cpp to master-1067-b43ce4b** (from master-929-3f8527a). `generate_image` now returns a result struct that sd.cpp frees itself. chimera previously freed sd.cpp's pixel buffers with its own `std::free`.
+
 ## [0.7.0]
 
 ### Added

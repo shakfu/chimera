@@ -130,6 +130,7 @@
 //       POST /tokenize, /detokenize              server_routes.post_{tokenize,detokenize}
 //       POST /apply-template                     server_routes.post_apply_template
 //       POST /v1/systemone                       server_routes.post_systemone
+//       POST /tts                                server_routes.post_tts
 //       POST [/v1]/rerank, [/v1]/reranking       rrk_ctx->routes->post_rerank
 //       GET  /slots                              server_routes.get_slots
 //       POST /slots/:id_slot                     server_routes.post_slots
@@ -1182,6 +1183,8 @@ int command_serve(const ServeOptions & opts, ServeStopper * stopper) {
     ctx_http.post("/apply-template",  ex_wrapper(routes.post_apply_template));
     // Decision models only; upstream returns 501 for any other model.
     ctx_http.post("/v1/systemone",    ex_wrapper(routes.post_systemone));
+    // Audio-generation models only; upstream returns 501 for any other model.
+    ctx_http.post("/tts",             ex_wrapper(routes.post_tts));
 #ifdef CHIMERA_HAS_WHISPER
     if (whisper_ctx) {
         auto transcribe = make_audio_transcribe_handler(

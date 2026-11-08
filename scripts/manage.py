@@ -95,14 +95,16 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.7.0"
-LLAMACPP_VERSION = "b11669"  # equivalent to v0.7.0
-WHISPERCPP_VERSION = "v1.9.4"
+CHIMERA_VERSION = "0.9.0"
+LLAMACPP_VERSION = "b12110"  # equivalent to v0.9.0
+# master: no whisper.cpp tag has GGML_OP_TOP_K_MASK yet; without it every
+# later ggml_op is off by one. This commit's ggml headers equal b12110's.
+WHISPERCPP_VERSION = "f92e1e4d1056700c39d4e86c1140f0a088fe1ab6"
 # Floor: master-883. From master-817 sd.cpp calls ops that exist only in
 # leejet's ggml fork. master-883 (leejet/stable-diffusion.cpp#1999) added
 # SD_USE_UPSTREAM_GGML, which compiles those calls out, and SD_GGML_SOURCE_DIR;
 # see StableDiffusionCppBuilder._ggml_options.
-SDCPP_VERSION = "master-929-3f8527a"
+SDCPP_VERSION = "master-1067-b43ce4b"
 # linenoise: shakfu's fork.
 LINENOISE_VERSION = "2.1"
 # SQLite amalgamation; upstream files live at sqlite.org/<year>/
@@ -248,6 +250,15 @@ class ShellCmd:
         recurse: bool = False,
         cwd: Pathlike = ".",
     ) -> None:
+        if branch and re.fullmatch(r"[0-9a-f]{40}", branch):
+            # `clone --branch` takes only tags and branches; fetch a commit by sha.
+            dest = Path(cwd) / (directory or url.rstrip("/").split("/")[-1].removesuffix(".git"))
+            dest.mkdir(parents=True)
+            self.cmd(f"git init -q && git remote add origin {url}", cwd=dest)
+            self.cmd(f"git fetch -q --depth 1 origin {branch} && git checkout -q FETCH_HEAD", cwd=dest)
+            if recurse:
+                self.cmd("git submodule update --init --recursive --depth 1", cwd=dest)
+            return
         _cmds = ["git clone --depth 1"]
         if branch:
             _cmds.append(f"--branch {branch}")

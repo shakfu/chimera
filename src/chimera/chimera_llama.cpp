@@ -629,7 +629,7 @@ LlamaContextPtr new_llama_context(llama_model * model, const LlamaCommonOptions 
                 }
             }
         }
-        const auto cvec = common_control_vector_load(load_infos);
+        const auto cvec = common_control_vector_load(load_infos, llama_model_n_layer(model));
         if (cvec.n_embd == -1) {
             fail(ExitCode::Load, "failed to load control vectors");
         }

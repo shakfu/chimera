@@ -2084,6 +2084,8 @@ def e2e_upstream_route_aliases(rec: Recorder, chimera: Path) -> None:
         ("POST /v1/systemone (not a decision model) -> 501", "POST", "/v1/systemone",
          {"state": "x", "questions": {"q": {"type": "noul", "instructions": "?"}}},
          status(501)),
+        ("POST /tts (not an audio-generation model) -> 501", "POST", "/tts",
+         {"input": "hello"}, status(501)),
         ("POST /tokenize malformed JSON -> 400", "POST", "/tokenize",
          b'{"content": ', status(400)),
     ]

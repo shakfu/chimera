@@ -245,7 +245,9 @@ static_assert(static_cast<int>(SD_VAE_FORMAT_COUNT) > 0,
 [[maybe_unused]] static constexpr auto _free_sd_ctx_sig =
     static_cast<void (*)(sd_ctx_t *)>(&free_sd_ctx);
 [[maybe_unused]] static constexpr auto _generate_image_sig =
-    static_cast<bool (*)(sd_ctx_t *, const sd_img_gen_params_t *, sd_image_t **, int *)>(&generate_image);
+    static_cast<bool (*)(sd_ctx_t *, const sd_img_gen_params_t *, sd_image_generation_result_t **)>(&generate_image);
+[[maybe_unused]] static constexpr auto _free_sd_image_generation_result_sig =
+    static_cast<void (*)(sd_image_generation_result_t *)>(&free_sd_image_generation_result);
 [[maybe_unused]] static constexpr auto _sd_ctx_params_init_sig =
     static_cast<void (*)(sd_ctx_params_t *)>(&sd_ctx_params_init);
 [[maybe_unused]] static constexpr auto _sd_img_gen_params_init_sig =
@@ -1014,29 +1016,28 @@ std::vector<PixelImage> generate(sd_ctx_t * ctx, const GenerateRequest & req) {
         gp.lora_count = static_cast<uint32_t>(lora_specs.size());
     }
 
-    // Upstream (sd.cpp master-775+) returns bool and outputs the image
-    // array + count via out-params; older builds returned the array
-    // directly. Use the returned count rather than req.batch_count so the
-    // loop matches what sd.cpp actually produced.
-    sd_image_t * images     = nullptr;
-    int          num_images = 0;
-    if (!generate_image(ctx, &gp, &images, &num_images) || images == nullptr) {
+    // Use the returned count, not req.batch_count: cancellation can return fewer.
+    sd_image_generation_result_t * raw = nullptr;
+    if (!generate_image(ctx, &gp, &raw) || raw == nullptr) {
         fail(ExitCode::Generate, "image generation failed");
     }
+    // sd.cpp frees what it allocated (avoids a CRT mismatch on Windows).
+    const std::unique_ptr<sd_image_generation_result_t,
+                          decltype(&free_sd_image_generation_result)>
+        result(raw, &free_sd_image_generation_result);
 
     std::vector<PixelImage> out;
-    out.reserve(static_cast<size_t>(num_images));
-    for (int i = 0; i < num_images; ++i) {
+    out.reserve(static_cast<size_t>(result->count));
+    for (int i = 0; i < result->count; ++i) {
+        const sd_image_t & img = result->items[i].image;
         PixelImage p;
-        p.width    = static_cast<int>(images[i].width);
-        p.height   = static_cast<int>(images[i].height);
-        p.channels = static_cast<int>(images[i].channel);
+        p.width    = static_cast<int>(img.width);
+        p.height   = static_cast<int>(img.height);
+        p.channels = static_cast<int>(img.channel);
         const size_t n = static_cast<size_t>(p.width) * p.height * p.channels;
-        p.pixels.assign(images[i].data, images[i].data + n);
-        std::free(images[i].data);
+        p.pixels.assign(img.data, img.data + n);
         out.push_back(std::move(p));
     }
-    std::free(images);
     return out;
 }
 
