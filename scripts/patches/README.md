@@ -8,8 +8,8 @@ aborts the process, or a compile flag that has to be set inside upstream's own
 
 ## How they are applied
 
-- `ggml-*.patch` go to llama.cpp's and whisper.cpp's trees, which vendor
-  upstream ggml. Not to stable-diffusion.cpp: shared-ggml mode compiles
+- `ggml-*.patch` go to llama.cpp's tree only. whisper.cpp compiles llama.cpp's
+  ggml, not its own copy. Not to stable-diffusion.cpp: shared-ggml mode compiles
   llama.cpp's patched tree (`SD_GGML_SOURCE_DIR`), and `SD_USE_VENDORED_GGML=1`
   compiles leejet's fork, whose layout they do not match. A vendored Metal build
   therefore ships sd.cpp without the MSL pin. `<project>-*.patch` go only to the
@@ -55,6 +55,17 @@ cancelled them. The task loop had already exited, so no result arrived and
 session before finalizing it. Upstream `llama-server` shuts down in the same
 order and hangs the same way (reproduced on b11146). Matches llama.cpp b11146.
 Upstream PR brief: `llama.cpp-stream-cancel-on-shutdown.md`.
+
+### `stable-diffusion.cpp-diag-mask-inf-removed.patch`
+
+llama.cpp v1.0.0 (b12359) removed `ggml_diag_mask_inf` and its op
+([#29801](https://github.com/ggml-org/llama.cpp/pull/29801)). The MiniMax H3
+audio VAE still calls it, so the shared-ggml build fails to compile. The patch
+builds the same causal mask as `ggml_tri(ggml_fill(zeros, -inf), UPPER)`. The
+CPU, Metal, CUDA, Vulkan, SYCL and OpenCL `tri` kernels select rather than
+multiply, so no `-inf * 0` NaN. leejet's ggml fork has both ops, so the patch
+also applies in vendored mode. Taken from cyllama. Matches sd.cpp
+master-1094-3bad892. No test exercises this VAE.
 
 ## Retired patches
 

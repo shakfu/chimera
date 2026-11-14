@@ -67,7 +67,8 @@ class Inventory:
     def collect(self) -> None:
         e = self.archive_ext
         llama = self.build_root / "llama.cpp" / "build"
-        whisper = self.build_root / "whisper.cpp" / "build"
+        # Binary dir of the parent project in WhisperCppBuilder.build (manage.py).
+        whisper = self.build_root / "whisper.cpp" / "build" / "shared-ggml" / "build" / "whisper"
         sd = self.build_root / "stable-diffusion.cpp" / "build"
         linenoise = self.build_root / "linenoise" / "build"
 
@@ -159,7 +160,7 @@ class Inventory:
         only llama.cpp's may be bundled. Fails loudly if a future edit
         accidentally pulls in another."""
         forbidden_roots = (
-            self.build_root / "whisper.cpp" / "build" / "ggml",
+            self.build_root / "whisper.cpp" / "build" / "shared-ggml" / "build" / "ggml",
             self.build_root / "stable-diffusion.cpp" / "build" / "ggml",
         )
         offenders: list[Path] = []

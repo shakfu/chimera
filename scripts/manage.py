@@ -39,7 +39,7 @@ Environment variables:
 """
 
 import argparse
-import ast
+import filecmp
 import logging
 import os
 import platform
@@ -93,16 +93,14 @@ PLATFORM = platform.system()
 ARCH = platform.machine()
 PY_VER_MINOR = sys.version_info.minor
 
+PATCH_DIR = Path(__file__).resolve().parent / "patches"
+
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.9.1"
-# Last tag before v1.0.0's `ggml : prune` (ggml-org/llama.cpp#29801), which
-# drops GGML_OP_ADD1/DIAG_MASK_* and renumbers later ops. whisper.cpp has not
-# synced it, and sd.cpp master-1094 still calls ggml_diag_mask_inf.
-LLAMACPP_VERSION = "b12345"
-# master: v1.9.5's ggml lacks ops b12345 has, so later ggml_op ids shift.
-# This commit's ggml enums match b12345's.
-WHISPERCPP_VERSION = "5922450fbce1ed9d1648babd0d5ac4520055b436"
+CHIMERA_VERSION = "1.0.0"
+LLAMACPP_VERSION = "b12359"  # equivalent to v1.0.0
+# Compiled against llama.cpp's ggml, not its own; see WhisperCppBuilder.build.
+WHISPERCPP_VERSION = "v1.9.5"
 # Floor: master-883. From master-817 sd.cpp calls ops that exist only in
 # leejet's ggml fork. master-883 (leejet/stable-diffusion.cpp#1999) added
 # SD_USE_UPSTREAM_GGML, which compiles those calls out, and SD_GGML_SOURCE_DIR;
@@ -522,7 +520,14 @@ class AbstractBuilder(ShellCmd):
         """
         if self.src_dir.exists() and self.version and not self._at_pinned_ref():
             patched: set[str] = set()
-            for patch in self.source_patches():
+            # A patch this builder no longer takes may still be applied from an
+            # earlier build; it owns its files only while it reverse-applies.
+            applied = [
+                p for p in sorted(PATCH_DIR.glob("*.patch"))
+                if p not in self.source_patches()
+                and self._git("apply", "--reverse", "--check", str(p)).returncode == 0
+            ]
+            for patch in [*self.source_patches(), *applied]:
                 numstat = self._git("apply", "--numstat", str(patch)).stdout
                 patched.update(line.split("\t")[-1] for line in numstat.splitlines())
             changed = self._git("diff", "--name-only", "HEAD").stdout.split()
@@ -551,80 +556,6 @@ class Builder(AbstractBuilder):
             )
         else:
             self.git_clone(self.repo_url, recurse=True, cwd=self.project.src)
-
-
-def _eval_enum_value(expr: str, known: dict[str, int]) -> int:
-    """Evaluate a C enum initializer: int literals, earlier enumerators, | << + - ~."""
-    ops: dict[type, Callable[..., int]] = {
-        ast.BitOr: lambda a, b: a | b,
-        ast.LShift: lambda a, b: a << b,
-        ast.Add: lambda a, b: a + b,
-        ast.Sub: lambda a, b: a - b,
-        ast.USub: lambda a: -a,
-        ast.Invert: lambda a: ~a,
-    }
-
-    def ev(node: ast.AST) -> int:
-        if isinstance(node, ast.Constant) and isinstance(node.value, int):
-            return node.value
-        if isinstance(node, ast.Name) and node.id in known:
-            return known[node.id]
-        if isinstance(node, ast.BinOp) and type(node.op) in ops:
-            return ops[type(node.op)](ev(node.left), ev(node.right))
-        if isinstance(node, ast.UnaryOp) and type(node.op) in ops:
-            return ops[type(node.op)](ev(node.operand))
-        raise ValueError(f"cannot evaluate enum initializer {expr!r}")
-
-    # C allows integer suffixes (1u, 2ULL); Python does not.
-    return ev(ast.parse(re.sub(r"\b(0x[0-9a-fA-F]+|\d+)[uUlL]+\b", r"\1", expr), mode="eval").body)
-
-
-def parse_c_enums(header: Path) -> dict[str, dict[str, int]]:
-    """Map each tagged `enum name { ... }` in a C header to {enumerator: value}."""
-    text = header.read_text(encoding="utf-8", errors="replace")
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    text = re.sub(r"//[^\n]*", "", text)
-    enums: dict[str, dict[str, int]] = {}
-    for m in re.finditer(r"\benum\s+(\w+)\s*\{(.*?)\}", text, flags=re.S):
-        values: dict[str, int] = {}
-        nxt = 0
-        for item in m.group(2).split(","):
-            item = item.strip()
-            if not item:
-                continue
-            name, _, expr = (part.strip() for part in item.partition("="))
-            nxt = _eval_enum_value(expr, values) if expr else nxt
-            values[name] = nxt
-            nxt += 1
-        enums[m.group(1)] = values
-    return enums
-
-
-def ggml_enum_mismatches(consumer: Path, provider: Path) -> list[str]:
-    """Enumerators whose value differs between two ggml include dirs.
-
-    `consumer` is the include dir a library compiles against; `provider` is the
-    one of the ggml it links. Every enumerator the consumer can name must exist
-    in the provider with the same value. Additions in the provider are fine.
-    `*_COUNT` sentinels are skipped: they grow with every addition.
-    """
-    problems: list[str] = []
-    for header in sorted(consumer.glob("*.h")):
-        other = provider / header.name
-        if not other.exists():
-            continue  # a backend header the provider does not build
-        theirs = parse_c_enums(other)
-        for enum, values in parse_c_enums(header).items():
-            if enum not in theirs:
-                problems.append(f"{header.name}: enum {enum} missing from {provider}")
-                continue
-            for name, value in values.items():
-                if name.endswith("_COUNT"):
-                    continue
-                got = theirs[enum].get(name)
-                if got != value:
-                    problems.append(f"{header.name}: {enum}::{name} = {value}, linked ggml has {got}")
-    return problems
 
 
 class GgmlBuilder(Builder):
@@ -666,7 +597,7 @@ class GgmlBuilder(Builder):
             self._apply_patch(patch)
 
     def source_patches(self) -> list[Path]:
-        patch_dir = Path(__file__).resolve().parent / "patches"
+        patch_dir = PATCH_DIR
         ggml_patches = sorted(patch_dir.glob("ggml-*.patch")) if self.takes_ggml_patches() else []
         return ggml_patches + sorted(patch_dir.glob(f"{self.name}-*.patch"))
 
@@ -719,16 +650,17 @@ class GgmlBuilder(Builder):
         use SD's value -- i.e. the backend disagrees with the rest of the same
         ggml about sizeof(ggml_tensor). SD's own tree avoids this only because
         it uses add_definitions(), which applies to all languages.
+
+        Sets the `_INIT` variables: CMake appends the platform defaults (MSVC's
+        /EHsc /GR /D_WINDOWS) and $CFLAGS/$CXXFLAGS to them. A plain
+        CMAKE_<LANG>_FLAGS on a first configure replaces those defaults.
         """
         if not StableDiffusionCppBuilder.uses_shared_ggml():
             return {}
         n = StableDiffusionCppBuilder.ggml_max_name(self.project)
         flag = f"-DGGML_MAX_NAME={n}"
         return {
-            "CMAKE_C_FLAGS": flag,
-            "CMAKE_CXX_FLAGS": flag,
-            "CMAKE_CUDA_FLAGS": flag,
-            "CMAKE_HIP_FLAGS": flag,
+            f"CMAKE_{lang}_FLAGS_INIT": flag for lang in ("C", "CXX", "CUDA", "HIP")
         }
 
     CUDA_TUNING_ENV_FLAGS: tuple[str, ...] = (
@@ -1197,37 +1129,66 @@ class WhisperCppBuilder(GgmlBuilder):
         self._apply_openmp(options)
         return options
 
-    def _verify_ggml_enum_abi(self) -> None:
-        """Fail if whisper's vendored ggml headers disagree with llama.cpp's on enum values.
+    def takes_ggml_patches(self) -> bool:
+        # whisper.cpp's own ggml is not compiled; see build().
+        return False
 
-        whisper compiles against its own ggml headers but chimera links it to
-        llama.cpp's ggml. A renumbered `ggml_op` or `ggml_type` compiles clean
-        and builds graphs with wrong op ids at runtime.
+    @property
+    def llama_ggml(self) -> Path:
+        return self.project.src / "llama.cpp" / "ggml"
+
+    def _write_parent_project(self, parent: Path) -> None:
+        """CMake project that adds llama.cpp's ggml, then whisper.cpp.
+
+        whisper.cpp skips its vendored ggml when a parent already defines the
+        `ggml` target. chimera links llama.cpp's ggml, so whisper must compile
+        against those headers: its own copy lags llama.cpp's and renumbers
+        `ggml_op` whenever upstream inserts or removes an op.
         """
-        llama_include = self.project.src / "llama.cpp" / "ggml" / "include"
-        if not llama_include.exists():
-            self.fail(f"Cannot check ggml ABI: {llama_include} is missing. Build llama.cpp first.")
-        problems = ggml_enum_mismatches(self.src_dir / "ggml" / "include", llama_include)
-        if problems:
+        parent.mkdir(parents=True, exist_ok=True)
+        (parent / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.14)\n"
+            "project(chimera_whisper C CXX)\n"
+            f'add_subdirectory("{self.llama_ggml.as_posix()}" ggml)\n'
+            f'add_subdirectory("{self.src_dir.as_posix()}" whisper)\n'
+        )
+
+    def _verify_shared_ggml_headers(self) -> None:
+        """Fail unless the installed ggml headers are llama.cpp's, byte for byte."""
+        llama_include = self.llama_ggml / "include"
+        installed = [*self.include.glob("ggml*.h"), *self.include.glob("gguf.h")]
+        differ = sorted(
+            h.name for h in installed
+            if not (llama_include / h.name).exists()
+            or not filecmp.cmp(h, llama_include / h.name, shallow=False)
+        ) if (self.include / "ggml.h").exists() else ["ggml.h (missing)"]
+        if differ:
             self.fail(
-                f"{self.name} {self.version}'s vendored ggml headers disagree with "
-                f"llama.cpp {LLAMACPP_VERSION}'s, which chimera links:\n  "
-                + "\n  ".join(problems)
+                f"{self.include} has ggml headers that are not llama.cpp's: {differ}. "
+                f"whisper.cpp {self.version} no longer takes its ggml from the parent "
+                f"project; check `if (NOT TARGET ggml)` in its CMakeLists.txt."
             )
-        self.log.info("whisper.cpp's ggml enums match llama.cpp's")
 
     def build(self) -> None:
         self.ensure_source()
         self.log.info(f"building {self.name}")
+        if not (self.llama_ggml / "CMakeLists.txt").exists():
+            self.fail(f"{self.llama_ggml} is missing. Build llama.cpp first.")
 
         self._apply_source_patches()
-        self._verify_ggml_enum_abi()
 
         self.prefix.mkdir(exist_ok=True)
         self.include.mkdir(exist_ok=True)
+        # Drop ggml headers a previous build installed from whisper's own copy.
+        for h in [*self.include.glob("ggml*.h"), *self.include.glob("gguf.h")]:
+            h.unlink()
         self.glob_copy(
             self.src_dir / "examples", self.include, patterns=["*.h", "*.hpp"]
         )
+
+        parent = self.build_dir / "shared-ggml"
+        bin_dir = parent / "build"
+        self._write_parent_project(parent)
 
         backend_options = self.get_backend_cmake_options()
 
@@ -1238,20 +1199,25 @@ class WhisperCppBuilder(GgmlBuilder):
         extra = self.ggml_max_name_flags()
 
         self.cmake_config(
-            src_dir=self.src_dir,
-            build_dir=self.build_dir,
+            src_dir=parent,
+            build_dir=bin_dir,
             BUILD_SHARED_LIBS=False,
             CMAKE_POSITION_INDEPENDENT_CODE=True,
             CMAKE_CXX_VISIBILITY_PRESET="hidden",
             CMAKE_C_VISIBILITY_PRESET="hidden",
             CMAKE_VISIBILITY_INLINES_HIDDEN=True,
             CMAKE_INSTALL_LIBDIR="lib",  # avoid lib64 on 64-bit Linux
+            # Not top-level, so these default OFF; `common` lives in examples/.
+            WHISPER_BUILD_EXAMPLES=True,
+            WHISPER_BUILD_TESTS=False,
+            WHISPER_BUILD_SERVER=False,
             **extra,
             **backend_options,
         )
-        self.cmake_build(build_dir=self.build_dir, release=True)
-        self.cmake_install(build_dir=self.build_dir, prefix=self.prefix)
-        self.copy_lib(self.build_dir, "examples", "common", self.lib)
+        self.cmake_build(build_dir=bin_dir, release=True)
+        self.cmake_install(build_dir=bin_dir, prefix=self.prefix)
+        self._verify_shared_ggml_headers()
+        self.copy_lib(bin_dir, "whisper/examples", "common", self.lib)
 
 
 class StableDiffusionCppBuilder(GgmlBuilder):

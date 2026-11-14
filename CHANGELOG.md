@@ -2,6 +2,20 @@
 
 All notable changes to chimera will be documented in this file. Format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.0]
+
+### Changed
+
+- **Update llama.cpp to b12359** (v1.0.0, from b12345). Its `ggml : prune` (llama.cpp#29801) removes `GGML_OP_ADD1` and `GGML_OP_DIAG_MASK_{INF,ZERO}`, which renumbers every later op.
+
+- **whisper.cpp compiles against llama.cpp's ggml**, and is back on the v1.9.5 tag (from master `5922450`). chimera always linked llama.cpp's ggml, but whisper compiled against its own vendored headers. A pin was safe only while those headers matched, and no whisper.cpp commit matches v1.0.0's. `manage.py` now builds whisper inside a parent CMake project that adds llama.cpp's `ggml/` first, and fails if the installed ggml headers differ from llama.cpp's. This replaces the enum comparison, which only caught renumbered enums, not changed signatures or struct layouts.
+
+- **Patch stable-diffusion.cpp master-1094 for v1.0.0's ggml.** It still calls `ggml_diag_mask_inf`; `scripts/patches/stable-diffusion.cpp-diag-mask-inf-removed.patch` replaces it.
+
+### Fixed
+
+- **MSVC builds keep CMake's default compiler flags.** `manage.py` passed `GGML_MAX_NAME` as `-DCMAKE_<LANG>_FLAGS=...`, which on a first configure replaces CMake's defaults instead of adding to them. On MSVC that dropped `/EHsc /GR /D_WINDOWS` from llama.cpp, whisper.cpp and their ggml; everywhere it dropped `$CFLAGS` / `$CXXFLAGS`. It now sets `CMAKE_<LANG>_FLAGS_INIT`. Existing build trees keep their cached flags until reconfigured from scratch.
+
 ## [0.9.1]
 
 ### Added

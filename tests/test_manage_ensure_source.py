@@ -93,3 +93,31 @@ def test_edits_from_own_patches_do_not_block_reclone(make_builder, tmp_path):
     (b.src_dir / "src.c").write_text("int v = 3;\n")  # what applying the patch leaves
     b.ensure_source()
     assert (b.src_dir / "src.c").read_text() == "int v = 2;\n"
+
+
+def test_applied_patch_the_builder_no_longer_takes_does_not_block_reclone(
+    make_builder, tmp_path, monkeypatch
+):
+    # whisper.cpp stopped taking ggml-*.patch; trees built before that still carry them.
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+    (patch_dir / "ggml-fix.patch").write_text(PATCH)
+    monkeypatch.setattr(manage, "PATCH_DIR", patch_dir)
+    make_builder("v2").ensure_source()
+    b = make_builder("v1")
+    (b.src_dir / "src.c").write_text("int v = 3;\n")  # the patch, applied earlier
+    b.ensure_source()
+    assert (b.src_dir / "src.c").read_text() == "int v = 1;\n"
+
+
+def test_unapplied_patch_does_not_excuse_a_hand_edit(make_builder, tmp_path, monkeypatch, caplog):
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+    (patch_dir / "ggml-fix.patch").write_text(PATCH)
+    monkeypatch.setattr(manage, "PATCH_DIR", patch_dir)
+    make_builder("v2").ensure_source()
+    b = make_builder("v1")
+    (b.src_dir / "src.c").write_text("int mine;\n")
+    with pytest.raises(SystemExit):
+        b.ensure_source()
+    assert "has local edits outside scripts/patches/: ['src.c']" in caplog.text

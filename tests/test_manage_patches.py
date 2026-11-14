@@ -74,11 +74,11 @@ def test_sd_never_gets_ggml_patches(tmp_path, monkeypatch, vendored):
     assert not any(n.startswith("ggml-") for n in seen)
 
 
-def test_other_trees_always_get_ggml_patches(tmp_path, monkeypatch):
+def test_llama_always_gets_ggml_patches(tmp_path, monkeypatch):
+    # The only ggml tree compiled in shared mode; whisper.cpp compiles it too.
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SD_USE_VENDORED_GGML", "0")
-    for cls in (manage.LlamaCppBuilder, manage.WhisperCppBuilder):
-        seen: list[str] = []
-        monkeypatch.setattr(manage.GgmlBuilder, "_apply_patch", lambda self, p: seen.append(p.name))
-        cls()._apply_source_patches()
-        assert any(n.startswith("ggml-") for n in seen), cls.__name__
+    seen: list[str] = []
+    monkeypatch.setattr(manage.GgmlBuilder, "_apply_patch", lambda self, p: seen.append(p.name))
+    manage.LlamaCppBuilder()._apply_source_patches()
+    assert any(n.startswith("ggml-") for n in seen)
