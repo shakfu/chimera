@@ -2,6 +2,20 @@
 
 All notable changes to chimera will be documented in this file. Format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.1]
+
+### Added
+
+- **`serve` binds `POST [/v1]/audio/speech`**, upstream's OpenAI-shaped wrapper over `/tts`.
+
+### Changed
+
+- **Update llama.cpp to b12345** (from b12110), not v1.0.0 (b12359). v1.0.0's `ggml : prune` (llama.cpp#29801) removes `GGML_OP_ADD1` and `GGML_OP_DIAG_MASK_{INF,ZERO}`, which renumbers every later op. No whisper.cpp commit has synced it, and sd.cpp master-1094 still calls `ggml_diag_mask_inf`.
+
+- **Pin whisper.cpp to master `5922450`** (from `f92e1e4`). v1.9.5 lacks ops b12345 has; this commit's ggml enums match.
+
+- **Update stable-diffusion.cpp to master-1094-3bad892** (from master-1067-b43ce4b).
+
 ## [0.9.0]
 
 chimera skips 0.8.0 to keep its version equal to llama.cpp's.

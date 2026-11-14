@@ -95,16 +95,19 @@ PY_VER_MINOR = sys.version_info.minor
 
 # Version block. CMakeLists.txt parses these four constants out of this file
 # to stamp the chimera binary at compile time. Keep names and "X = "Y"" form.
-CHIMERA_VERSION = "0.9.0"
-LLAMACPP_VERSION = "b12110"  # equivalent to v0.9.0
-# master: no whisper.cpp tag has GGML_OP_TOP_K_MASK yet; without it every
-# later ggml_op is off by one. This commit's ggml headers equal b12110's.
-WHISPERCPP_VERSION = "f92e1e4d1056700c39d4e86c1140f0a088fe1ab6"
+CHIMERA_VERSION = "0.9.1"
+# Last tag before v1.0.0's `ggml : prune` (ggml-org/llama.cpp#29801), which
+# drops GGML_OP_ADD1/DIAG_MASK_* and renumbers later ops. whisper.cpp has not
+# synced it, and sd.cpp master-1094 still calls ggml_diag_mask_inf.
+LLAMACPP_VERSION = "b12345"
+# master: v1.9.5's ggml lacks ops b12345 has, so later ggml_op ids shift.
+# This commit's ggml enums match b12345's.
+WHISPERCPP_VERSION = "5922450fbce1ed9d1648babd0d5ac4520055b436"
 # Floor: master-883. From master-817 sd.cpp calls ops that exist only in
 # leejet's ggml fork. master-883 (leejet/stable-diffusion.cpp#1999) added
 # SD_USE_UPSTREAM_GGML, which compiles those calls out, and SD_GGML_SOURCE_DIR;
 # see StableDiffusionCppBuilder._ggml_options.
-SDCPP_VERSION = "master-1067-b43ce4b"
+SDCPP_VERSION = "master-1094-3bad892"
 # linenoise: shakfu's fork.
 LINENOISE_VERSION = "2.1"
 # SQLite amalgamation; upstream files live at sqlite.org/<year>/
