@@ -472,7 +472,7 @@ endif()
 
 if(GGML_CUDA)
     find_package(CUDAToolkit REQUIRED)
-    list(APPEND SYSTEM_LIBS CUDA::cudart CUDA::cublas CUDA::cuda_driver)
+    list(APPEND SYSTEM_LIBS CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cuda_driver)
 endif()
 
 if(GGML_VULKAN)

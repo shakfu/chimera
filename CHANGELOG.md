@@ -16,6 +16,8 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 - **MSVC builds keep CMake's default compiler flags.** `manage.py` passed `GGML_MAX_NAME` as `-DCMAKE_<LANG>_FLAGS=...`, which on a first configure replaces CMake's defaults instead of adding to them. On MSVC that dropped `/EHsc /GR /D_WINDOWS` from llama.cpp, whisper.cpp and their ggml; everywhere it dropped `$CFLAGS` / `$CXXFLAGS`. It now sets `CMAKE_<LANG>_FLAGS_INIT`. Existing build trees keep their cached flags until reconfigured from scratch.
 
+- **CUDA builds link cuBLASLt.** llama.cpp v1.0.0's `ggml-cuda` calls `cublasLtCreate`. chimera's link line named only `CUDA::cublas`, so the Linux CUDA link failed with `DSO missing from command line`.
+
 ## [0.9.1]
 
 ### Added
