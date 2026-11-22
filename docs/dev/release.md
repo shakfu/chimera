@@ -95,7 +95,7 @@ Each build leg, in order:
 
 These are intentional, documented in the workflow header, and worth a conscious decision per project phase:
 
-- **Single GPU arch.** `CMAKE_CUDA_ARCHITECTURES=75` and `CMAKE_HIP_ARCHITECTURES=gfx1030` are inherited from `ci-gpu.yml` to bound the (very slow) nvcc/hipcc compile. A shipped binary built for one arch is narrower than users may expect; widening these envs multiplies compile time. The SYCL/Vulkan legs are not arch-pinned this way.
+- **Narrow GPU arch list.** `CMAKE_CUDA_ARCHITECTURES="75-real;80-virtual"` and `CMAKE_HIP_ARCHITECTURES=gfx1030` are inherited from `ci-gpu.yml` to bound the (very slow) nvcc/hipcc compile. CUDA ships `sm_75` SASS and `compute_80` PTX: Turing runs natively, Ampere and newer JIT-compile the PTX on first load. Each extra arch multiplies compile time. Rationale and benchmarks: cyllama `docs/dev/cuda-wheel.md`. The SYCL/Vulkan legs are not arch-pinned this way.
 
 - **Strict publish (no partial GPU release).** `publish` `needs` every leg and uses `fail_on_unmatched_files: true`, mirroring `release.yml`'s "no partial releases" stance: if any one leg fails (most likely the ~75-min cold Windows-CUDA leg), *no* GPU assets ship. To allow a partial GPU release, drop the flaky leg from `publish.needs`, add `if: always()` to `publish`, and set `fail_on_unmatched_files: false`.
 

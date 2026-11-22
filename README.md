@@ -158,6 +158,8 @@ make build-vulkan    # Vulkan (cross-platform)
 
 The backend toolkit (CUDA Toolkit, ROCm, oneAPI, or Vulkan SDK) must already be installed on the host. Override architectures with `CMAKE_CUDA_ARCHITECTURES` (e.g. `89` for Ada/RTX 40xx) or `CMAKE_HIP_ARCHITECTURES` (e.g. `gfx1100` for RDNA3) to avoid the slow default fat-build. CUDA perf knobs (`GGML_CUDA_FORCE_MMQ`, `GGML_CUDA_FORCE_CUBLAS`, `GGML_CUDA_FA_ALL_QUANTS`) and the ROCm `GGML_HIP_ROCWMMA_FATTN` flash-attention switch are picked up from the env. Verify with `chimera info`, which prints the linked backends.
 
+The CUDA release binaries target `75-real;80-virtual`: native code for Turing (RTX 20, T4) and PTX for Ampere and newer. On Ampere and newer GPUs, the driver JIT-compiles kernels on first use; the first run can take 25 s or more. The driver caches the result in `~/.nv/ComputeCache` (Linux) or `%APPDATA%\NVIDIA\ComputeCache` (Windows), so later runs start fast. To keep the cache from evicting chimera's kernels, raise its cap with `CUDA_CACHE_MAXSIZE` (bytes; default 1 GiB, max 4 GiB), and in containers mount a persistent `CUDA_CACHE_PATH`. See [CUDA environment variables](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html).
+
 On Windows (or any host without GNU make), drive the same build directly from `manage.py` — it runs the deps build and the cmake configure + build in one step:
 
 ```bash

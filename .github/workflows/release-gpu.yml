@@ -21,11 +21,11 @@ name: release-gpu
 # As in ci-gpu.yml, the hosted runners have no GPU, so these are LINK-checked,
 # not run-checked. Two policy caveats worth knowing before you cut a release:
 #
-#   - GPU arch breadth. CMAKE_CUDA_ARCHITECTURES / CMAKE_HIP_ARCHITECTURES pin
-#     a SINGLE arch (75 / gfx1030), inherited from ci-gpu.yml to bound the
-#     (very slow) nvcc/hipcc compile. A shipped binary built for one arch is
-#     narrower than users may expect. Widen these envs per leg if a release
-#     should cover more GPUs -- at a real (multiplicative) compile-time cost.
+#   - GPU arch breadth. CUDA builds sm_75 SASS + compute_80 PTX
+#     ("75-real;80-virtual"); ROCm pins gfx1030. Both are inherited from
+#     ci-gpu.yml to bound the (very slow) nvcc/hipcc compile. Ampere+ GPUs
+#     JIT-compile the PTX on first load. Each extra arch multiplies compile
+#     time.
 #   - Strict publish. The publish job needs EVERY leg (incl. the ~75-min cold
 #     Windows-CUDA leg) and fail_on_unmatched_files is true, mirroring
 #     release.yml's "no partial releases" stance: one failed leg ships no GPU
@@ -98,8 +98,8 @@ jobs:
     container: nvidia/cuda:12.4.1-devel-ubuntu22.04
     env:
       GGML_NATIVE: "0"
-      CMAKE_CUDA_ARCHITECTURES: "75"   # forwarded to deps by manage.py
-      CUDAARCHS: "75"                  # read by chimera's own configure
+      CMAKE_CUDA_ARCHITECTURES: "75-real;80-virtual"  # forwarded to deps by manage.py
+      CUDAARCHS: "75-real;80-virtual"                 # read by chimera's own configure
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CMAKE_CUDA_COMPILER_LAUNCHER: ccache
@@ -343,8 +343,8 @@ jobs:
     timeout-minutes: 150
     env:
       GGML_NATIVE: "0"
-      CMAKE_CUDA_ARCHITECTURES: "75"   # forwarded to deps by manage.py
-      CUDAARCHS: "75"                  # read by chimera's own configure
+      CMAKE_CUDA_ARCHITECTURES: "75-real;80-virtual"  # forwarded to deps by manage.py
+      CUDAARCHS: "75-real;80-virtual"                 # read by chimera's own configure
     steps:
       - uses: actions/checkout@v6
         with:

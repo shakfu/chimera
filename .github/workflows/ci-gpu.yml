@@ -19,7 +19,8 @@ name: ci-gpu
 #
 # Conventions adopted from the sibling cyllama build-gpu-wheels.yml:
 #   - GGML_NATIVE=OFF        : reproducible, not tuned to the runner CPU
-#   - CMAKE_CUDA_ARCHITECTURES=75 : single arch keeps the nvcc compile cheap
+#   - CMAKE_CUDA_ARCHITECTURES=75-real;80-virtual : two nvcc passes, as
+#                              cyllama's CUDA wheels use
 #   - ccache                 : cache compiled objects across runs (the big
 #                              lever on nvcc cost). Forwarded into the deps
 #                              build by scripts/manage.py.
@@ -72,8 +73,8 @@ jobs:
     container: nvidia/cuda:12.4.1-devel-ubuntu22.04
     env:
       GGML_NATIVE: "0"
-      CMAKE_CUDA_ARCHITECTURES: "75"   # forwarded to deps by manage.py
-      CUDAARCHS: "75"                  # read by chimera's own configure
+      CMAKE_CUDA_ARCHITECTURES: "75-real;80-virtual"  # forwarded to deps by manage.py
+      CUDAARCHS: "75-real;80-virtual"                 # read by chimera's own configure
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CMAKE_CUDA_COMPILER_LAUNCHER: ccache
@@ -361,7 +362,7 @@ jobs:
   # The image has no CUDA toolkit, so Jimver/cuda-toolkit installs nvcc +
   # cudart + cublas (+ the Visual Studio integration the VS generator needs to
   # compile .cu via MSBuild). CUDA 12.4.1 matches the Linux container's
-  # version, and CMAKE_CUDA_ARCHITECTURES=75 pins a single arch to bound the
+  # version, and CMAKE_CUDA_ARCHITECTURES=75-real;80-virtual bounds the
   # (slow) nvcc compile -- exactly the leg the `legs: cuda-windows` selector
   # exists to run in isolation.
   #
@@ -401,8 +402,8 @@ jobs:
     timeout-minutes: 150
     env:
       GGML_NATIVE: "0"
-      CMAKE_CUDA_ARCHITECTURES: "75"   # forwarded to deps by manage.py
-      CUDAARCHS: "75"                  # read by chimera's own configure
+      CMAKE_CUDA_ARCHITECTURES: "75-real;80-virtual"  # forwarded to deps by manage.py
+      CUDAARCHS: "75-real;80-virtual"                 # read by chimera's own configure
     steps:
       - uses: actions/checkout@v6
 

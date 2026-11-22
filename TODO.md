@@ -64,6 +64,8 @@
 
 ### Build / packaging
 
+- [ ] **Decide whether to add `89-real` (and `86-real`) to the CUDA arch list.** Release binaries build `75-real;80-virtual`, so Ampere+ GPUs JIT-compile PTX on first load (~24 s empty-cache on an RTX 4060, per cyllama `docs/dev/cuda-wheel.md`). `89-real` removes that on Ada at 0.97x `compute_80` throughput. Estimated cost: +34 MB per compressed asset (~135 MB Linux, ~126 MB Windows), +146 MB unpacked, one more nvcc pass per kernel on each CUDA leg. `86-real` (RTX 30) adds about the same and is unmeasured. Build both variants, measure asset size, CI time and first-load time, then choose.
+
 - [ ] Homebrew tap (or formula PR to homebrew-core once the project is stable enough).
 
 ### Server — deferred routes / features

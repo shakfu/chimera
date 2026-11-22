@@ -2,6 +2,16 @@
 
 All notable changes to chimera will be documented in this file. Format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **CUDA release binaries target `75-real;80-virtual` instead of `75`**, following cyllama's CUDA wheels. With `75`, Ampere and newer GPUs JIT-compiled `compute_75` PTX, which compiles out ggml's Ampere+ kernels. cyllama measured 12-25% faster long-context prompt processing (flash attention, 4096 context) on an RTX 4060; Turing keeps native SASS. Benchmarks and rejected options: cyllama `docs/dev/cuda-wheel.md`.
+
+### Fixed
+
+- **`info` build flags accept a `;`-separated `CMAKE_CUDA_ARCHITECTURES` / `CMAKE_HIP_ARCHITECTURES`.** CMake split the list inside `target_compile_definitions`, so the compile command had an unterminated quote and the build failed. The value is now stored with `,` separators.
+
 ## [1.0.0]
 
 ### Changed
