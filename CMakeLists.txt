@@ -600,6 +600,25 @@ else()
     set(CXX_COMPILE_OPTIONS -std=c++17 -fvisibility=hidden -fvisibility-inlines-hidden)
 endif()
 
+# ASan + UBSan over chimera's own targets (incl. the vendored sqlite3.c /
+# sqlite-vec.c compiled into chimera_lib). The prebuilt engine archives in
+# thirdparty/ stay uninstrumented: bugs inside them go unreported, but
+# chimera passing them a bad pointer or size is still caught.
+option(CHIMERA_SANITIZE "Build chimera with -fsanitize=address,undefined" OFF)
+if(CHIMERA_SANITIZE)
+    if(MSVC)
+        message(FATAL_ERROR "CHIMERA_SANITIZE is not supported with MSVC")
+    endif()
+    # __SANITIZER_DISABLE_CONTAINER_OVERFLOW__: the prebuilt engines and
+    # chimera share libc++'s inline container code, and the linker keeps one
+    # copy of each function. With annotations on in only one half, a single
+    # vector growth runs through both and ASan reports an overflow inside
+    # llama.cpp's model loader that is not there.
+    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined
+                        -fno-omit-frame-pointer -D__SANITIZER_DISABLE_CONTAINER_OVERFLOW__)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 # -----------------------------------------------------------------------------
 # chimera targets: library (src/chimera/) and CLI executable (src/chimera_cli/).
 # The library subdirectory must be added first so chimera_lib is defined

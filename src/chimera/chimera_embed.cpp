@@ -6,6 +6,7 @@
 #include "chimera_embed_cache.h"
 #include "chimera_llama_load_mode.h"
 
+#include "common.h"   // common_cpu_get_num_math
 #include "llama.h"
 #include "ggml-backend.h"
 
@@ -67,7 +68,8 @@ struct Embedder::Impl {
     LlamaModelPtr        model;
     LlamaContextPtr      ctx;
     enum llama_pooling_type ptype;
-    int                  n_embd_   = 0;
+    bool                 rank      = false;  // effective pooling is RANK
+    int                  n_embd_   = 0;      // output width: n_cls_out when rank
     int                  n_ctx_    = 0;
     int                  n_ubatch_ = 0;
     bool                 normalize = true;
@@ -136,8 +138,9 @@ Embedder::Embedder(const Config & cfg) : impl_(std::make_unique<Impl>()) {
     cparams.n_ctx           = cfg.n_ctx == 0 ? n_train : cfg.n_ctx;
     cparams.n_batch         = std::max<uint32_t>(cfg.n_batch, cparams.n_ctx);
     cparams.n_ubatch        = cfg.n_ubatch > 0 ? cfg.n_ubatch : cparams.n_batch;
-    cparams.n_threads       = cfg.threads;
-    cparams.n_threads_batch = cfg.threads;
+    // ggml maps <= 0 to 4 threads; resolve -1 to the core count instead.
+    cparams.n_threads       = cfg.threads > 0 ? cfg.threads : common_cpu_get_num_math();
+    cparams.n_threads_batch = cparams.n_threads;
     cparams.embeddings      = true;
     cparams.pooling_type    = parse_pooling(cfg.pooling);
     cparams.attention_type  = parse_attention(cfg.attention);
@@ -163,7 +166,16 @@ Embedder::Embedder(const Config & cfg) : impl_(std::make_unique<Impl>()) {
         fail(ExitCode::Load, "failed to create llama context for embedding");
     }
     impl_->ptype     = cparams.pooling_type;
-    impl_->n_embd_   = llama_model_n_embd(impl_->model.get());
+    // Effective type: UNSPECIFIED resolves to the GGUF's own default, which
+    // is RANK for reranker models. RANK yields n_cls_out scores per
+    // sequence, not n_embd floats.
+    impl_->rank      = llama_pooling_type(impl_->ctx.get()) == LLAMA_POOLING_TYPE_RANK;
+    impl_->n_embd_   = impl_->rank
+        ? static_cast<int>(llama_model_n_cls_out(impl_->model.get()))
+        : llama_model_n_embd(impl_->model.get());
+    if (impl_->n_embd_ <= 0) {
+        fail(ExitCode::Load, "embedding model reports a zero-width output: " + cfg.model);
+    }
     impl_->n_ctx_    = static_cast<int>(cparams.n_ctx);
     impl_->n_ubatch_ = static_cast<int>(cparams.n_ubatch);
     impl_->normalize = cfg.normalize;
@@ -289,7 +301,8 @@ std::vector<float> Embedder::embed(const std::string & text) {
     }
 
     std::vector<float> vec(emb, emb + impl_->n_embd_);
-    if (impl_->normalize) {
+    // Rank scores are not a direction; L2-normalizing one score maps it to +-1.
+    if (impl_->normalize && !impl_->rank) {
         double norm_sq = 0.0;
         for (float v : vec) norm_sq += static_cast<double>(v) * v;
         const float norm = static_cast<float>(std::sqrt(norm_sq));

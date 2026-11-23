@@ -293,6 +293,13 @@ chimera_whisper::WavData parse_wav_stream(std::istream & in, const std::string &
     if (audio_format == 0 || channels == 0 || sample_rate == 0 || bits_per_sample == 0 || pcm_bytes.empty()) {
         fail(ExitCode::BadInput, "incomplete WAV file: " + origin);
     }
+    // Resampling to 16 kHz scales the sample count by 16000 / sample_rate,
+    // so a header claiming 1 Hz turns 1 MB into ~64 GB of floats.
+    if (sample_rate < 1000 || sample_rate > 768000) {
+        fail(ExitCode::BadInput,
+             "unsupported WAV sample rate " + std::to_string(sample_rate) +
+             " Hz (expected 1000-768000): " + origin);
+    }
 
     const size_t bytes_per_sample = bits_per_sample / 8;
     if (bytes_per_sample == 0 || pcm_bytes.size() % bytes_per_sample != 0) {
@@ -438,6 +445,11 @@ WavData load_wav_bytes(const void * data, size_t size) {
 }
 
 std::vector<float> resample_linear(const std::vector<float> & input, int from_rate, int to_rate) {
+    if (from_rate <= 0 || to_rate <= 0) {
+        fail(ExitCode::BadInput,
+             "resample_linear: rates must be positive (got " +
+             std::to_string(from_rate) + " -> " + std::to_string(to_rate) + ")");
+    }
     if (from_rate == to_rate || input.empty()) {
         return input;
     }

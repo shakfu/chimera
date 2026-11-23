@@ -109,6 +109,12 @@ def first_existing(model_dir: Path, names: list[str]) -> Optional[Path]:
 
 
 EMBED_MODEL: Optional[Path] = first_existing(MODELS, EMBED_CANDIDATES)
+# Five sentences; with chunk_tokens=8 every sentence is its own chunk.
+RAG_MULTI_CHUNK_TEXT = (
+    "Alpha beta gamma delta. Epsilon zeta eta theta iota. "
+    "Kappa lambda mu nu xi omicron. Pi rho sigma tau upsilon phi. "
+    "One two three four five six seven eight nine ten."
+)
 SD_MODEL: Optional[Path] = first_existing(MODELS, SD_CANDIDATES)
 MTMD_TEXT_MODEL: Optional[Path] = first_existing(MODELS, MTMD_TEXT_CANDIDATES)
 
@@ -429,6 +435,17 @@ def http_post_json(
     data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    return _do_request(req, timeout)
+
+
+def http_request(
+    url: str, *, method: str = "GET", data: Optional[bytes] = None,
+    headers: Optional[dict] = None, timeout: float = 10,
+) -> HttpResponse:
+    """Raw request with caller-chosen headers (e.g. Origin, Host)."""
+    req = urllib.request.Request(url, data=data, method=method)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     return _do_request(req, timeout)
@@ -777,6 +794,18 @@ def smoke_tests(rec: Recorder, chimera: Path) -> None:
                 t.fail(f"unbound: {unbound}")
     else:
         rec.skip(label, f"missing {upstream}")
+
+    # C++ unit tests, built next to chimera by `make build`. Pins the upstream
+    # common_params defaults that serve inherits (tests/unit/).
+    unit = chimera.parent / f"chimera_unit_tests{chimera.suffix}"
+    label = "unit: serve common_params defaults"
+    if unit.is_file():
+        with maybe(rec, label) as t:
+            r = subprocess.run([str(unit)], capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                t.fail(f"exit {r.returncode}: {r.stderr.strip()}")
+    else:
+        rec.skip(label, f"missing {unit} (built by `make build`)")
 
     # `gen` without -m must fail at CLI parse. The bash version asserted
     # "non-zero exit" without pinning the exact code; the same loose check
@@ -1134,6 +1163,29 @@ def e2e_embed_tests(rec: Recorder, chimera: Path) -> None:
                 )
                 if "wav audio files" not in hit.lower():
                     t.fail(f"top hit didn't mention wav: {hit!r}")
+
+    # The cache writes through its own connection; embedding inside the
+    # ingest transaction made the second chunk fail with "database is locked".
+    with maybe(rec, "index ingest --cache-embeddings, multi-chunk, twice") as t:
+        with (
+            scratch_file(suffix=".db") as vec_db,
+            scratch_file(suffix=".txt") as vec_doc,
+        ):
+            vec_doc.write_text(RAG_MULTI_CHUNK_TEXT)
+            env = {**os.environ, "CHIMERA_DB": str(vec_db)}
+            rc_c = run_silent(
+                [str(chimera), "index", "create", "-n", "cached", "-e", str(EMBED_MODEL),
+                 "--chunk-tokens", "8", "--chunk-overlap", "0"],
+                env=env, timeout=60,
+            )
+            ingest = [str(chimera), "index", "ingest", "-n", "cached", "-f", str(vec_doc),
+                      "--cache-embeddings"]
+            rc_1, out_1, err_1 = run_capture(ingest, env=env, timeout=120)
+            rc_2, _, err_2 = run_capture(ingest, env=env, timeout=120)  # cache hits
+            if rc_c != 0 or rc_1 != 0 or rc_2 != 0:
+                t.fail(f"exit codes create={rc_c} ingest={rc_1},{rc_2}: {(err_1 or err_2)[-200:]!r}")
+            elif "ingested 1 chunk" in out_1:
+                t.fail(f"text produced one chunk; test needs several: {out_1!r}")
 
     # Chunker termination. `chunk_by_sentences` walks back from a packed
     # chunk to apply overlap; when the window only fits one sentence at a
@@ -2016,6 +2068,117 @@ def e2e_model_alias_tests(rec: Recorder, chimera: Path) -> None:
 
 
 # ============================================================================
+# End-to-end: /v1/vector_stores with --cache-embeddings.
+# ============================================================================
+
+
+def e2e_rag_serve_tests(rec: Recorder, chimera: Path) -> None:
+    labels = [
+        "serve rag: create collection",
+        "serve rag: multi-chunk ingest with --cache-embeddings",
+        "serve rag: re-ingest served from the cache",
+        "serve rag: hybrid search returns hits",
+        "serve rag: duplicate collection -> 400 (store BadInput, not 500)",
+        "serve rag: k over CHIMERA_MAX_RAG_K -> 400",
+    ]
+    if not any(rec.matches(n) for n in labels):
+        return
+    if not (GEN_MODEL.is_file() and EMBED_MODEL):
+        for n in labels:
+            rec.skip(n, "needs GEN_MODEL + an embed model")
+        return
+    with scratch_file(suffix=".db") as db:
+        try:
+            with chimera_serve(chimera, [
+                "-m", str(GEN_MODEL),
+                "--enable-rag", str(EMBED_MODEL),
+                "--cache-embeddings", "--rag-db", str(db),
+            ]) as srv:
+                vs = f"{srv.base_url}/v1/vector_stores"
+                with maybe(rec, labels[0]) as t:
+                    r = http_post_json(vs, {"name": "c", "chunk_tokens": 8, "chunk_overlap": 0})
+                    if r.status != 201:
+                        t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+                for label in labels[1:3]:
+                    with maybe(rec, label) as t:
+                        r = http_post_json(f"{vs}/c/files", {"text": RAG_MULTI_CHUNK_TEXT},
+                                           timeout=120)
+                        n = r.json().get("chunks_inserted", 0) if r.status == 200 else 0
+                        if r.status != 200 or n < 2:
+                            t.fail(f"HTTP {r.status}, chunks={n}: {r.body[:200]!r}")
+                with maybe(rec, labels[3]) as t:
+                    r = http_post_json(f"{vs}/c/search", {"query": "lambda", "k": 3})
+                    if r.status != 200 or not r.json().get("data"):
+                        t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+                with maybe(rec, labels[4]) as t:
+                    r = http_post_json(vs, {"name": "c"})
+                    if r.status != 400 or "already exists" not in r.body:
+                        t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+                with maybe(rec, labels[5]) as t:
+                    r = http_post_json(f"{vs}/c/search", {"query": "lambda", "k": 5000})
+                    if r.status != 400:
+                        t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+        except RuntimeError as e:
+            for n in labels:
+                rec.fail(n, 0.0, str(e))
+
+
+# ============================================================================
+# End-to-end: default --cors-origins blocks browser cross-origin access.
+# ============================================================================
+
+
+def e2e_cors_default_tests(rec: Recorder, chimera: Path) -> None:
+    evil = {"Origin": "https://evil.example"}
+    # (label, method, path, headers, body, expected status)
+    cases = [
+        ("cors: no Origin (curl, SDKs) -> 200",
+         "GET", "/v1/models", {}, None, 200),
+        ("cors: same-origin request -> 200",
+         "GET", "/v1/models", {"Origin": "SELF"}, None, 200),
+        ("cors: foreign Origin GET -> 403",
+         "GET", "/v1/models", evil, None, 403),
+        ("cors: foreign Origin text/plain POST /v1/chimera/shutdown -> 403",
+         "POST", "/v1/chimera/shutdown",
+         {**evil, "Content-Type": "text/plain"}, b"{}", 403),
+        ("cors: no-Origin cross-site fetch -> 403",
+         "GET", "/v1/models", {"Sec-Fetch-Site": "cross-site"}, None, 403),
+        ("cors: rebinding Host header -> 403",
+         "GET", "/v1/models", {"Host": "evil.example"}, None, 403),
+    ]
+    alive = "cors: server still up after rejected shutdown"
+    labels = [c[0] for c in cases] + [alive]
+    if not any(rec.matches(n) for n in labels):
+        return
+    if not GEN_MODEL.is_file():
+        for n in labels:
+            rec.skip(n, f"missing {GEN_MODEL}")
+        return
+    try:
+        with chimera_serve(chimera, ["-m", str(GEN_MODEL)]) as srv:
+            self_origin = f"http://127.0.0.1:{srv.port}"
+            for label, method, path, headers, body, want in cases:
+                if not rec.matches(label):
+                    continue
+                with maybe(rec, label) as t:
+                    h = {k: (self_origin if v == "SELF" else v) for k, v in headers.items()}
+                    r = http_request(srv.base_url + path, method=method,
+                                     data=body, headers=h)
+                    if r.status != want:
+                        t.fail(f"got HTTP {r.status}, want {want}: {r.body[:160]!r}")
+                    acao = r.headers.get("access-control-allow-origin")
+                    if acao and acao != self_origin:
+                        t.fail(f"Access-Control-Allow-Origin: {acao!r}")
+            if rec.matches(alive):
+                with maybe(rec, alive) as t:
+                    time.sleep(0.5)
+                    if http_get(f"{srv.base_url}/health").status != 200:
+                        t.fail("server stopped")
+    except RuntimeError as e:
+        rec.fail("cors", 0.0, str(e))
+
+
+# ============================================================================
 # End-to-end: llama-server route aliases (non-/v1 spellings + 403 stubs).
 # ============================================================================
 
@@ -2503,6 +2666,24 @@ def _tiny_png_bytes() -> bytes:
     return base64.b64decode(_TINY_PNG_B64)
 
 
+def _png_header_only(width: int, height: int) -> bytes:
+    """PNG signature + IHDR declaring width x height + an empty IDAT.
+
+    Enough for a header probe (stb's header scan stops at the first IDAT,
+    and fails without one); a decoder that trusts it would allocate
+    width * height * channels bytes before failing.
+    """
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return (struct.pack(">I", len(data)) + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit RGB
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", b"")
+
+
 def e2e_image_serve_gating(rec: Recorder, chimera: Path) -> None:
     names = [
         "5e pm_id_images without --sd-photo-maker -> 400 + named-flag hint",
@@ -2510,6 +2691,11 @@ def e2e_image_serve_gating(rec: Recorder, chimera: Path) -> None:
         "5b control_image without --sd-control-net -> 400 + named-flag hint",
         "6 loras without --sd-lora -> 400 + named-flag hint",
         "6 GET /v1/images/lora-adapters (no --sd-lora) returns []",
+        "steps over CHIMERA_MAX_IMAGE_STEPS -> 400",
+        "hires target over CHIMERA_MAX_IMAGE_DIM -> 400",
+        "hires_upscale_model (a server path) -> 400",
+        # Above CHIMERA_MAX_IMAGE_DIM, below stb's own ~1 GB guard.
+        "init image header declaring 8192x8192 -> 415 before decode",
     ]
     if not (GEN_MODEL.is_file() and SD_MODEL is not None):
         for n in names:
@@ -2525,6 +2711,29 @@ def e2e_image_serve_gating(rec: Recorder, chimera: Path) -> None:
             startup_timeout=240.0,
         ) as srv:
             base = srv.base_url
+
+            # Each must fail before generate() takes the sd mutex.
+            bounded = [
+                (names[5], {"prompt": "x", "steps": 100000}, "steps"),
+                (names[6], {"prompt": "x", "hires": True, "hires_width": 8192}, "hires"),
+                (names[7], {"prompt": "x", "hires_upscale_model": "/etc/hosts"},
+                 "hires_upscale_model"),
+            ]
+            for label, body, word in bounded:
+                with maybe(rec, label) as t:
+                    r = http_post_json(f"{base}/v1/images/generations", body, timeout=30)
+                    if r.status != 400 or word not in r.body:
+                        t.fail(f"HTTP {r.status}, body={r.body[:200]!r}")
+
+            with maybe(rec, names[8]) as t:
+                r = http_post_multipart(
+                    f"{base}/v1/images/edits",
+                    fields={"prompt": "x"},
+                    files={"image": ("huge.png", _png_header_only(8192, 8192))},
+                    timeout=30,
+                )
+                if r.status != 415 or "the limit is" not in r.body:
+                    t.fail(f"HTTP {r.status}, body={r.body[:200]!r}")
 
             with maybe(rec, names[0]) as t:
                 r = http_post_json(
@@ -2850,21 +3059,23 @@ def e2e_image_serve_success_paths(rec: Recorder, chimera: Path) -> None:
 # ============================================================================
 
 
-def _wav_with_declared_data_size(declared: int, payload: bytes = b"") -> bytes:
+def _wav_with_declared_data_size(declared: int, payload: bytes = b"", *,
+                                 rate: int = 16000, bits: int = 16) -> bytes:
     """A structurally valid RIFF/WAVE whose `data` chunk lies about its size.
 
     Used to prove the parser bounds `chunk_size` against what the stream
     actually holds before it allocates: `declared` near 2**32 previously
     reached `pcm_bytes.resize(declared)` straight from the wire.
+    Pass `declared=len(payload)` for an honest header.
     """
     fmt = struct.pack(
         "<HHIIHH",
-        1,      # PCM
-        1,      # mono
-        16000,  # sample rate
-        32000,  # byte rate
-        2,      # block align
-        16,     # bits per sample
+        1,                    # PCM
+        1,                    # mono
+        rate,                 # sample rate
+        rate * bits // 8,     # byte rate
+        bits // 8,            # block align
+        bits,                 # bits per sample
     )
     body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
     body += b"data" + struct.pack("<I", declared) + payload
@@ -2875,6 +3086,8 @@ def e2e_audio_input_validation(rec: Recorder, chimera: Path) -> None:
     labels = [
         "POST /v1/audio/transcriptions rejects an over-declared WAV data chunk",
         "POST /v1/audio/transcriptions rejects an unknown response_format",
+        "POST /v1/audio/transcriptions rejects a 1 Hz WAV header",
+        "POST /v1/audio/transcriptions rejects audio over the duration cap",
     ]
     if not (GEN_MODEL.is_file() and WHISPER_MODEL.is_file() and WHISPER_WAV.is_file()):
         for label in labels:
@@ -2907,6 +3120,30 @@ def e2e_audio_input_validation(rec: Recorder, chimera: Path) -> None:
                 )
                 if r.status != 400:
                     t.fail(f"expected HTTP 400, got {r.status}: {r.body[:200]!r}")
+
+            # 1 Hz -> 16000x resample amplification; must fail in the parser.
+            with maybe(rec, labels[2]) as t:
+                pcm = bytes(64 * 1024)
+                r = http_post_multipart(
+                    f"{srv.base_url}/v1/audio/transcriptions",
+                    files={"file": ("slow.wav",
+                                    _wav_with_declared_data_size(len(pcm), pcm, rate=1))},
+                    timeout=60,
+                )
+                if r.status != 415 or "sample rate" not in r.body:
+                    t.fail(f"expected 415 naming the sample rate, got {r.status}: {r.body[:200]!r}")
+
+            # 4 h + 1 s at 1 kHz 8-bit: 14.4 MB, under the byte cap.
+            with maybe(rec, labels[3]) as t:
+                pcm = bytes([128]) * (4 * 3600 * 1000 + 1000)
+                r = http_post_multipart(
+                    f"{srv.base_url}/v1/audio/transcriptions",
+                    files={"file": ("long.wav",
+                                    _wav_with_declared_data_size(len(pcm), pcm, rate=1000, bits=8))},
+                    timeout=120,
+                )
+                if r.status != 413:
+                    t.fail(f"expected HTTP 413, got {r.status}: {r.body[:200]!r}")
     except RuntimeError as e:
         for label in labels:
             rec.fail(label, 0.0, str(e))
@@ -3143,6 +3380,8 @@ _SECTIONS = [
     ("slots_lora", e2e_slots_lora_tests),
     ("moe_slot_env", e2e_moe_slot_env_tests),
     ("model_alias", e2e_model_alias_tests),
+    ("cors_default", e2e_cors_default_tests),
+    ("rag_serve", e2e_rag_serve_tests),
     ("upstream_route_aliases", e2e_upstream_route_aliases),
     ("decision_models", e2e_decision_model_tests),
     ("embed_mmproj", e2e_embed_mmproj_tests),

@@ -1,4 +1,4 @@
-.PHONY: deps build remake build-with-webui build-cuda build-rocm \
+.PHONY: deps build remake build-with-webui build-cuda build-rocm build-asan test-asan \
 		build-sycl build-vulkan rebuild clean reset \
 		test test-fast test-slow test-bench test-bench-fast smoke \
 		install uninstall release-notes bump-check test-db-migrate \
@@ -31,9 +31,25 @@ CMAKE_LAUNCHER_FLAGS := \
 
 build: deps
 	@cmake -S . -B $(BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=Release $(CMAKE_LAUNCHER_FLAGS)
-	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
+	@cmake --build $(BUILD_DIR) --target chimera chimera_unit_tests --config Release -j
 
 remake: reset build test
+
+# build-asan / test-asan: chimera instrumented with ASan + UBSan in its own
+# tree (build-asan/), then the normal suite against that binary. Any report
+# aborts the process, so it shows up as a test failure. TEST_ARGS passes
+# through to scripts/test.py, e.g. TEST_ARGS=--no-slow.
+ASAN_BUILD_DIR ?= build-asan
+build-asan: deps
+	@cmake -S . -B $(ASAN_BUILD_DIR) -DSD_USE_VENDORED_GGML=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+	    -DCHIMERA_SANITIZE=ON $(CMAKE_LAUNCHER_FLAGS)
+	@cmake --build $(ASAN_BUILD_DIR) --target chimera chimera_unit_tests --config RelWithDebInfo -j
+
+test-asan: build-asan
+	@CHIMERA=$(ASAN_BUILD_DIR)/chimera \
+	    ASAN_OPTIONS=$${ASAN_OPTIONS:-abort_on_error=1:detect_leaks=0} \
+	    UBSAN_OPTIONS=$${UBSAN_OPTIONS:-print_stacktrace=1} \
+	    $(PYTHON) scripts/test.py $(TEST_ARGS)
 
 # build-with-webui: same as `build`, but flips the experimental
 # CHIMERA_WEBUI_EMBED option ON so the chimera binary bakes upstream's
@@ -92,7 +108,7 @@ build-vulkan:
 	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
 
 rebuild:
-	@cmake --build $(BUILD_DIR) --target chimera --config Release -j
+	@cmake --build $(BUILD_DIR) --target chimera chimera_unit_tests --config Release -j
 
 # DEPS_EXTRA: extra flags forwarded verbatim to manage.py's deps build.
 # Used by CI to inject e.g. --no-sd-examples (skips sd-cli/sd-server, which

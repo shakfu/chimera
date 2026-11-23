@@ -1,0 +1,32 @@
+name: sanitize
+
+# ASan + UBSan over chimera's own code. CI has no model files, so this runs
+# the model-free smoke suite only; the model-backed suite is `make test-asan`
+# on a machine with models/. Weekly and manual rather than per-PR: CI rebuilds
+# the upstream engines on every run, and a second Linux build per PR doubles
+# that cost for a job that covers CLI plumbing, the DB layer and `info`.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  asan-ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: install linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake git python3 libssl-dev
+
+      # One step: test-asan depends on build-asan -> deps, and deps rebuilds
+      # the engines, so a separate build step would build them twice.
+      - name: build instrumented, run smoke under ASan + UBSan
+        run: make test-asan TEST_ARGS=--smoke

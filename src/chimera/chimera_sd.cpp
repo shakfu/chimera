@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -511,7 +512,9 @@ SdContextPtr load_model(const LoadParams & params) {
     ctx_params.tokenizer             = cstr(params.tokenizer);
     ctx_params.tensor_type_rules     = cstr(params.tensor_type_rules);
     ctx_params.photo_maker_path      = cstr(params.photo_maker);
-    ctx_params.n_threads             = params.threads;
+    // -1 = keep sd_ctx_params_init's physical-core default; passing it
+    // through would reach ggml as <= 0, which means 4 threads.
+    if (params.threads > 0) ctx_params.n_threads = params.threads;
     ctx_params.enable_mmap           = params.enable_mmap;
     ctx_params.diffusion_flash_attn  = params.diffusion_flash_attn;
     ctx_params.diffusion_conv_direct = params.diffusion_conv_direct;
@@ -667,11 +670,23 @@ SdContextPtr load_model(const std::string & path, bool vae_decode_only, int thre
     return load_model(p);
 }
 
-PixelImage decode_image_bytes(const void * data, size_t size, int channels) {
+PixelImage decode_image_bytes(const void * data, size_t size, int channels, int max_dim) {
     if (data == nullptr || size == 0) {
         fail(ExitCode::BadInput, "image buffer is empty");
     }
+    if (size > static_cast<size_t>(INT_MAX)) {
+        fail(ExitCode::BadInput, "image buffer exceeds 2 GiB");
+    }
     int w = 0, h = 0, in_channels = 0;
+    // A few hundred bytes of PNG can declare 20000x20000 (1.2 GB at RGB).
+    if (max_dim > 0 &&
+        stbi_info_from_memory(static_cast<const unsigned char *>(data),
+                              static_cast<int>(size), &w, &h, &in_channels) &&
+        (w > max_dim || h > max_dim)) {
+        fail(ExitCode::BadInput,
+             "image is " + std::to_string(w) + "x" + std::to_string(h) +
+             "; the limit is " + std::to_string(max_dim) + " per side");
+    }
     unsigned char * pixels = stbi_load_from_memory(
         static_cast<const unsigned char *>(data), static_cast<int>(size),
         &w, &h, &in_channels, channels);

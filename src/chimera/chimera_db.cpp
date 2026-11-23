@@ -333,12 +333,24 @@ int current_schema_version(sqlite3 * db) {
 
 void migrate(sqlite3 * db, int target) {
     const int from = current_schema_version(db);
+    if (from > kLatest) {
+        fail(ExitCode::Runtime,
+             "database schema is v" + std::to_string(from) + "; this chimera supports up to v" +
+                 std::to_string(kLatest) + ". Upgrade chimera.");
+    }
     if (from >= target) return;
 
     for (const auto & m : MIGRATIONS) {
         if (m.to_version <= from || m.to_version > target) continue;
-        exec_or_throw(db, "BEGIN");
+        // IMMEDIATE takes the write lock up front, then the version is re-read:
+        // a concurrent process may have applied this step between the read
+        // above and the lock, and re-running its DDL fails ("already exists").
+        exec_or_throw(db, "BEGIN IMMEDIATE");
         try {
+            if (current_schema_version(db) >= m.to_version) {
+                exec_or_throw(db, "COMMIT");
+                continue;
+            }
             exec_or_throw(db, m.sql);
             // PRAGMA can't take a parameter, so build the statement.
             const std::string set =
@@ -395,7 +407,20 @@ Connection open_and_migrate(const std::string & path) {
     }
     Connection conn(raw);
 
+    // Without a timeout a second writer (another serve worker, or the CLI
+    // next to a running server) fails at once with SQLITE_BUSY. Set first:
+    // the journal_mode switch below can itself need the lock.
+    sqlite3_busy_timeout(conn.get(), 5000);
+
     // Pragmas applied before migrations so the DDL runs in WAL mode.
+    // On a fresh (rollback-mode) file, concurrent openers can deadlock on the
+    // switch; SQLite then returns SQLITE_BUSY without the busy handler.
+    for (int tries = 0;; ++tries) {
+        const int wal_rc = sqlite3_exec(conn.get(), "PRAGMA journal_mode = WAL",
+                                        nullptr, nullptr, nullptr);
+        if (wal_rc != SQLITE_BUSY || tries == 500) break;
+        sqlite3_sleep(10);
+    }
     exec_or_throw(conn.get(), "PRAGMA journal_mode = WAL");
     exec_or_throw(conn.get(), "PRAGMA synchronous = NORMAL");
     exec_or_throw(conn.get(), "PRAGMA foreign_keys = ON");

@@ -273,8 +273,10 @@ SdContextPtr load_model(const std::string & path,
 
 // Decode a memory buffer (PNG/JPG/etc., anything stb_image accepts) into
 // an 8-bit pixel image with the requested channel count (3 = RGB, 1 =
-// grayscale). Throws ChimeraError(BadInput) on failure.
-PixelImage decode_image_bytes(const void * data, size_t size, int channels);
+// grayscale). Throws ChimeraError(BadInput) on failure. `max_dim` > 0
+// rejects a header declaring a wider or taller image before any pixel
+// buffer is allocated.
+PixelImage decode_image_bytes(const void * data, size_t size, int channels, int max_dim = 0);
 
 // File-path convenience wrapper around decode_image_bytes.
 PixelImage decode_image_file(const std::string & path, int channels);

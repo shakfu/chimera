@@ -101,6 +101,13 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      # ggml defaults GGML_NATIVE=ON, which tunes the CPU backend to the
+      # runner's ISA; a portable asset must not. release-gpu.yml does the
+      # same on every leg. Metal keeps the default: Apple runners are arm64.
+      - name: portable cpu flags
+        if: matrix.backend == 'cpu'
+        run: echo "GGML_NATIVE=0" >> "$GITHUB_ENV"
+
       - name: build
         run: make build
 

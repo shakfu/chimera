@@ -4,11 +4,43 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ## [Unreleased]
 
+### Added
+
+- **`make test-asan` runs the suite against an ASan + UBSan build** (`CHIMERA_SANITIZE=ON`, in `build-asan/`). Only chimera's code, including the vendored SQLite and sqlite-vec, is instrumented; the prebuilt engines are not. It defines `__SANITIZER_DISABLE_CONTAINER_OVERFLOW__`: chimera and the engines share libc++'s inline container code, the linker keeps one copy of each function, and with annotations in only one half every model load reported an overflow inside llama.cpp that does not exist. `sanitize.yml` runs the model-free smoke suite under it weekly.
+
+- **`tests/unit/serve_params_test.cpp` pins the `common_params` that `serve` inherits.** chimera fills `common_params` directly, so an upstream default change (the cause of the CORS issue below) reached it without a compile error. The test asserts the security-relevant defaults (CORS, bind host, SSRF guard, `file://` media, `POST /props`) and the ones chimera depends on (slots, HTTP pool, timeouts). `make build` builds it; `make smoke` runs it.
+
+### Security
+
+- **`serve` rejects cross-origin browser requests by default.** chimera never set `cors_origins`, so it inherited upstream's `*`. That value skips upstream's CSRF and DNS-rebinding checks and echoes the caller's `Origin`, so any page in a local browser could read `/v1/chats`, create vector stores, or `POST /v1/chimera/shutdown` on a loopback server without a key. The new `--cors-origins` flag defaults to `localhost` (same-origin only). Pass a comma list for a desktop webview, or `*` for the old behavior.
+
+- **WAV uploads with an out-of-range sample rate are rejected.** Resampling to 16 kHz multiplies the sample count by `16000 / rate`, and the rate came from the header unchecked: a 1 MB file declaring 1 Hz requested about 64 GB. The parser now accepts 1000-768000 Hz, and the audio routes return 413 above `CHIMERA_MAX_AUDIO_SECONDS` (default 4 h), checked before resampling.
+
+- **Image routes bound every cost-driving field.** `steps` and `hires_steps` are capped at `CHIMERA_MAX_IMAGE_STEPS` (1000), the hires target and every uploaded image at `CHIMERA_MAX_IMAGE_DIM` per side, and `pm_id_images` at `CHIMERA_MAX_PM_ID_IMAGES` (16). Uploaded images are checked from their header before decoding: a few dozen bytes of PNG could declare 16000x16000 and allocate 768 MB. `hires_upscale_model` is rejected over HTTP, because it is a filesystem path the server would open.
+
 ### Changed
+
+- **Unset `--threads` uses the core count in `gen`, `chat`, `embed` and `sd`.** chimera passed -1 through, and ggml treats any value <= 0 as 4 threads. They now resolve it the way `serve` already did; `sd` keeps sd.cpp's physical-core default.
+
+- **`serve` returns 400 for request errors raised by the stores.** `ChimeraError(BadInput)` (duplicate collection, dimension mismatch, bad search mode) fell through `ex_wrapper` as 500. Search `k` above 4096, sqlite-vec's limit, is now a 400 instead of a 500 from inside the query.
 
 - **CUDA release binaries target `75-real;80-virtual` instead of `75`**, following cyllama's CUDA wheels. With `75`, Ampere and newer GPUs JIT-compiled `compute_75` PTX, which compiles out ggml's Ampere+ kernels. cyllama measured 12-25% faster long-context prompt processing (flash attention, 4096 context) on an RTX 4060; Turing keeps native SASS. Benchmarks and rejected options: cyllama `docs/dev/cuda-wheel.md`.
 
+- **Linux and Windows CPU release binaries are built with `GGML_NATIVE=0`.** `release.yml` never set it, so ggml tuned the CPU backend to whichever runner built the asset. They now target AVX2, FMA, F16C and BMI2, matching `release-gpu.yml`.
+
 ### Fixed
+
+- **Concurrent first use of a database no longer fails.** Two processes opening a new or older DB both read its schema version, then both applied the same migration; the second failed with "table chats already exists". Each step now takes the write lock first and re-reads the version. Separately, the switch to WAL on a fresh file returned `SQLITE_BUSY` without waiting (SQLite skips the busy handler where waiting could deadlock), so it is retried for up to 5 s.
+
+- **A database written by a newer chimera is refused.** It was used as-is against an older schema.
+
+- **RAG ingest with `--cache-embeddings` no longer fails with "database is locked".** Each chunk was embedded inside the ingest transaction, and the cache writes through a second connection that cannot take the write lock the first one holds. Both `serve` (`/v1/vector_stores/:name/files`) and `index ingest` now embed every chunk before the transaction opens. Every connection also gets a 5 s busy timeout, so a second writer (the CLI next to a running server) waits instead of failing.
+
+- **`chimera::Llama` no longer decodes with freed LoRA adapters.** The adapters were freed when `generate()` returned while the persistent context still referenced them; a later call with an empty `lora_adapters` used them. They now live in the object and reload only when the list changes.
+
+- **Two `--override-tensor` entries no longer leave a dangling pattern.** The override held `c_str()` pointers into a `std::vector<std::string>`; when it grew, short patterns stored inside the string object moved.
+
+- **Reranker models no longer over-read the embedding buffer.** With `rank` pooling, explicit or from the GGUF default, `Embedder` copied `n_embd` floats from an `n_cls_out`-float result. Its output width is now `n_cls_out`, and rank scores are not L2-normalized.
 
 - **`info` build flags accept a `;`-separated `CMAKE_CUDA_ARCHITECTURES` / `CMAKE_HIP_ARCHITECTURES`.** CMake split the list inside `target_compile_definitions`, so the compile command had an unterminated quote and the build failed. The value is now stored with `,` separators.
 

@@ -543,7 +543,10 @@ struct ServeOptions {
     int         gpu_layers = -1;    // --gpu-layers; -1 = auto
     int         parallel = 1;       // --parallel; number of concurrent slots
     std::string api_key;            // --api-key; empty disables auth
-    std::string alias;              // --alias; comma-separated model names for the API; empty = -m path
+    // --cors-origins. "localhost" = same-origin only, plus upstream's Host
+    // check against DNS rebinding; "*" = any origin; else a comma list.
+    std::string cors_origins = "localhost";
+    std::string alias;           // --alias; comma-separated model names for the API; empty = -m path
     bool        embedding = false;  // --embeddings; switches model to embed mode
     bool        cpu_moe = false;    // --cpu-moe; keep ALL MoE experts on CPU
     int         n_cpu_moe = 0;      // --n-cpu-moe; experts of the first N layers on CPU

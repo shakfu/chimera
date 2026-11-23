@@ -74,7 +74,9 @@ Five categories, in roughly decreasing order of how much they hurt:
 
 - **`make bump-check`.** Diffs the vendored `server-context.h` / `server-http.h` against a target ref before you change the pin; lists added/removed top-level symbols. See `docs/dev/server.md` § 7.
 
-- **`make test-db-migrate`.** Builds a v1 chimera.db in a tempdir and asserts it upgrades to current cleanly with all pre-existing rows preserved.
+- **`make test-db-migrate`.** Builds a v1 chimera.db in a tempdir and asserts it upgrades to current cleanly with all pre-existing rows preserved. It also runs 8 concurrent migrations of a fresh DB, and checks that a newer-schema DB is refused.
+
+- **`tests/unit/serve_params_test.cpp`** (run by `make smoke`). Asserts the `common_params` defaults `serve` inherits from upstream. `chimera_pin_check.cpp` pins types, not values. If it fails after a bump, either set the field in `build_common_params()` or accept the new default in the test.
 
 - **`make test`** — 62 tests hitting every subcommand: 56 PASS + 6 SKIP-when-fixture-missing on a fresh checkout. The 6 SKIPs are opt-in success-path tests gated on adapter / aux-model env vars (see below).
 

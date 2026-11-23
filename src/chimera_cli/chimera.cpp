@@ -1381,21 +1381,29 @@ int command_index_ingest(const std::string &              db_path,
         // failed insert partway through leaves the leading chunks of that
         // file committed, and re-running the same command duplicates them
         // -- nothing keys on source_uri.
-        chimera_vector_store::Transaction txn(conn.get(), "chimera_ingest_file");
+        //
+        // Embed before opening it: with --cache-embeddings, embed() writes
+        // through the cache's own connection, which cannot get the write
+        // lock while this one holds it ("database is locked").
+        std::vector<std::vector<float>> vecs;
+        vecs.reserve(chunks.size());
         for (const auto & c : chunks) {
-            auto vec = embedder.embed(c.text);
-            if (static_cast<int>(vec.size()) != col->dim) {
+            vecs.push_back(embedder.embed(c.text));
+            if (static_cast<int>(vecs.back().size()) != col->dim) {
                 fail(ExitCode::Runtime,
                      "embedding dim drift: collection expects " +
                      std::to_string(col->dim) + ", model produced " +
-                     std::to_string(vec.size()));
+                     std::to_string(vecs.back().size()));
             }
+        }
+        chimera_vector_store::Transaction txn(conn.get(), "chimera_ingest_file");
+        for (size_t i = 0; i < chunks.size(); ++i) {
             chimera_vector_store::DocumentInput doc;
             doc.source_uri  = path;
-            doc.chunk_index = c.index;
-            doc.text        = c.text;
-            doc.token_count = c.token_count;
-            doc.embedding   = std::move(vec);
+            doc.chunk_index = chunks[i].index;
+            doc.text        = chunks[i].text;
+            doc.token_count = chunks[i].token_count;
+            doc.embedding   = std::move(vecs[i]);
             chimera_vector_store::insert_document(conn.get(), *col, doc);
             ++total_chunks;
         }
@@ -2721,6 +2729,10 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
         "Number of concurrent request slots");
     cmd->add_option("--api-key", p.serve_opts.api_key,
         "Bearer token required on /v1/* requests (empty = no auth)");
+    cmd->add_option("--cors-origins", p.serve_opts.cors_origins,
+        "Browser origins allowed to call the API: 'localhost' (same-origin only), "
+        "'*' (any), or a comma list such as 'tauri://localhost'")
+        ->capture_default_str();
     cmd->add_option("-a,--alias", p.serve_opts.alias,
         "Model name aliases for the API, comma-separated (default: the --model path)");
     cmd->add_flag("--embeddings", p.serve_opts.embedding,

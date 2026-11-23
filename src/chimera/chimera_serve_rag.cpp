@@ -231,24 +231,31 @@ server_http_context::handler_t make_vs_ingest_handler(RagContext * rag) {
                 " (raise the collection's chunk_tokens, or split the document)");
         }
 
+        // Embed every chunk before the transaction opens. With
+        // --cache-embeddings, embed() writes through the cache's own
+        // connection, which cannot get the write lock while `txn` holds
+        // it. This also keeps the write lock to the inserts alone.
+        std::vector<std::vector<float>> vecs;
+        vecs.reserve(chunks.size());
+        for (const auto & c : chunks) {
+            // Per chunk, so concurrent searches interleave with a long ingest.
+            std::lock_guard<std::mutex> lk(rag->embedder_mutex);
+            vecs.push_back(rag->embedder->embed(c.text));
+        }
+
         // All-or-nothing per request. Previously each chunk committed on
         // its own, so a failure partway through left the leading chunks
         // in the store while the caller saw an error -- and a retry
         // re-inserted them, since nothing keys on source_uri.
         chimera_vector_store::Transaction txn(conn.get(), "chimera_vs_ingest");
         int64_t inserted = 0;
-        for (const auto & c : chunks) {
-            std::vector<float> vec;
-            {
-                std::lock_guard<std::mutex> lk(rag->embedder_mutex);
-                vec = rag->embedder->embed(c.text);
-            }
+        for (size_t i = 0; i < chunks.size(); ++i) {
             chimera_vector_store::DocumentInput doc;
             doc.source_uri  = source_uri;
-            doc.chunk_index = c.index;
-            doc.text        = c.text;
-            doc.token_count = c.token_count;
-            doc.embedding   = std::move(vec);
+            doc.chunk_index = chunks[i].index;
+            doc.text        = chunks[i].text;
+            doc.token_count = chunks[i].token_count;
+            doc.embedding   = std::move(vecs[i]);
             chimera_vector_store::insert_document(conn.get(), *col, doc);
             ++inserted;
         }
@@ -282,6 +289,11 @@ server_http_context::handler_t make_vs_search_handler(RagContext * rag) {
         const std::string query = body.value("query", std::string());
         if (query.empty()) return rag_err(400, "field 'query' is required");
         const int k = coerce_int(body.value("k", json(5)), 5);
+        // sqlite-vec rejects k > 4096 mid-query; the search also reserves k slots.
+        if (k > CHIMERA_MAX_RAG_K) {
+            return rag_err(400, "k must be <= " + std::to_string(CHIMERA_MAX_RAG_K) +
+                                " (got " + std::to_string(k) + ")");
+        }
 
         // Body "mode" defaults to hybrid — strictly better than the
         // pre-hybrid semantic-only behaviour on prose, and clients that

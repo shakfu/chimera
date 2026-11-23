@@ -236,6 +236,44 @@ def verify(db_path: Path) -> None:
         conn.close()
 
 
+def db_status(db_path: Path) -> subprocess.Popen:
+    env = os.environ.copy()
+    env["CHIMERA_DB"] = str(db_path)
+    return subprocess.Popen(
+        [str(CHIMERA), "db", "status"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def check_concurrent_fresh(db_path: Path, n: int = 8) -> None:
+    """n processes migrate one fresh DB at once; all must succeed."""
+    procs = [db_status(db_path) for _ in range(n)]
+    for i, p in enumerate(procs):
+        out, err = p.communicate(timeout=60)
+        if p.returncode != 0:
+            fail(f"concurrent migrate: process {i} exited {p.returncode}: {err.strip()}")
+    v = sqlite3.connect(db_path).execute("PRAGMA user_version").fetchone()[0]
+    if v < 5:
+        fail(f"concurrent migrate: user_version {v}, expected >= 5")
+
+
+def check_newer_schema_refused(db_path: Path) -> None:
+    """A DB from a newer chimera must be refused, not used as-is."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA user_version = 9999")
+    conn.commit()
+    conn.close()
+    p = db_status(db_path)
+    _, err = p.communicate(timeout=60)
+    if p.returncode == 0:
+        fail("newer schema: `chimera db status` succeeded on a v9999 DB")
+    if "v9999" not in err:
+        fail(f"newer schema: error does not name the version: {err.strip()}")
+
+
 def main() -> int:
     if CHIMERA is None:
         fail("chimera binary not built; run `make build` first")
@@ -255,6 +293,14 @@ def main() -> int:
         print("db-migrate: verifying post-migrate state")
         verify(db)
         print("PASS: v1 -> latest migration is data-preserving and schema-correct")
+
+        print("db-migrate: 8 concurrent migrations of one fresh DB")
+        check_concurrent_fresh(tmp / "fresh.db")
+        print("PASS: concurrent fresh-DB migration")
+
+        print("db-migrate: DB with a newer schema version")
+        check_newer_schema_refused(db)
+        print("PASS: newer schema refused")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

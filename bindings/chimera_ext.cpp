@@ -271,6 +271,7 @@ NB_MODULE(chimera, m) {
         .def_rw("gpu_layers",       &ServeOptions::gpu_layers)
         .def_rw("parallel",         &ServeOptions::parallel)
         .def_rw("api_key",          &ServeOptions::api_key)
+        .def_rw("cors_origins",     &ServeOptions::cors_origins)
         .def_rw("alias",            &ServeOptions::alias)
         .def_rw("embedding",        &ServeOptions::embedding)
         .def_rw("cpu_moe",          &ServeOptions::cpu_moe)

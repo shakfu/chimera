@@ -121,6 +121,22 @@ std::unique_ptr<server_http_res> run_image_generate(
         return res;
     };
 
+    // Cost bounds, checked once the final dimensions are known (edits and
+    // variations take them from the decoded init image).
+    if (req.steps > CHIMERA_MAX_IMAGE_STEPS || req.hires_steps > CHIMERA_MAX_IMAGE_STEPS) {
+        return err_res(400, "steps and hires_steps must be <= " +
+                            std::to_string(CHIMERA_MAX_IMAGE_STEPS));
+    }
+    if (req.hires_enabled) {
+        const double scale = req.hires_scale > 0.0f ? req.hires_scale : 1.0;
+        const double hw = req.hires_target_width  > 0 ? req.hires_target_width  : req.width  * scale;
+        const double hh = req.hires_target_height > 0 ? req.hires_target_height : req.height * scale;
+        if (hw > CHIMERA_MAX_IMAGE_DIM || hh > CHIMERA_MAX_IMAGE_DIM) {
+            return err_res(400, "hires target must be <= " +
+                                std::to_string(CHIMERA_MAX_IMAGE_DIM) + " per side");
+        }
+    }
+
     const std::string fmt = fields.contains("response_format")
         ? coerce_string(fields["response_format"]) : std::string("b64_json");
     if (fmt == "url") {
@@ -285,7 +301,12 @@ bool fill_common_image_fields(const json &                  fields,
     // docs/dev/server-api-coverage.md.
     if (fields.contains("hires"))                req.hires_enabled            = coerce_bool (fields["hires"],                req.hires_enabled);
     if (fields.contains("hires_upscaler"))       req.hires_upscaler           = coerce_string(fields["hires_upscaler"]);
-    if (fields.contains("hires_upscale_model")) req.hires_upscale_model      = coerce_string(fields["hires_upscale_model"]);
+    // A filesystem path from the client; same closed-set policy as LoRAs
+    // and the VAD model.
+    if (fields.contains("hires_upscale_model")) {
+        err = "hires_upscale_model is not accepted over HTTP (it names a server file)";
+        return false;
+    }
     if (fields.contains("hires_width"))          req.hires_target_width       = coerce_int  (fields["hires_width"],          req.hires_target_width);
     if (fields.contains("hires_height"))         req.hires_target_height      = coerce_int  (fields["hires_height"],         req.hires_target_height);
     if (fields.contains("hires_scale"))          req.hires_scale              = coerce_float(fields["hires_scale"],          req.hires_scale);
@@ -477,6 +498,10 @@ server_http_res_ptr maybe_attach_pm(
         if (!arr.is_array()) {
             return err_res(400, "pm_id_images must be a JSON array of base64 image strings");
         }
+        if (arr.size() > CHIMERA_MAX_PM_ID_IMAGES) {
+            return err_res(400, "pm_id_images holds at most " +
+                                std::to_string(CHIMERA_MAX_PM_ID_IMAGES) + " images");
+        }
         std::vector<chimera_sd::PixelImage> imgs;
         imgs.reserve(arr.size());
         for (size_t i = 0; i < arr.size(); ++i) {
@@ -489,7 +514,7 @@ server_http_res_ptr maybe_attach_pm(
                 return err_res(400, "pm_id_images[" + std::to_string(i) + "]: " + err);
             }
             try {
-                imgs.push_back(chimera_sd::decode_image_bytes(bytes.data(), bytes.size(), 3));
+                imgs.push_back(chimera_sd::decode_image_bytes(bytes.data(), bytes.size(), 3, CHIMERA_MAX_IMAGE_DIM));
             } catch (const ChimeraError & e) {
                 return err_res(415,
                     "pm_id_images[" + std::to_string(i) + "] could not be decoded as an image: " + e.what());
@@ -556,7 +581,7 @@ server_http_res_ptr maybe_attach_control(
     }
     try {
         sreq.control = chimera_sd::decode_image_bytes(
-            file_it->second.data.data(), file_it->second.data.size(), 3);
+            file_it->second.data.data(), file_it->second.data.size(), 3, CHIMERA_MAX_IMAGE_DIM);
     } catch (const ChimeraError & e) {
         return err_res(415, std::string("could not decode control_image: ") + e.what());
     }
@@ -726,7 +751,7 @@ server_http_context::handler_t make_image_edits_handler(
         }
         try {
             sreq.init = chimera_sd::decode_image_bytes(
-                image_it->second.data.data(), image_it->second.data.size(), 3);
+                image_it->second.data.data(), image_it->second.data.size(), 3, CHIMERA_MAX_IMAGE_DIM);
         } catch (const ChimeraError & e) {
             return err_res(415, std::string("could not decode init image: ") + e.what());
         }
@@ -739,7 +764,7 @@ server_http_context::handler_t make_image_edits_handler(
         if (mask_it != req.files.end() && !mask_it->second.data.empty()) {
             try {
                 sreq.mask = chimera_sd::decode_image_bytes(
-                    mask_it->second.data.data(), mask_it->second.data.size(), 1);
+                    mask_it->second.data.data(), mask_it->second.data.size(), 1, CHIMERA_MAX_IMAGE_DIM);
             } catch (const ChimeraError & e) {
                 return err_res(415, std::string("could not decode mask image: ") + e.what());
             }
@@ -786,7 +811,7 @@ server_http_context::handler_t make_image_variations_handler(
         }
         try {
             sreq.init = chimera_sd::decode_image_bytes(
-                image_it->second.data.data(), image_it->second.data.size(), 3);
+                image_it->second.data.data(), image_it->second.data.size(), 3, CHIMERA_MAX_IMAGE_DIM);
         } catch (const ChimeraError & e) {
             return err_res(415, std::string("could not decode source image: ") + e.what());
         }

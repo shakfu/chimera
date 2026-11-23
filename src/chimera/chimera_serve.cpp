@@ -327,6 +327,11 @@ server_http_context::handler_t ex_wrapper(server_http_context::handler_t func) {
         } catch (const common_json_error & e) {
             status = 400;
             message = e.what();
+        } catch (const ChimeraError & e) {
+            // The stores throw BadInput for caller mistakes (duplicate
+            // collection, dim mismatch, bad search mode); those are 4xx.
+            status = e.code() == ExitCode::BadInput ? 400 : 500;
+            message = e.what();
         } catch (const std::exception & e) {
             message = e.what();
         } catch (...) {
@@ -522,6 +527,8 @@ private:
 
 #endif
 
+}  // namespace
+
 // Populate common_params from chimera's ServeOptions. This is the only place
 // where chimera's CLI surface meets llama.cpp's giant param struct; keeping
 // the mapping centralized makes it easy to add a flag later without hunting
@@ -574,6 +581,10 @@ common_params build_common_params(const ServeOptions & opts) {
     if (!opts.api_key.empty()) {
         params.api_keys.push_back(opts.api_key);
     }
+    // Upstream's "*" default skips its CSRF and DNS-rebinding checks, so a
+    // browser tab could read and drive a loopback server with no key.
+    params.cors_origins          = opts.cors_origins;
+    params.cors_origins_explicit = true;
     // Same parsing as upstream's -a/--alias (common/arg.cpp).
     for (auto & alias : string_split<std::string>(opts.alias, ',')) {
         alias = string_strip(alias);
@@ -665,6 +676,8 @@ common_params build_common_params(const ServeOptions & opts) {
 
     return params;
 }
+
+namespace {
 
 // Holds a secondary server_context — dedicated embedding model or
 // cross-encoder reranker — that lives alongside the primary LLM. Each
@@ -1450,6 +1463,10 @@ int command_serve(const ServeOptions & opts, ServeStopper * stopper) {
                         ? " and the /v1/chats history endpoints"
                         : "")
                   << ". Pass --api-key, or bind to 127.0.0.1 and put a proxy in front.\n";
+    }
+    if (opts.api_key.empty() && opts.cors_origins == "*") {
+        std::cerr << "chimera serve: WARNING: --cors-origins '*' with no --api-key; "
+                     "any web page open in a local browser can call every route.\n";
     }
 
     // Blocks on the main thread until request_stop terminates the task

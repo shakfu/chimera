@@ -8,6 +8,7 @@ chimera serve -m model.gguf [--port 9931] [--host 127.0.0.1]
               [--enable-audio whisper.gguf]
               [--enable-image sd.gguf]
               [--api-key TOKEN]
+              [--cors-origins localhost|*|ORIGIN[,ORIGIN...]]
               [--alias NAME[,NAME...]]
 ```
 
@@ -415,6 +416,18 @@ chimera serve -m model.gguf --api-key sk-chimera-local-dev
 Clients then send `Authorization: Bearer sk-chimera-local-dev`. The OpenAI SDK does this automatically when you set `api_key=`. `/health` and `/v1/health` remain open (they're liveness probes).
 
 Without `--api-key`, the server accepts any request — fine for a local session, dangerous on a public network. Run behind a reverse proxy or VPN for anything non-trivial.
+
+### Browser origins
+
+`--cors-origins` sets which web pages may call the API from a browser. Clients without an `Origin` header (curl, the OpenAI SDKs, chimera's bindings) are not affected.
+
+| Value | Effect |
+|-|-|
+| `localhost` (default) | Same-origin only. A loopback-bound server also rejects any `Host` header that is not loopback, which blocks DNS rebinding. |
+| `https://a.example,tauri://localhost` | Same-origin plus the listed origins. |
+| `*` | Any origin. With no `--api-key`, any page open in a local browser can read chat history and stop the server; `serve` prints a warning. |
+
+A desktop shell whose webview runs on its own scheme (Tauri, Electron) is cross-origin to `http://127.0.0.1:<port>` and must be listed.
 
 ---
 

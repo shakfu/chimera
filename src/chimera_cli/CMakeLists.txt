@@ -50,3 +50,17 @@ set_target_properties(chimera PROPERTIES
     CXX_STANDARD_REQUIRED ON
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
+
+# Unit tests over chimera internals. Not in ALL: `make smoke` / `make test`
+# build it on demand. Same shim as above for GNU ld archive order.
+add_executable(chimera_unit_tests EXCLUDE_FROM_ALL
+    "${CMAKE_SOURCE_DIR}/tests/unit/serve_params_test.cpp"
+    "${CMAKE_SOURCE_DIR}/src/chimera/llama_build_info_shim.cpp"
+)
+target_link_libraries(chimera_unit_tests PRIVATE chimera_lib)
+target_compile_options(chimera_unit_tests PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CXX_COMPILE_OPTIONS}>)
+set_target_properties(chimera_unit_tests PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+)

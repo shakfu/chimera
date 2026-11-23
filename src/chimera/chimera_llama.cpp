@@ -29,6 +29,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -313,7 +314,9 @@ std::vector<ggml_backend_dev_t> resolve_devices(const std::string & devices_csv)
 struct ModelExtras {
     std::vector<ggml_backend_dev_t> devices_storage;
     std::vector<float>              tensor_split_storage;
-    std::vector<std::string>                             buft_pattern_storage;
+    // deque: buft_overrides_storage holds c_str() pointers into these, and
+    // vector growth would move short (in-object) strings out from under them.
+    std::deque<std::string>                              buft_pattern_storage;
     std::vector<llama_model_tensor_buft_override>        buft_overrides_storage;
     std::vector<llama_model_kv_override>                 kv_overrides_storage;
 };
@@ -561,8 +564,11 @@ LlamaContextPtr new_llama_context(llama_model * model, const LlamaCommonOptions 
     params.n_ctx = std::max<uint32_t>(opts.n_ctx, static_cast<uint32_t>(min_prompt_tokens + opts.n_predict + 32));
     params.n_batch = std::max<uint32_t>(1, opts.n_batch);
     params.n_ubatch = opts.n_ubatch > 0 ? opts.n_ubatch : params.n_batch;
-    params.n_threads = opts.threads;
-    params.n_threads_batch = opts.threads_batch > 0 ? opts.threads_batch : opts.threads;
+    // ggml maps n_threads <= 0 to GGML_DEFAULT_N_THREADS (4), not to the
+    // core count. Resolve -1 the way serve does (postprocess_cpu_params).
+    const int threads = opts.threads > 0 ? opts.threads : common_cpu_get_num_math();
+    params.n_threads = threads;
+    params.n_threads_batch = opts.threads_batch > 0 ? opts.threads_batch : threads;
     params.no_perf = true;
     params.moe_cache_size = static_cast<size_t>(opts.moe_cache_mib) * 1024 * 1024;
     if (opts.swa_full) {
@@ -873,7 +879,7 @@ std::string run_generation_mtmd(
 
     mtmd_context_params mparams = mtmd_context_params_default();
     mparams.use_gpu       = opts.mmproj_use_gpu;
-    mparams.n_threads     = opts.threads;
+    mparams.n_threads     = opts.threads > 0 ? opts.threads : common_cpu_get_num_math();
     mparams.print_timings = false;
     if (opts.flash_attn) {
         mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;

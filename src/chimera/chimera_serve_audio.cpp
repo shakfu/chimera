@@ -104,6 +104,14 @@ json format_verbose_json(const chimera_whisper::TranscribeResult & r,
     return out;
 }
 
+// Empty when `wav` fits CHIMERA_MAX_AUDIO_SECONDS; otherwise the 413 message.
+std::string audio_duration_error(const chimera_whisper::WavData & wav) {
+    const double seconds = static_cast<double>(wav.samples.size()) / wav.sample_rate;
+    if (seconds <= CHIMERA_MAX_AUDIO_SECONDS) return {};
+    return "audio is " + std::to_string(static_cast<long long>(seconds)) +
+           " s long; the limit is " + std::to_string(CHIMERA_MAX_AUDIO_SECONDS) + " s";
+}
+
 }  // namespace
 
 // Build the handler bound to /v1/audio/{transcriptions,translations}.
@@ -220,6 +228,9 @@ server_http_context::handler_t make_audio_transcribe_handler(
             return err_res(415,
                 std::string("unsupported audio: ") + e.what() +
                 " (chimera accepts WAV / RIFF only by design; transcode mp3/m4a/webm to WAV with `ffmpeg -i in.<ext> -ar 16000 -ac 1 out.wav` before uploading)");
+        }
+        if (const auto e = audio_duration_error(wav); !e.empty()) {
+            return err_res(413, e);
         }
         auto audio = chimera_whisper::resample_linear(
             wav.samples, wav.sample_rate, /*WHISPER_SAMPLE_RATE=*/16000);
@@ -454,6 +465,9 @@ server_http_context::handler_t make_audio_detect_language_handler(
             return err_res(415,
                 std::string("unsupported audio: ") + e.what() +
                 " (chimera accepts WAV / RIFF only by design; transcode mp3/m4a/webm to WAV with `ffmpeg -i in.<ext> -ar 16000 -ac 1 out.wav` before uploading)");
+        }
+        if (const auto e = audio_duration_error(wav); !e.empty()) {
+            return err_res(413, e);
         }
         auto audio = chimera_whisper::resample_linear(
             wav.samples, wav.sample_rate, /*WHISPER_SAMPLE_RATE=*/16000);

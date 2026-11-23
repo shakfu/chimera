@@ -49,9 +49,13 @@ using json = nlohmann::ordered_json;
 // ----------------------------------------------------------------------------
 
 // Wrap a handler so it never throws out of the HTTP layer; converts
-// std::invalid_argument to 400 and every other exception to 500. Mirrors
-// llama-server's ex_wrapper.
+// std::invalid_argument, malformed JSON and ChimeraError(BadInput) to 400
+// and every other exception to 500. Mirrors llama-server's ex_wrapper.
 server_http_context::handler_t ex_wrapper(server_http_context::handler_t func);
+
+// ServeOptions -> upstream common_params. Fields chimera does not set keep
+// upstream's defaults; tests/unit/serve_params_test.cpp pins the ones that matter.
+common_params build_common_params(const ServeOptions & opts);
 
 // ----------------------------------------------------------------------------
 // Request resource limits
@@ -77,6 +81,13 @@ server_http_context::handler_t ex_wrapper(server_http_context::handler_t func);
 #define CHIMERA_MAX_AUDIO_BYTES (256u * 1024u * 1024u)
 #endif
 
+#ifndef CHIMERA_MAX_AUDIO_SECONDS
+// Decoded duration. The byte cap does not bound it: low-rate or 8-bit
+// audio packs more seconds per byte, and every second becomes 16000
+// floats after resampling. 4 h is ~0.9 GB at 16 kHz.
+#define CHIMERA_MAX_AUDIO_SECONDS (4 * 3600)
+#endif
+
 #ifndef CHIMERA_MAX_IMAGE_BATCH
 // `n` in the OpenAI images API. Each image is a full diffusion run, so a
 // large batch is a multi-hour occupancy of the single sd worker.
@@ -90,11 +101,28 @@ server_http_context::handler_t ex_wrapper(server_http_context::handler_t func);
 #define CHIMERA_MAX_IMAGE_DIM 4096
 #endif
 
+#ifndef CHIMERA_MAX_IMAGE_STEPS
+// Sampling steps, also applied to hires_steps. Typical runs use 20-50;
+// each step is a full UNet/DiT pass under the single sd mutex.
+#define CHIMERA_MAX_IMAGE_STEPS 1000
+#endif
+
+#ifndef CHIMERA_MAX_PM_ID_IMAGES
+// pm_id_images per request. Each entry decodes to up to
+// CHIMERA_MAX_IMAGE_DIM^2 * 3 bytes (~50 MB) from a few hundred bytes.
+#define CHIMERA_MAX_PM_ID_IMAGES 16
+#endif
+
 #ifndef CHIMERA_MAX_RAG_TEXT_BYTES
 // One ingest request's text. Every chunk is a separate embed() call
 // holding `embedder_mutex`, so a large document is a long exclusive hold
 // on the embedder for every other caller.
 #define CHIMERA_MAX_RAG_TEXT_BYTES (64u * 1024u * 1024u)
+#endif
+
+#ifndef CHIMERA_MAX_RAG_K
+// Search result count. sqlite-vec's own KNN limit.
+#define CHIMERA_MAX_RAG_K 4096
 #endif
 
 #ifndef CHIMERA_MAX_RAG_CHUNKS

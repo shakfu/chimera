@@ -148,10 +148,9 @@ public:
         const llama_vocab * vocab = llama_model_get_vocab(model_.get());
         const auto prompt_tokens  = ::tokenize(vocab, prompt, /*add_special=*/true, /*parse_special=*/true);
 
-        // LoRA + sampler are cheap to rebuild and reflect the latest opts_
-        // (samplers especially are stateful -- a stale sampler would
-        // carry penalty history from the previous call).
-        auto loras   = load_loras(model_.get(), ctx_.get(), opts_.lora_adapters);
+        // Sampler is rebuilt per call: it is stateful, and a stale one
+        // would carry penalty history from the previous call.
+        sync_loras_();
         auto sampler = make_sampler(model_.get(), opts_);
 
         decode_tokens(ctx_.get(), prompt_tokens, static_cast<int32_t>(opts_.n_batch));
@@ -169,6 +168,8 @@ public:
     void reset(bool rebuild = false) {
         if (rebuild) {
             ctx_.reset();
+            loras_ = {};
+            loras_synced_ = false;
         } else if (ctx_) {
             llama_memory_clear(llama_get_memory(ctx_.get()), /*data=*/true);
         }
@@ -214,9 +215,26 @@ private:
         ctx_ = new_llama_context(model_.get(), opts_, /*min_prompt_tokens=*/0);
     }
 
+    // ctx_ keeps raw pointers to the attached adapters, so they live here,
+    // not in generate(). Reload only when opts_.lora_adapters changes, and
+    // detach before freeing the old set.
+    void sync_loras_() {
+        if (loras_synced_ && lora_specs_ == opts_.lora_adapters) return;
+        llama_set_adapters_lora(ctx_.get(), nullptr, 0, nullptr);
+        loras_ = {};
+        loras_synced_ = false;
+        loras_ = load_loras(model_.get(), ctx_.get(), opts_.lora_adapters);
+        lora_specs_   = opts_.lora_adapters;
+        loras_synced_ = true;
+    }
+
     LlamaCommonOptions opts_;
     LlamaModelPtr      model_;
     LlamaContextPtr    ctx_;
+    // Declared after model_: freeing an adapter touches the model.
+    LoraAdapters             loras_;
+    std::vector<std::string> lora_specs_;
+    bool                     loras_synced_ = false;
 };
 
 // -------------------------------------------------------------------------
