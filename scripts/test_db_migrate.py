@@ -250,11 +250,41 @@ def db_status(db_path: Path) -> subprocess.Popen:
 
 def check_concurrent_fresh(db_path: Path, n: int = 8) -> None:
     """n processes migrate one fresh DB at once; all must succeed."""
-    procs = [db_status(db_path) for _ in range(n)]
+    env = os.environ.copy()
+    env["CHIMERA_DB"] = str(db_path)
+    # Output goes to files, not pipes, so waiting on one process never
+    # blocks another on a full pipe.
+    logs = [db_path.with_name(f"status{i}.err") for i in range(n)]
+    procs = []
+    for log in logs:
+        with open(log, "w") as f:
+            procs.append(subprocess.Popen([str(CHIMERA), "db", "status"], env=env,
+                                          stdout=subprocess.DEVNULL, stderr=f))
+    deadline = time.monotonic() + 60
+    hung = []
     for i, p in enumerate(procs):
-        out, err = p.communicate(timeout=60)
+        try:
+            p.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            hung.append(i)
+    if hung:
+        for i in hung:
+            if sys.platform == "darwin":
+                s = subprocess.run(["sample", str(procs[i].pid), "1"],
+                                   capture_output=True, text=True)
+                print(f"--- sample of process {i} (pid {procs[i].pid}) ---\n"
+                      f"{s.stdout}{s.stderr}", file=sys.stderr)
+            procs[i].kill()
+            procs[i].wait()
+        for i, log in enumerate(logs):
+            state = "hung" if i in hung else f"exit {procs[i].returncode}"
+            print(f"--- process {i}: {state}; stderr ---\n{log.read_text()}",
+                  file=sys.stderr)
+        fail(f"concurrent migrate: processes {hung} still running after 60 s")
+    for i, p in enumerate(procs):
         if p.returncode != 0:
-            fail(f"concurrent migrate: process {i} exited {p.returncode}: {err.strip()}")
+            fail(f"concurrent migrate: process {i} exited {p.returncode}: "
+                 f"{logs[i].read_text().strip()}")
     v = sqlite3.connect(db_path).execute("PRAGMA user_version").fetchone()[0]
     if v < 5:
         fail(f"concurrent migrate: user_version {v}, expected >= 5")
