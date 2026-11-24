@@ -18,6 +18,12 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 - **Image routes bound every cost-driving field.** `steps` and `hires_steps` are capped at `CHIMERA_MAX_IMAGE_STEPS` (1000), the hires target and every uploaded image at `CHIMERA_MAX_IMAGE_DIM` per side, and `pm_id_images` at `CHIMERA_MAX_PM_ID_IMAGES` (16). Uploaded images are checked from their header before decoding: a few dozen bytes of PNG could declare 16000x16000 and allocate 768 MB. `hires_upscale_model` is rejected over HTTP, because it is a filesystem path the server would open.
 
+- **Out-of-range numeric request fields return 400.** Integer fields were narrowed without a range check, so RAG `k = 2^32 + 1` wrapped to 1, and a double such as `1e300` was cast to an integer, which is undefined behaviour. Float fields beyond `FLT_MAX` are rejected the same way.
+
+- **SQL text is no longer included in vector-store errors.** `serve` returns these messages to HTTP clients, which exposed the schema.
+
+- **`serve --api-key` reads `CHIMERA_API_KEY`.** A key on the command line is visible to every local user through `ps`.
+
 ### Changed
 
 - **`db status`, `db backup` and `db vacuum` skip ggml backend init.** They never use it, and on the macOS CI VM concurrent Metal device init is the suspected cause of 6 of 8 parallel `db status` processes hanging past 60 s.
@@ -35,6 +41,12 @@ All notable changes to chimera will be documented in this file. Format is loosel
 - **Concurrent first use of a database no longer fails.** Two processes opening a new or older DB both read its schema version, then both applied the same migration; the second failed with "table chats already exists". Each step now takes the write lock first and re-reads the version. Separately, the switch to WAL on a fresh file returned `SQLITE_BUSY` without waiting (SQLite skips the busy handler where waiting could deadlock), so it is retried for up to 5 s.
 
 - **A database written by a newer chimera is refused.** It was used as-is against an older schema.
+
+- **WAL setup on a new database is bounded by 10 s, not 500 tries.** One try can itself wait out the 5 s busy timeout, so the try cap allowed waits of over 40 minutes. The error now names the failing pragma.
+
+- **Persisted chats are written atomically, and only for accepted requests.** A rejected request (4xx) left an empty chat row, and a failure partway through saving a completion left a partial history.
+
+- **A chat-store read error is reported, not treated as "chat not found".** Any step result other than a row returned an empty result, so a locked or corrupt database looked like a missing chat.
 
 - **RAG ingest with `--cache-embeddings` no longer fails with "database is locked".** Each chunk was embedded inside the ingest transaction, and the cache writes through a second connection that cannot take the write lock the first one holds. Both `serve` (`/v1/vector_stores/:name/files`) and `index ingest` now embed every chunk before the transaction opens. Every connection also gets a 5 s busy timeout, so a second writer (the CLI next to a running server) waits instead of failing.
 

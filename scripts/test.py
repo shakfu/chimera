@@ -19,6 +19,9 @@ pointed at via env vars (CHIMERA_TEST_LORA, CHIMERA_TEST_CONTROLNET +
 CHIMERA_TEST_CONTROL_IMAGE, CHIMERA_TEST_PHOTOMAKER + CHIMERA_TEST_PM_ID_DIR).
 See docs/dev/maintenance.md for the full table.
 
+Every chimera command that takes `-t` runs with `-t 2` unless it sets its
+own; CHIMERA_TEST_THREADS=N changes the cap, 0 removes it.
+
 Usage:
   scripts/test.py                # smoke + e2e (where models available)
   scripts/test.py --smoke        # smoke only
@@ -316,6 +319,22 @@ _verbose = False  # toggled by main()
 TIMED_OUT = -1000
 
 
+# Every model-loading subcommand defaults to all cores. Tests cap it so the
+# suite can share the machine; CHIMERA_TEST_THREADS=0 removes the cap.
+_TEST_THREADS = int(os.environ.get("CHIMERA_TEST_THREADS", "2"))
+_THREADED = {"gen", "chat", "embed", "whisper", "sd", "serve", "search"}
+
+
+def cap_threads(cmd: list) -> list:
+    """Append `-t N` to a chimera command that takes it and sets none."""
+    if _TEST_THREADS <= 0 or len(cmd) < 2 or "-t" in cmd or "--threads" in cmd:
+        return cmd
+    sub = str(cmd[1])
+    if sub in _THREADED or (sub == "index" and len(cmd) > 2 and cmd[2] in ("create", "ingest")):
+        return [*cmd, "-t", str(_TEST_THREADS)]
+    return cmd
+
+
 def run_silent(
     cmd: list,
     *,
@@ -338,7 +357,7 @@ def run_silent(
     stderr = None if _verbose else subprocess.DEVNULL
     try:
         proc = subprocess.run(
-            cmd,
+            cap_threads(cmd),
             stdout=stdout,
             stderr=stderr,
             input=stdin,
@@ -372,7 +391,7 @@ def run_capture(
     """Run `cmd`, capture stdout + stderr, return (rc, stdout, stderr)."""
     try:
         proc = subprocess.run(
-            cmd,
+            cap_threads(cmd),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if combined else subprocess.PIPE,
             input=stdin,
@@ -557,7 +576,7 @@ def chimera_serve(
     ]
 
     with open(log_path, "wb") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+        proc = subprocess.Popen(cap_threads(cmd), stdout=log, stderr=subprocess.STDOUT,
                                 env={**os.environ, **env} if env else None)
     base = f"http://127.0.0.1:{port}"
 
@@ -1098,11 +1117,11 @@ def e2e_embed_tests(rec: Recorder, chimera: Path) -> None:
             ]
             with open(out1, "wb") as fh:
                 p1 = subprocess.run(
-                    cmd, stdout=fh, stderr=subprocess.DEVNULL, timeout=60
+                    cap_threads(cmd), stdout=fh, stderr=subprocess.DEVNULL, timeout=60
                 )
             with open(out2, "wb") as fh:
                 p2 = subprocess.run(
-                    cmd, stdout=fh, stderr=subprocess.DEVNULL, timeout=60
+                    cap_threads(cmd), stdout=fh, stderr=subprocess.DEVNULL, timeout=60
                 )
             if p1.returncode != 0 or p2.returncode != 0:
                 t.fail(f"embed exit codes: {p1.returncode}, {p2.returncode}")
@@ -1896,7 +1915,15 @@ def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
 
                 # Case 5: no header, upstream rejects the body. The DB-state
                 # check below fails if this left an empty chat row.
+                def count_chats() -> int:
+                    conn = sqlite3.connect(str(chat_db))
+                    try:
+                        return conn.execute("SELECT COUNT(*) FROM chats").fetchone()[0]
+                    finally:
+                        conn.close()
+
                 with maybe(rec, names[5]) as t:
+                    before = count_chats()
                     r = http_post_json(
                         f"{srv.base_url}/v1/chat/completions",
                         {"model": "any", "messages": "not-a-list", "stream": False},
@@ -1906,6 +1933,8 @@ def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
                         t.fail(f"got HTTP {r.status}")
                     if r.headers.get("x-chimera-chat-id"):
                         t.fail(f"chat id issued for a rejected request: {r.headers}")
+                    if (after := count_chats()) != before:
+                        t.fail(f"chats went {before} -> {after}")
 
         except RuntimeError as e:
             for n in names[:4] + names[5:]:  # interactive cases; DB state below

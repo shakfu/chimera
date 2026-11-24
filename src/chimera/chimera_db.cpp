@@ -8,8 +8,10 @@
 #include "sqlite3.h"
 #include "sqlite-vec.h"
 
+#include <chrono>
 #include <cstdlib>     // std::getenv
 #include <filesystem>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -413,13 +415,21 @@ Connection open_and_migrate(const std::string & path) {
     // Pragmas applied before migrations so the DDL runs in WAL mode.
     // On a fresh (rollback-mode) file, concurrent openers can deadlock on the
     // switch; SQLite then returns SQLITE_BUSY without the busy handler.
-    for (int tries = 0;; ++tries) {
-        const int wal_rc = sqlite3_exec(conn.get(), "PRAGMA journal_mode = WAL",
-                                        nullptr, nullptr, nullptr);
-        if (wal_rc != SQLITE_BUSY || tries == 500) break;
-        sqlite3_sleep(10);
+    // Bounded by time: one attempt can itself wait out the busy timeout.
+    // Jitter keeps the openers from retrying in step.
+    const auto wal_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::minstd_rand jitter(std::random_device{}());
+    int wal_rc;
+    while ((wal_rc = sqlite3_exec(conn.get(), "PRAGMA journal_mode = WAL",
+                                  nullptr, nullptr, nullptr)) == SQLITE_BUSY &&
+           std::chrono::steady_clock::now() < wal_deadline) {
+        sqlite3_sleep(5 + static_cast<int>(jitter() % 20));
     }
-    exec_or_throw(conn.get(), "PRAGMA journal_mode = WAL");
+    if (wal_rc != SQLITE_OK) {
+        fail(ExitCode::Runtime, "sqlite 'PRAGMA journal_mode = WAL' on '" + path +
+                                    "' failed (" + std::to_string(wal_rc) + "): " +
+                                    sqlite3_errmsg(conn.get()));
+    }
     exec_or_throw(conn.get(), "PRAGMA synchronous = NORMAL");
     exec_or_throw(conn.get(), "PRAGMA foreign_keys = ON");
 

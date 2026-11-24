@@ -269,11 +269,6 @@ def check_concurrent_fresh(db_path: Path, n: int = 8) -> None:
             hung.append(i)
     if hung:
         for i in hung:
-            if sys.platform == "darwin":
-                s = subprocess.run(["sample", str(procs[i].pid), "1"],
-                                   capture_output=True, text=True)
-                print(f"--- sample of process {i} (pid {procs[i].pid}) ---\n"
-                      f"{s.stdout}{s.stderr}", file=sys.stderr)
             procs[i].kill()
             procs[i].wait()
         for i, log in enumerate(logs):
