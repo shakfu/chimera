@@ -20,6 +20,8 @@ All notable changes to chimera will be documented in this file. Format is loosel
 
 ### Changed
 
+- **`db status`, `db backup` and `db vacuum` skip ggml backend init.** They never use it, and on the macOS CI VM concurrent Metal device init is the suspected cause of 6 of 8 parallel `db status` processes hanging past 60 s.
+
 - **Unset `--threads` uses the core count in `gen`, `chat`, `embed` and `sd`.** chimera passed -1 through, and ggml treats any value <= 0 as 4 threads. They now resolve it the way `serve` already did; `sd` keeps sd.cpp's physical-core default.
 
 - **`serve` returns 400 for request errors raised by the stores.** `ChimeraError(BadInput)` (duplicate collection, dimension mismatch, bad search mode) fell through `ex_wrapper` as 500. Search `k` above 4096, sqlite-vec's limit, is now a 400 instead of a 500 from inside the query.

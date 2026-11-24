@@ -3196,10 +3196,17 @@ int main(int argc, char ** argv) {
         if (verbose) {
             restore_default_logging();
         }
-        llama_backend_init();
-        backend_initialized = true;
+        // `db` never touches ggml. Concurrent Metal device init is the
+        // suspected cause of parallel `db status` hangs on the macOS CI VM.
+        const bool needs_backend = !(parsed.db_status_cmd->parsed() ||
+                                     parsed.db_backup_cmd->parsed() ||
+                                     parsed.db_vacuum_cmd->parsed());
+        if (needs_backend) {
+            llama_backend_init();
+            backend_initialized = true;
+        }
         const int rc = dispatch_cli(parsed);
-        llama_backend_free();
+        if (backend_initialized) llama_backend_free();
         return rc;
     } catch (const CLI::ParseError & e) {
         if (backend_initialized) llama_backend_free();
