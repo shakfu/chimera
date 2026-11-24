@@ -43,7 +43,8 @@ void exec(sqlite3 * db, const std::string & sql) {
     if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
         const std::string msg = err ? err : sqlite3_errmsg(db);
         if (err) sqlite3_free(err);
-        fail(ExitCode::Runtime, "sqlite exec failed: " + msg + " (SQL: " + sql + ")");
+        // No SQL text: ex_wrapper returns this message to HTTP clients.
+        fail(ExitCode::Runtime, "sqlite exec failed: " + msg);
     }
 }
 

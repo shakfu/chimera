@@ -413,7 +413,7 @@ Pass `--api-key <token>` to require a bearer token on `/v1/*` requests:
 chimera serve -m model.gguf --api-key sk-chimera-local-dev
 ```
 
-Clients then send `Authorization: Bearer sk-chimera-local-dev`. The OpenAI SDK does this automatically when you set `api_key=`. `/health` and `/v1/health` remain open (they're liveness probes).
+Or set `CHIMERA_API_KEY=sk-chimera-local-dev`, which keeps the key out of the process list (`ps` shows argv to every user). Clients then send `Authorization: Bearer sk-chimera-local-dev`. The OpenAI SDK does this automatically when you set `api_key=`. `/health` and `/v1/health` remain open (they're liveness probes).
 
 Without `--api-key`, the server accepts any request — fine for a local session, dangerous on a public network. Run behind a reverse proxy or VPN for anything non-trivial.
 

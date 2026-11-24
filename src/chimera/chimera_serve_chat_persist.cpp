@@ -114,6 +114,9 @@ void persist_completed_chat(ChatPersistContext * cpc,
             cpc->db_path.empty() ? chimera_db::default_path() : cpc->db_path);
 
         std::lock_guard<std::mutex> lk(cpc->mutex);
+        // One exchange, one transaction: a failure midway used to leave the
+        // user turns on disk without the reply.
+        chimera_vector_store::Transaction txn(conn.get(), "persist_chat");
 
         const auto & msgs = req_body["messages"];
         if (append_full_history) {
@@ -136,6 +139,7 @@ void persist_completed_chat(ChatPersistContext * cpc,
         chimera_chat_store::append_message(
             conn.get(), chat_id, "assistant", assistant_content,
             assistant_reasoning, /*media_json=*/"", tokens_in, tokens_out);
+        txn.commit();
     } catch (const std::exception & e) {
         std::fprintf(stderr, "chimera serve: persist_completed_chat failed: %s\n",
                      e.what());
@@ -280,8 +284,8 @@ std::string lookup_header_ci(const std::map<std::string, std::string> & headers,
 
 // Wraps server_routes::post_chat_completions so each successful exchange
 // is saved to the chats + messages tables. Behaviour:
-//   - No X-Chimera-Chat-Id on the request: create a new chats row before
-//     calling inner, echo its id back as X-Chimera-Chat-Id on the
+//   - No X-Chimera-Chat-Id on the request: create a new chats row once
+//     inner succeeds, echo its id back as X-Chimera-Chat-Id on the
 //     response, persist *all* request messages plus the assistant reply.
 //   - X-Chimera-Chat-Id present and refers to an existing chat: reuse
 //     it; persist only the last message in the body plus the assistant
@@ -334,15 +338,17 @@ server_http_context::handler_t make_persisting_chat_handler(
                 return res;
             }
             append_full_hist = false;
-        } else {
-            // Create the row up-front so we can advertise the id on the
-            // response header before streaming starts. If creation fails
-            // we still serve the response — the header is just omitted.
-            client_chat_id = create_chat_row_for_request(cpc, req_body);
         }
 
         auto res = inner(req);
         if (!res || res->status >= 300) return res;
+
+        // Created only after inner() succeeds, so a rejected request leaves
+        // no empty row. Still before the stream body, so the header reaches
+        // streaming clients. If creation fails the header is omitted.
+        if (append_full_hist) {
+            client_chat_id = create_chat_row_for_request(cpc, req_body);
+        }
 
         if (client_chat_id != 0) {
             res->headers[X_CHAT_ID_HEADER] = std::to_string(client_chat_id);

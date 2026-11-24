@@ -275,11 +275,13 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <ctime>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -352,30 +354,51 @@ server_http_context::handler_t ex_wrapper(server_http_context::handler_t func) {
 // drive both routes. Live here (always compiled) rather than in
 // chimera_serve_images.cpp because chimera_serve_rag.cpp also uses them,
 // and the RAG handler must keep working when CHIMERA_HAS_SD is undefined.
-int coerce_int(const json & v, int dflt) {
-    if (v.is_number_integer())  return v.get<int>();
-    if (v.is_number_unsigned()) return static_cast<int>(v.get<unsigned>());
-    if (v.is_number_float())    return static_cast<int>(v.get<double>());
-    if (v.is_string()) {
-        try { return std::stoi(v.get<std::string>()); } catch (...) {}
-    }
-    return dflt;
+// Out-of-range numbers are a 400 (ex_wrapper maps invalid_argument), not a
+// wrapped or undefined cast: 4294967297 used to read as 1, and 1e300 is UB.
+[[noreturn]] static void numeric_out_of_range(const json & v) {
+    throw std::invalid_argument("numeric field out of range: " + v.dump().substr(0, 64));
 }
 
 int64_t coerce_int64(const json & v, int64_t dflt) {
     if (v.is_number_integer())  return v.get<int64_t>();
-    if (v.is_number_unsigned()) return static_cast<int64_t>(v.get<uint64_t>());
-    if (v.is_number_float())    return static_cast<int64_t>(v.get<double>());
+    if (v.is_number_unsigned()) {
+        const uint64_t u = v.get<uint64_t>();
+        if (u > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) numeric_out_of_range(v);
+        return static_cast<int64_t>(u);
+    }
+    if (v.is_number_float()) {
+        const double d = v.get<double>();
+        // 2^63 is exact in double; the negated comparison also rejects NaN.
+        if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0)) numeric_out_of_range(v);
+        return static_cast<int64_t>(d);
+    }
     if (v.is_string()) {
-        try { return std::stoll(v.get<std::string>()); } catch (...) {}
+        try { return std::stoll(v.get<std::string>()); }
+        catch (const std::out_of_range &) { numeric_out_of_range(v); }
+        catch (...) {}
     }
     return dflt;
 }
 
+int coerce_int(const json & v, int dflt) {
+    const int64_t i = coerce_int64(v, dflt);
+    if (i < std::numeric_limits<int>::min() || i > std::numeric_limits<int>::max()) {
+        numeric_out_of_range(v);
+    }
+    return static_cast<int>(i);
+}
+
 float coerce_float(const json & v, float dflt) {
-    if (v.is_number())  return v.get<float>();
+    if (v.is_number()) {
+        const double d = v.get<double>();
+        if (!(std::fabs(d) <= std::numeric_limits<float>::max())) numeric_out_of_range(v);
+        return static_cast<float>(d);
+    }
     if (v.is_string()) {
-        try { return std::stof(v.get<std::string>()); } catch (...) {}
+        try { return std::stof(v.get<std::string>()); }
+        catch (const std::out_of_range &) { numeric_out_of_range(v); }
+        catch (...) {}
     }
     return dflt;
 }

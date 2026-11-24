@@ -104,7 +104,11 @@ std::optional<Chat> load_chat(sqlite3 * db, int64_t chat_id) {
         sqlite_throw(db, "prepare(load_chat)");
     }
     sqlite3_bind_int64(q.get(), 1, chat_id);
-    if (sqlite3_step(q.get()) != SQLITE_ROW) return std::nullopt;
+    // Only DONE means "no row"; BUSY or I/O errors must not read as a 404.
+    if (const int rc = sqlite3_step(q.get()); rc != SQLITE_ROW) {
+        if (rc == SQLITE_DONE) return std::nullopt;
+        sqlite_throw(db, "step(load_chat)");
+    }
     return row_to_chat(q.get());
 }
 
@@ -118,7 +122,11 @@ std::optional<Chat> latest_chat(sqlite3 * db) {
     if (sqlite3_prepare_v2(db, sql, -1, q.out(), nullptr) != SQLITE_OK) {
         sqlite_throw(db, "prepare(latest_chat)");
     }
-    if (sqlite3_step(q.get()) != SQLITE_ROW) return std::nullopt;
+    // Only DONE means "no row"; BUSY or I/O errors must not read as a 404.
+    if (const int rc = sqlite3_step(q.get()); rc != SQLITE_ROW) {
+        if (rc == SQLITE_DONE) return std::nullopt;
+        sqlite_throw(db, "step(latest_chat)");
+    }
     return row_to_chat(q.get());
 }
 
@@ -196,9 +204,10 @@ int64_t append_message(sqlite3 *           db,
                        bool                partial) {
     // Wrap in a transaction so the (compute-next-seq, insert, touch_chat)
     // triple is atomic. Concurrent writers (we don't have any today) would
-    // otherwise race on seq.
+    // otherwise race on seq. A savepoint, so it nests inside a caller's
+    // transaction (serve persists a whole exchange atomically).
     char * err = nullptr;
-    if (sqlite3_exec(db, "BEGIN", nullptr, nullptr, &err) != SQLITE_OK) {
+    if (sqlite3_exec(db, "SAVEPOINT append_message", nullptr, nullptr, &err) != SQLITE_OK) {
         const std::string m = err ? err : "begin failed";
         if (err) sqlite3_free(err);
         fail(ExitCode::Runtime, "append_message begin: " + m);
@@ -247,12 +256,13 @@ int64_t append_message(sqlite3 *           db,
         // Bump updated_at without another prepare; reuse touch_chat.
         touch_chat(db, chat_id);
 
-        if (sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        if (sqlite3_exec(db, "RELEASE append_message", nullptr, nullptr, nullptr) != SQLITE_OK) {
             sqlite_throw(db, "commit(append_message)");
         }
         return msg_id;
     } catch (...) {
-        sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+        sqlite3_exec(db, "ROLLBACK TO append_message", nullptr, nullptr, nullptr);
+        sqlite3_exec(db, "RELEASE append_message", nullptr, nullptr, nullptr);
         throw;
     }
 }

@@ -1806,6 +1806,7 @@ def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
         "X-Chimera-Chat-Id unknown id -> 404",
         "X-Chimera-Chat-Id malformed -> 400",
         "X-Chimera-Chat-Id DB state (1 chat, 4 messages)",
+        "persist: rejected request -> 4xx, no chat row",
     ]
     if not GEN_MODEL.is_file():
         for n in names:
@@ -1893,8 +1894,21 @@ def e2e_chat_id_header_tests(rec: Recorder, chimera: Path) -> None:
                     if r.status != 400:
                         t.fail(f"got HTTP {r.status}")
 
+                # Case 5: no header, upstream rejects the body. The DB-state
+                # check below fails if this left an empty chat row.
+                with maybe(rec, names[5]) as t:
+                    r = http_post_json(
+                        f"{srv.base_url}/v1/chat/completions",
+                        {"model": "any", "messages": "not-a-list", "stream": False},
+                        timeout=30,
+                    )
+                    if not 400 <= r.status < 500:
+                        t.fail(f"got HTTP {r.status}")
+                    if r.headers.get("x-chimera-chat-id"):
+                        t.fail(f"chat id issued for a rejected request: {r.headers}")
+
         except RuntimeError as e:
-            for n in names[:-1]:  # all four interactive cases failed; DB state below
+            for n in names[:4] + names[5:]:  # interactive cases; DB state below
                 rec.fail(n, 0.0, str(e))
 
         # DB state: 1 chat + 4 messages (2 from case 1, 2 from case 2's
@@ -2080,6 +2094,7 @@ def e2e_rag_serve_tests(rec: Recorder, chimera: Path) -> None:
         "serve rag: hybrid search returns hits",
         "serve rag: duplicate collection -> 400 (store BadInput, not 500)",
         "serve rag: k over CHIMERA_MAX_RAG_K -> 400",
+        "serve rag: k = 2^32 + 1 and 1e300 -> 400 (no wrap, no UB cast)",
     ]
     if not any(rec.matches(n) for n in labels):
         return
@@ -2118,6 +2133,11 @@ def e2e_rag_serve_tests(rec: Recorder, chimera: Path) -> None:
                     r = http_post_json(f"{vs}/c/search", {"query": "lambda", "k": 5000})
                     if r.status != 400:
                         t.fail(f"HTTP {r.status}: {r.body[:200]!r}")
+                with maybe(rec, labels[6]) as t:
+                    for k in (4294967297, 1e300):
+                        r = http_post_json(f"{vs}/c/search", {"query": "lambda", "k": k})
+                        if r.status != 400 or "out of range" not in r.body:
+                            t.fail(f"k={k}: HTTP {r.status}: {r.body[:200]!r}")
         except RuntimeError as e:
             for n in labels:
                 rec.fail(n, 0.0, str(e))
@@ -2176,6 +2196,33 @@ def e2e_cors_default_tests(rec: Recorder, chimera: Path) -> None:
                         t.fail("server stopped")
     except RuntimeError as e:
         rec.fail("cors", 0.0, str(e))
+
+
+def e2e_api_key_env_tests(rec: Recorder, chimera: Path) -> None:
+    labels = [
+        "api key: CHIMERA_API_KEY set, no bearer -> 401",
+        "api key: CHIMERA_API_KEY set, matching bearer -> 200",
+    ]
+    if not any(rec.matches(n) for n in labels):
+        return
+    if not GEN_MODEL.is_file():
+        for n in labels:
+            rec.skip(n, f"missing {GEN_MODEL}")
+        return
+    try:
+        with chimera_serve(chimera, ["-m", str(GEN_MODEL)],
+                           env={"CHIMERA_API_KEY": "sk-test-env"}) as srv:
+            for label, headers, want in (
+                (labels[0], {}, 401),
+                (labels[1], {"Authorization": "Bearer sk-test-env"}, 200),
+            ):
+                with maybe(rec, label) as t:
+                    r = http_request(f"{srv.base_url}/v1/models", headers=headers)
+                    if r.status != want:
+                        t.fail(f"got HTTP {r.status}, want {want}: {r.body[:160]!r}")
+    except RuntimeError as e:
+        for n in labels:
+            rec.fail(n, 0.0, str(e))
 
 
 # ============================================================================
@@ -3381,6 +3428,7 @@ _SECTIONS = [
     ("moe_slot_env", e2e_moe_slot_env_tests),
     ("model_alias", e2e_model_alias_tests),
     ("cors_default", e2e_cors_default_tests),
+    ("api_key_env", e2e_api_key_env_tests),
     ("rag_serve", e2e_rag_serve_tests),
     ("upstream_route_aliases", e2e_upstream_route_aliases),
     ("decision_models", e2e_decision_model_tests),

@@ -2727,8 +2727,10 @@ void bind_serve_cmd(CLI::App & app, ParsedCli & p) {
     cmd->add_option("--gpu-layers", p.serve_opts.gpu_layers, "Layers to offload");
     cmd->add_option("--parallel", p.serve_opts.parallel,
         "Number of concurrent request slots");
+    // The env var keeps the key out of argv, which `ps` shows to every user.
     cmd->add_option("--api-key", p.serve_opts.api_key,
-        "Bearer token required on /v1/* requests (empty = no auth)");
+        "Bearer token required on /v1/* requests (empty = no auth)")
+        ->envname("CHIMERA_API_KEY");
     cmd->add_option("--cors-origins", p.serve_opts.cors_origins,
         "Browser origins allowed to call the API: 'localhost' (same-origin only), "
         "'*' (any), or a comma list such as 'tauri://localhost'")

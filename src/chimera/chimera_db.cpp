@@ -371,21 +371,19 @@ void migrate(sqlite3 * db, int target) {
 namespace {
 
 // Register sqlite-vec as an auto-extension exactly once per process.
-// All future connections will load it automatically on open.
+// All future connections will load it automatically on open. A function-local
+// static is initialized once even when two serve workers open the DB first.
 void register_sqlite_vec_once() {
-    static bool registered = false;
-    if (registered) return;
     // The cast-to-void(*)() suppresses a -Wcast-function-type warning
     // on gcc; the underlying signature matches what sqlite3_auto_extension
     // expects (an extension entry point).
-    const int rc = sqlite3_auto_extension(
+    static const int rc = sqlite3_auto_extension(
         reinterpret_cast<void (*)()>(sqlite3_vec_init));
     if (rc != SQLITE_OK) {
         fail(ExitCode::Runtime,
              "sqlite3_auto_extension(sqlite3_vec_init) failed: rc=" +
                  std::to_string(rc));
     }
-    registered = true;
 }
 
 }  // namespace
